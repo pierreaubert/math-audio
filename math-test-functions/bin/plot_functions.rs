@@ -10,7 +10,7 @@ use directories::ProjectDirs;
 
 
 // Import the test functions and metadata
-use autoeq_testfunctions::{FunctionMetadata, functions, get_function_metadata};
+use math_test_functions::{FunctionMetadata, functions, get_function_metadata};
 
 type TestFunction = fn(&Array1<f64>) -> f64;
 

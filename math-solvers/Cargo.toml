@@ -25,22 +25,19 @@ ndarray-linalg = { workspace = true, optional = true }
 # Parallel processing
 rayon = { workspace = true, optional = true }
 
-# WASM-specific dependencies
-wasm-bindgen = { workspace = true, optional = true }
-wasm-bindgen-rayon = { workspace = true, optional = true }
-
 # Error handling
 thiserror = { workspace = true }
-
-# Serialization
-serde = { workspace = true }
 
 # Logging
 log = { workspace = true }
 
+# WASM feature: enables parallel processing via wasm-bindgen-rayon
+# WASM-specific dependencies
+wasm-bindgen = { workspace = true, optional = true }
+wasm-bindgen-rayon = { workspace = true, optional = true }
+
 [dev-dependencies]
 approx = { workspace = true }
-rand = { workspace = true }
 
 [features]
 default = ["native"]
@@ -56,7 +53,6 @@ native = [
 # Parallel processing (works with both native and wasm)
 parallel = ["rayon"]
 
-# WASM feature: enables parallel processing via wasm-bindgen-rayon
 wasm = [
     "rayon",
     "wasm-bindgen",

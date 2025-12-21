@@ -15,13 +15,8 @@ path = "src/lib.rs"
 
 [dependencies]
 num-complex = { workspace = true, features = ["serde"] }
-num-traits = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-thiserror = { workspace = true }
-
-# Special functions for Bessel, Hankel, Legendre
-special = { workspace = true }
 spec_math = { workspace = true }
 
 [dev-dependencies]

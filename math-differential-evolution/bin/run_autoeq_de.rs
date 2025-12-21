@@ -3,7 +3,7 @@ use autoeq_de::{
     differential_evolution,
     function_registry::{FunctionRegistry, TestFunction},
 };
-use autoeq_testfunctions::{FunctionMetadata, get_function_metadata};
+use math_test_functions::{FunctionMetadata, get_function_metadata};
 use clap::{Parser, ValueEnum};
 use ndarray::Array1;
 use std::fmt::Write as FmtWrite;

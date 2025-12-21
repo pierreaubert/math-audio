@@ -40,7 +40,7 @@ fn get_records_dir() -> Result<std::path::PathBuf, String> {
 }
 
 // Import the test functions and metadata
-use autoeq_testfunctions::{FunctionMetadata, get_function_metadata};
+use math_test_functions::{FunctionMetadata, get_function_metadata};
 
 // Import shared function registry
 use autoeq_de::function_registry::TestFunction;

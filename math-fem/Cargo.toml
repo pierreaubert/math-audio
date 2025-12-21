@@ -30,7 +30,6 @@ spec_math = { workspace = true }
 # Core numerical computing
 ndarray = { workspace = true }
 num-complex = { workspace = true, features = ["serde"] }
-num-traits = { workspace = true }
 
 # Parallel processing
 rayon = { workspace = true, optional = true }
@@ -52,12 +51,7 @@ clap = { workspace = true, optional = true }
 # Serialization (for JSON output)
 serde_json = { workspace = true }
 
-# Time/date for metadata
-chrono = { workspace = true }
-
 [dev-dependencies]
-approx = { workspace = true }
-rand = { workspace = true }
 criterion = { workspace = true }
 
 [[bin]]

@@ -1,5 +1,5 @@
 use autoeq_de::{DEConfigBuilder, Strategy, run_recorded_differential_evolution};
-use autoeq_testfunctions::*;
+use math_test_functions::*;
 use clap::{Arg, Command};
 use ndarray::Array1;
 use std::collections::HashMap;

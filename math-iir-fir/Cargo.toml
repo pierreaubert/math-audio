@@ -9,7 +9,6 @@ license = { workspace = true }
 
 [dependencies]
 ndarray = { workspace = true }
-num-complex = { workspace = true }
 serde = { workspace = true }
 base64 = { workspace = true }
 byteorder = { workspace = true }

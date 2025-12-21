@@ -6,7 +6,7 @@ mod tests {
         DEConfig, DEConfigBuilder, Mutation, Strategy, differential_evolution,
         run_recorded_differential_evolution,
     };
-    use autoeq_testfunctions::{get_function_bounds_2d, get_function_bounds_vec, rosenbrock};
+    use math_test_functions::{get_function_bounds_2d, get_function_bounds_vec, rosenbrock};
 
     /// Example test showing how to use metadata for bounds
     #[test]

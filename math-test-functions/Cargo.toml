@@ -1,6 +1,6 @@
 [package]
 name = "math-test-functions"
-version = "0.2.38"
+version = "0.2.39"
 description = "A collection of non linear functions for testing optimisation algorithms"
 edition = { workspace = true }
 repository = { workspace = true }
@@ -10,9 +10,6 @@ license = { workspace = true }
 [dependencies]
 ndarray = { workspace = true }
 clap = { workspace = true, features = ["derive"] }
-serde = { workspace = true}
-serde_json = { workspace = true}
-regex = { workspace = true}
 plotly = { workspace = true}
 directories = { workspace = true}
 plotly_static = { version = "0.1", features = ["chromedriver", "webdriver_download"], optional = true }
@@ -22,7 +19,7 @@ default = []
 plotly_static = ["dep:plotly_static"]
 
 [lib]
-name = "autoeq_testfunctions"
+name = "math_test_functions"
 path = "src/lib.rs"
 
 [[bin]]

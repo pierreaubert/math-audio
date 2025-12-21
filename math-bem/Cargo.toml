@@ -1,6 +1,6 @@
 [package]
 name = "math-bem"
-version = "0.2.6"
+version = "0.2.7"
 edition = { workspace = true }
 authors = { workspace = true }
 description = "High-performance Boundary Element Method library for acoustic scattering"
@@ -34,9 +34,6 @@ math-wave = { workspace = true }
 # Core numerical computing
 ndarray = { workspace = true }
 num-complex = { workspace = true, features = ["serde"] }
-num-traits = { workspace = true }
-special = { workspace = true }
-spec_math = { workspace = true }
 
 # BLAS/LAPACK (native only - not portable to WASM)
 ndarray-linalg = { workspace = true, optional = true }
@@ -67,20 +64,14 @@ chrono = { workspace = true }
 # CLI (optional, native only)
 clap = { workspace = true, optional = true }
 
-# Memory profiling (native only)
-memory-stats = { workspace = true, optional = true }
-
-# System information (native only)
-sysinfo = { workspace = true, optional = true }
-num_cpus = { workspace = true, optional = true }
-
-# Benchmarking
-criterion = { workspace = true, optional = true }
+# feature dependant
+criterion = { workspace = true, optional=true }
+num_cpus = { workspace = true, optional=true }
+memory-stats = { workspace = true, optional=true }
+sysinfo = { workspace = true, optional=true }
 
 [dev-dependencies]
 criterion = { workspace = true, features = ["html_reports"] }
-approx = { workspace = true }
-proptest = { workspace = true }
 directories = { workspace = true }
 
 [features]

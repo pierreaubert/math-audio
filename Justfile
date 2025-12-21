@@ -184,13 +184,13 @@ install-ubuntu-arm64: install-ubuntu-common install-ubuntu-arm64-driver
 publish:
 	cd math-test-functions && cargo publish
 	cd math-differential-evolution && cargo publish
+	cd math-iir-fir && cargo publish
+	cd math-solvers && cargo publish
+	cd math-wave && cargo publish
+	cd math-convex-hull && cargo publish
 	cd math-xem-common && cargo publish
 	cd math-bem && cargo publish
 	cd math-fem && cargo publish
-	cd math-wave && cargo publish
-	cd math-convex-hull && cargo publish
-	cd math-solvers && cargo publish
-	cd math-iir-fir && cargo publish
 
 # ----------------------------------------------------------------------
 # publish

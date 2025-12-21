@@ -1,5 +1,5 @@
 use autoeq_de::{AdaptiveConfig, DEConfigBuilder, Mutation, Strategy, differential_evolution};
-use autoeq_testfunctions::{ackley, quadratic, rosenbrock};
+use math_test_functions::{ackley, quadratic, rosenbrock};
 use ndarray::Array1;
 
 /// Adaptive Differential Evolution Demo

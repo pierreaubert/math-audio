@@ -318,7 +318,7 @@ mod tests {
     use crate::{
         DEConfigBuilder, recorder::OptimizationRecorder, run_recorded_differential_evolution,
     };
-    use autoeq_testfunctions::quadratic;
+    use math_test_functions::quadratic;
     use ndarray::Array1;
 
     #[test]

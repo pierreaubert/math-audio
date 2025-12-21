@@ -2,7 +2,7 @@
 //!
 //! This example tests all the newly added functions beyond the core SFU set
 
-use autoeq_testfunctions::*;
+use math_test_functions::*;
 use ndarray::Array1;
 
 fn main() {
