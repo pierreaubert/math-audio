@@ -13,13 +13,13 @@ members = [
 resolver = "3"
 
 [workspace.package]
-version = "0.5.4"
+version = "0.2.34"
 authors = ["Pierre F. Aubert pierre@spinorama.org"]
-description = "Optimise the sound of your speakers or your headphones"
+description = "Toolkit for audio modelisation"
 edition = "2024"
-documentation = "https://docs.rs/sotf"
+documentation = "https://docs.rs/math-audio"
 license = "GPL-3.0-or-later"
-repository = "https://github.com/pierreaubert/sotf"
+repository = "https://github.com/pierreaubert/math-audio"
 
 [workspace.dependencies]
 
@@ -92,12 +92,12 @@ spec_math = "0.1.6"
 math-iir-fir = { path = "math-iir-fir", version = "0.2" }
 math-differential-evolution = { path = "math-differential-evolution", version = "0.2" }
 math-test-functions = { path = "math-test-functions", version = "0.2" }
-math-bem = { path = "math-bem", version = "0.1" }
-math-convexhull3d = { path = "math-convexhull3d", version = "0.5" }
-math-fem = { path = "math-fem", version = "0.1" }
-math-solvers = { path = "math-solvers", version = "0.1", default-features = false }
-math-wave = { path = "math-wave", version = "0.1" }
-math-xem-common = { path = "math-xem-common", version = "0.1" }
+math-bem = { path = "math-bem", version = "0.2" }
+math-convexhull3d = { path = "math-convexhull3d", version = "0.2" }
+math-fem = { path = "math-fem", version = "0.2" }
+math-solvers = { path = "math-solvers", version = "0.2", default-features = false }
+math-wave = { path = "math-wave", version = "0.2" }
+math-xem-common = { path = "math-xem-common", version = "0.2" }
 
 # Plotting and visualization
 plotly = { version = "0.13.5" }

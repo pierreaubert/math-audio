@@ -1,6 +1,6 @@
 <!-- markdownlint-disable-file MD013 -->
 
-# AutoEQ IIR Filters
+# IIR & FIR Filters
 
 This crate provides IIR (Infinite Impulse Response) filter implementations for audio equalization.
 
