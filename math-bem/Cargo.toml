@@ -38,6 +38,12 @@ num-complex = { workspace = true, features = ["serde"] }
 # BLAS/LAPACK (native only - not portable to WASM)
 ndarray-linalg = { workspace = true, optional = true }
 
+[target.'cfg(target_os = "macos")'.dependencies]
+ndarray-linalg = { workspace = true, optional = true, features = ["openblas-system"] }
+
+[target.'cfg(any(target_os = "linux", target_os = "windows"))'.dependencies]
+ndarray-linalg = { workspace = true, optional = true, features = ["openblas-system"] }
+
 # Parallel processing
 rayon = { workspace = true, optional = true }
 

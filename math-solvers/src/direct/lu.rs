@@ -8,6 +8,9 @@ use ndarray::{Array1, Array2};
 use num_traits::FromPrimitive;
 use thiserror::Error;
 
+#[cfg(feature = "ndarray-linalg")]
+use ndarray_linalg::Solve;
+
 /// Errors that can occur during LU factorization
 #[derive(Error, Debug)]
 pub enum LuError {
@@ -136,8 +139,16 @@ pub fn lu_factorize<T: ComplexField>(a: &Array2<T>) -> Result<LuFactorization<T>
 ///
 /// This is a convenience function that combines factorization and solve.
 pub fn lu_solve<T: ComplexField>(a: &Array2<T>, b: &Array1<T>) -> Result<Array1<T>, LuError> {
-    let factorization = lu_factorize(a)?;
-    factorization.solve(b)
+    #[cfg(feature = "ndarray-linalg")]
+    {
+        a.solve_into(b.clone()).map_err(|_| LuError::SingularMatrix)
+    }
+
+    #[cfg(not(feature = "ndarray-linalg"))]
+    {
+        let factorization = lu_factorize(a)?;
+        factorization.solve(b)
+    }
 }
 
 #[cfg(test)]

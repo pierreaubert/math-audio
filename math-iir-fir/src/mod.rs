@@ -27,10 +27,10 @@
 #![warn(missing_docs)]
 
 // Module declarations
+pub mod denormals;
 mod error;
 mod fir;
 mod iir;
-pub mod denormals;
 
 // Re-export error types
 pub use error::{IirError, Result};

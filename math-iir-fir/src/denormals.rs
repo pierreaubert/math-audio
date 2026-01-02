@@ -17,7 +17,10 @@
 //! ```
 
 #[cfg(target_arch = "x86_64")]
-use std::arch::x86_64::{_mm_getcsr, _mm_setcsr, _MM_DENORMALS_ZERO_MASK, _MM_DENORMALS_ZERO_ON, _MM_FLUSH_ZERO_MASK, _MM_FLUSH_ZERO_ON};
+use std::arch::x86_64::{
+    _MM_DENORMALS_ZERO_MASK, _MM_DENORMALS_ZERO_ON, _MM_FLUSH_ZERO_MASK, _MM_FLUSH_ZERO_ON,
+    _mm_getcsr, _mm_setcsr,
+};
 
 /// A guard that enables Flush-to-Zero (FTZ) and Denormals-Are-Zero (DAZ)
 /// when instantiated, and restores the previous state when dropped.
@@ -45,7 +48,7 @@ impl ScopedFlushToZero {
             // set Denormals Are Zero
             new_csr |= _MM_DENORMALS_ZERO_ON;
             _mm_setcsr(new_csr);
-            
+
             ScopedFlushToZero { original_csr }
         }
 
@@ -53,12 +56,12 @@ impl ScopedFlushToZero {
         unsafe {
             let original_fpcr: u64;
             std::arch::asm!("mrs {}, fpcr", out(reg) original_fpcr);
-            
+
             // Bit 24 is FZ (Flush-to-Zero)
             let new_fpcr = original_fpcr | (1 << 24);
-            
+
             std::arch::asm!("msr fpcr, {}", in(reg) new_fpcr);
-            
+
             ScopedFlushToZero { original_fpcr }
         }
 
@@ -98,7 +101,7 @@ mod tests {
         let _guard = ScopedFlushToZero::new();
         // Just verify it doesn't crash on the current architecture
     }
-    
+
     // It's hard to unit test the actual effect without generating denormals,
     // which the compiler might optimize away or handle differently.
     // We rely on the register manipulation logic being correct.

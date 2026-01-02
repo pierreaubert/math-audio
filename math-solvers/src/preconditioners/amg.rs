@@ -269,7 +269,10 @@ pub struct AmgPreconditioner<T: ComplexField> {
     operator_complexity: f64,
 }
 
-impl<T: ComplexField> AmgPreconditioner<T> {
+impl<T: ComplexField> AmgPreconditioner<T>
+where
+    T::Real: Sync + Send,
+{
     /// Create AMG preconditioner from a CSR matrix
     pub fn from_csr(matrix: &CsrMatrix<T>, config: AmgConfig) -> Self {
         let start = std::time::Instant::now();
@@ -1085,7 +1088,10 @@ impl<T: ComplexField> AmgPreconditioner<T> {
     }
 }
 
-impl<T: ComplexField> Preconditioner<T> for AmgPreconditioner<T> {
+impl<T: ComplexField> Preconditioner<T> for AmgPreconditioner<T>
+where
+    T::Real: Sync + Send,
+{
     fn apply(&self, r: &Array1<T>) -> Array1<T> {
         if self.levels.is_empty() {
             return r.clone();

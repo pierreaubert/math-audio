@@ -1,4 +1,4 @@
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use math_audio_iir_fir::{Biquad, BiquadFilterType, Fir, WindowType};
 
 fn bench_biquad_process(c: &mut Criterion) {
@@ -8,11 +8,11 @@ fn bench_biquad_process(c: &mut Criterion) {
     c.bench_function("biquad_process_loop_write", |b| {
         let mut buffer = input.clone();
         b.iter(|| {
-             buffer.copy_from_slice(&input);
-             for sample in buffer.iter_mut() {
-                 *sample = biquad.process(*sample);
-             }
-             black_box(&buffer);
+            buffer.copy_from_slice(&input);
+            for sample in buffer.iter_mut() {
+                *sample = biquad.process(*sample);
+            }
+            black_box(&buffer);
         })
     });
 
