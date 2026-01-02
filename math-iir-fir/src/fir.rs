@@ -381,6 +381,29 @@ impl Fir {
         y
     }
 
+    /// Processes a block of audio samples in-place.
+    pub fn process_block(&mut self, samples: &mut [f64]) {
+        let n_taps = self.coeffs.len();
+
+        for sample in samples.iter_mut() {
+            let x = *sample;
+            // Store input sample in circular buffer
+            self.state[self.state_pos] = x;
+
+            // Compute output using convolution
+            let mut y = 0.0;
+            for i in 0..n_taps {
+                let state_idx = (self.state_pos + n_taps - i) % n_taps;
+                y += self.coeffs[i] * self.state[state_idx];
+            }
+
+            // Update circular buffer position
+            self.state_pos = (self.state_pos + 1) % n_taps;
+
+            *sample = y;
+        }
+    }
+
     /// Calculates the filter's magnitude response at a single frequency `f`.
     pub fn result(&self, f: f64) -> f64 {
         let omega = 2.0 * PI * f / self.srate;
@@ -409,27 +432,34 @@ impl Fir {
     /// Vectorized version to compute the SPL response for a vector of frequencies.
     ///
     /// # Performance
-    /// This implementation combines real and imaginary calculations in a single loop
-    /// for better cache locality compared to separate loops.
+    /// This implementation avoids per-tap allocations by using a direct nested loop.
     pub fn np_log_result(&self, freq: &Array1<f64>) -> Array1<f64> {
-        let omega = freq * (2.0 * PI / self.srate);
+        let n_freqs = freq.len();
+        let omega_base = 2.0 * PI / self.srate;
 
-        let mut real = Array1::zeros(freq.len());
-        let mut imag = Array1::zeros(freq.len());
+        let mut real: Array1<f64> = Array1::zeros(n_freqs);
+        let mut imag: Array1<f64> = Array1::zeros(n_freqs);
 
-        // Combine both loops for better cache locality
         for (n, &coeff) in self.coeffs.iter().enumerate() {
-            let phase = omega.mapv(|w| -(n as f64) * w);
-            real = real + phase.mapv(f64::cos) * coeff;
-            imag = imag + phase.mapv(f64::sin) * coeff;
+            let n_f = -(n as f64);
+            for i in 0..n_freqs {
+                let phase = n_f * freq[i] * omega_base;
+                real[i] += coeff * phase.cos();
+                imag[i] += coeff * phase.sin();
+            }
         }
 
-        // Compute magnitude
-        let magnitude = (real.mapv(|x: f64| x * x) + imag.mapv(|x: f64| x * x)).mapv(f64::sqrt);
-
-        // Convert to dB
+        // Compute magnitude and convert to dB
+        let mut magnitude = Array1::zeros(n_freqs);
         let min_val = 1.0e-20;
-        magnitude.mapv(|val| val.max(min_val)).mapv(f64::log10) * 20.0
+
+        for i in 0..n_freqs {
+            let mag_sq = real[i] * real[i] + imag[i] * imag[i];
+            let mag = mag_sq.sqrt().max(min_val);
+            magnitude[i] = 20.0 * mag.log10();
+        }
+
+        magnitude
     }
 }
 

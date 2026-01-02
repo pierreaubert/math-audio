@@ -334,6 +334,39 @@ impl Biquad {
         y
     }
 
+    /// Processes a block of audio samples in-place.
+    ///
+    /// This method is more efficient than calling `process` for each sample
+    /// as it avoids repeated struct field access and allows for better optimization.
+    pub fn process_block(&mut self, samples: &mut [f64]) {
+        let b0 = self.b0;
+        let b1 = self.b1;
+        let b2 = self.b2;
+        let a1 = self.a1;
+        let a2 = self.a2;
+        let mut x1 = self.x1;
+        let mut x2 = self.x2;
+        let mut y1 = self.y1;
+        let mut y2 = self.y2;
+
+        for x in samples.iter_mut() {
+            let input = *x;
+            let output = b0 * input + b1 * x1 + b2 * x2 - a1 * y1 - a2 * y2;
+
+            x2 = x1;
+            x1 = input;
+            y2 = y1;
+            y1 = output;
+
+            *x = output;
+        }
+
+        self.x1 = x1;
+        self.x2 = x2;
+        self.y1 = y1;
+        self.y2 = y2;
+    }
+
     /// Calculates the filter's magnitude response at a single frequency `f`.
     pub fn result(&self, f: f64) -> f64 {
         let phi = (PI * f / self.srate).sin().powi(2);
