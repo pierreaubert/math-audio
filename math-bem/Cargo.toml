@@ -32,7 +32,7 @@ math-solvers = { workspace = true, default-features = false }
 math-wave = { workspace = true }
 
 # Core numerical computing
-ndarray = { workspace = true }
+ndarray = { version = "0.17", default-features = false, features = ["rayon", "serde"] }
 num-complex = { workspace = true, features = ["serde"] }
 
 # BLAS/LAPACK (native only - not portable to WASM)

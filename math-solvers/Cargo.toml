@@ -15,7 +15,7 @@ path = "src/lib.rs"
 
 [dependencies]
 # Core numerical computing
-ndarray = { workspace = true }
+ndarray = { version = "0.17", default-features = false, features = ["rayon", "serde"] }
 num-complex = { workspace = true, features = ["serde"] }
 num-traits = { workspace = true }
 

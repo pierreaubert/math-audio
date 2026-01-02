@@ -18,10 +18,11 @@
 
 use clap::{Parser, ValueEnum};
 use math_audio_fem::assembly::{
-    HelmholtzMatrix, MassMatrix, StiffnessMatrix, assemble_mass, assemble_stiffness,
+    HelmholtzAssembler, MassMatrix, StiffnessMatrix, assemble_mass, assemble_stiffness,
+    assemble_boundary_mass,
 };
 use math_audio_fem::basis::PolynomialDegree;
-use math_audio_fem::mesh::{ElementType, Mesh, Point};
+use math_audio_fem::mesh::{ElementType, Mesh, Point, BoundaryType};
 use math_audio_fem::solver::{self, GmresConfigF64, SolverConfig, SolverType};
 use num_complex::Complex64;
 use rayon::prelude::*;
@@ -29,15 +30,25 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
+use std::collections::HashMap;
 
 // Import common types from math-xem-common
 use math_audio_xem_common::{
     Point3D, RoomConfig, RoomSimulation, Source, create_default_config, create_output_json,
-    pressure_to_spl, print_config_summary,
+    pressure_to_spl, print_config_summary, SurfaceConfig, BoundaryConfig,
 };
 
 /// Default source width in meters (Gaussian sigma)
 const DEFAULT_SOURCE_WIDTH: f64 = 0.1;
+
+/// Boundary markers
+const MARKER_FLOOR: i32 = 1;
+const MARKER_CEILING: i32 = 2;
+const MARKER_FRONT: i32 = 3;
+const MARKER_BACK: i32 = 4;
+const MARKER_LEFT: i32 = 5;
+const MARKER_RIGHT: i32 = 6;
+const MARKER_OTHER: i32 = 7;
 
 /// Memory estimation for batch size planning
 #[derive(Debug, Clone)]
@@ -75,10 +86,10 @@ impl MemoryEstimate {
 
         // Stiffness matrix (COO format stored during assembly, then CSR)
         // COO: 3 values per entry (row, col, val)
-        let k_storage = self.k_nnz * (2 * Self::USIZE_SIZE + Self::COMPLEX_SIZE);
+        let k_storage = self.k_nnz * (2 * Self::USIZE_SIZE + Self::F64_SIZE); // Now f64
 
         // Mass matrix
-        let m_storage = self.m_nnz * (2 * Self::USIZE_SIZE + Self::COMPLEX_SIZE);
+        let m_storage = self.m_nnz * (2 * Self::USIZE_SIZE + Self::F64_SIZE); // Now f64
 
         mesh_nodes + mesh_elements + k_storage + m_storage
     }
@@ -487,19 +498,14 @@ struct Args {
     batch_size: usize,
 
     /// Enable warm starting with solution interpolation
-    /// When enabled, uses a hierarchical approach:
-    /// - First pass: solve anchor frequencies (every Nth) from cold start
-    /// - Second pass: solve intermediate frequencies with interpolated initial guess
     #[arg(long)]
     warm_start: bool,
 
     /// Anchor stride for warm starting (solve every Nth frequency first)
-    /// Only used when --warm-start is enabled. Default: 4
     #[arg(long, default_value = "4")]
     anchor_stride: usize,
 
     /// Available system memory in GB for batch size estimation
-    /// Default: auto-detect from system
     #[arg(long)]
     memory_gb: Option<f64>,
 
@@ -510,27 +516,18 @@ struct Args {
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum CliSolverType {
-    /// Direct solver (LU decomposition)
     Direct,
-    /// GMRES iterative solver
     Gmres,
-    /// Pipelined GMRES
     Pipelined,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum CliPreconditionerType {
-    /// ILU(0) preconditioner
     Ilu,
-    /// Jacobi (diagonal) preconditioner
     Jacobi,
-    /// Parallel ILU with graph coloring
     IluColoring,
-    /// Parallel ILU with fixed-point iteration
     IluFixedpoint,
-    /// Additive Schwarz domain decomposition
     Schwarz,
-    /// Algebraic Multigrid (AMG)
     Amg,
 }
 
@@ -550,7 +547,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .expect("Failed to set thread pool");
         println!("Using {} threads (user-specified)\n", threads);
     } else {
-        // On heterogeneous architectures, suggest using P-cores only
         if cpu_info.is_heterogeneous {
             cpu_info.print_info();
             println!();
@@ -577,7 +573,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Convert to simulation
     let simulation = config.to_simulation()?;
 
-    // Determine internal solver type based on CLI arguments
+    // Determine internal solver type
     let internal_solver_type = match (args.solver, args.preconditioner) {
         (CliSolverType::Direct, _) => SolverType::Direct,
         (CliSolverType::Gmres, None) => SolverType::Gmres,
@@ -596,26 +592,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             SolverType::GmresPipelinedIlu
         }
         (CliSolverType::Pipelined, Some(CliPreconditionerType::Jacobi)) => {
-            SolverType::GmresJacobi // fallback to regular Jacobi
+            SolverType::GmresJacobi 
         }
         (CliSolverType::Pipelined, Some(CliPreconditionerType::Schwarz)) => {
-            SolverType::GmresSchwarz // fallback to regular Schwarz
+            SolverType::GmresSchwarz 
         }
         (CliSolverType::Pipelined, Some(CliPreconditionerType::Amg)) => {
             SolverType::GmresPipelinedAmg
         }
         (CliSolverType::Pipelined, Some(CliPreconditionerType::IluColoring)) => {
-            SolverType::GmresIluColoring // fallback
+            SolverType::GmresIluColoring 
         }
         (CliSolverType::Pipelined, Some(CliPreconditionerType::IluFixedpoint)) => {
-            SolverType::GmresIluFixedPoint // fallback
+            SolverType::GmresIluFixedPoint 
         }
     };
 
-    // Get available memory (from CLI or auto-detect)
     let available_memory_gb = args.memory_gb.or_else(get_system_memory_gb);
 
-    // Run simulation
     let output_data = run_fem_simulation(
         &simulation,
         &config,
@@ -631,7 +625,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         args.verbose,
     )?;
 
-    // Save results
     println!("\nSaving results to: {}", args.output.display());
     fs::write(&args.output, serde_json::to_string_pretty(&output_data)?)?;
     println!("Done!");
@@ -711,8 +704,57 @@ fn create_room_mesh(simulation: &RoomSimulation, elements_per_meter: usize) -> M
         }
     }
 
-    // Detect boundaries for Neumann BC (rigid walls)
+    // Detect boundaries (finds all surface faces)
     mesh.detect_boundaries();
+    
+    // Tag boundaries by position
+    // Use epsilon for coordinate comparisons
+    let eps = 1e-6;
+    
+    // Floor: z = 0
+    mesh.set_boundary_condition(BoundaryType::Neumann, MARKER_FLOOR, |pts| {
+        pts.iter().all(|p| p.z.abs() < eps)
+    });
+    
+    // Ceiling: z = height
+    mesh.set_boundary_condition(BoundaryType::Neumann, MARKER_CEILING, |pts| {
+        pts.iter().all(|p| (p.z - height).abs() < eps)
+    });
+    
+    // Front: y = 0
+    mesh.set_boundary_condition(BoundaryType::Neumann, MARKER_FRONT, |pts| {
+        pts.iter().all(|p| p.y.abs() < eps)
+    });
+    
+    // Back: y = depth
+    mesh.set_boundary_condition(BoundaryType::Neumann, MARKER_BACK, |pts| {
+        pts.iter().all(|p| (p.y - depth).abs() < eps)
+    });
+    
+    // Left: x = 0
+    mesh.set_boundary_condition(BoundaryType::Neumann, MARKER_LEFT, |pts| {
+        pts.iter().all(|p| p.x.abs() < eps)
+    });
+    
+    // Right: x = width
+    mesh.set_boundary_condition(BoundaryType::Neumann, MARKER_RIGHT, |pts| {
+        pts.iter().all(|p| (p.x - width).abs() < eps)
+    });
+    
+    // For L-shaped or other rooms, remaining walls (marker 0) can be tagged as OTHER
+    // We update anything still marked as 0
+    mesh.set_boundary_condition(BoundaryType::Neumann, MARKER_OTHER, |pts| {
+        // This predicate is a bit loose but catches "untagged" boundaries
+        // Ideally we check if marker is 0, but set_boundary_condition iterates all.
+        // We can just assume any remaining boundaries are "walls".
+        // However, the helper overwrites if predicate matches.
+        // So we can't easily select "only if not tagged".
+        // Instead, we rely on coordinate checks above being exhaustive for the main 6 planes.
+        // Inner corners of L-shaped room will be caught by x=width1 or y=depth1 checks if implemented?
+        // Actually, inner corners: x=width2 (for y > depth1) or y=depth1 (for x > width2)
+        // Let's add specific tags for L-shaped if needed, or map them to generic "Walls"
+        false // Do nothing for now, assume generic walls will use default or user override
+    });
 
     mesh
 }
@@ -789,16 +831,36 @@ fn run_fem_simulation(
 
     // Assemble stiffness and mass matrices ONCE (frequency-independent)
     // These use parallel assembly internally when "parallel" feature is enabled
-    println!("\nAssembling stiffness and mass matrices (one-time cost)...");
+    println!("\nAssembling system matrices (one-time cost)...");
     let matrix_start = Instant::now();
     let stiffness = assemble_stiffness(&mesh, PolynomialDegree::P1);
     let mass = assemble_mass(&mesh, PolynomialDegree::P1);
+    
+    // Assemble boundary mass matrices for impedance BCs
+    let markers = [
+        MARKER_FLOOR, MARKER_CEILING, MARKER_FRONT, MARKER_BACK, MARKER_LEFT, MARKER_RIGHT
+    ];
+    let mut boundary_matrices = Vec::new();
+    let mut boundary_nnz = 0;
+    
+    for &marker in &markers {
+        let b_mass = assemble_boundary_mass(&mesh, PolynomialDegree::P1, marker);
+        if b_mass.nnz() > 0 {
+            boundary_nnz += b_mass.nnz();
+            boundary_matrices.push((marker as usize, b_mass));
+        }
+    }
+    
+    // Create efficient assembler
+    let assembler = HelmholtzAssembler::from_matrices(&stiffness, &mass, &boundary_matrices);
+    
     let matrix_time = matrix_start.elapsed();
     println!(
-        "  Matrix assembly: {:.1}ms (K: {} nnz, M: {} nnz)",
+        "  Matrix assembly: {:.1}ms (K: {} nnz, M: {} nnz, Boundaries: {} nnz)",
         matrix_time.as_secs_f64() * 1000.0,
         stiffness.nnz(),
-        mass.nnz()
+        mass.nnz(),
+        boundary_nnz
     );
 
     // Memory estimation
@@ -873,11 +935,10 @@ fn run_fem_simulation(
     let progress_counter = AtomicUsize::new(0);
 
     // Process frequencies - either with warm start or cold start
-    let all_results = if warm_start && n_freqs > anchor_stride {
+    let mut all_results = if warm_start && n_freqs > anchor_stride {
         run_hierarchical_solve(
             &mesh,
-            &stiffness,
-            &mass,
+            &assembler,
             &solver_config,
             sources,
             simulation,
@@ -893,7 +954,7 @@ fn run_fem_simulation(
     } else {
         // Original cold-start parallel approach
         println!(
-            "\nProcessing {} frequencies on {} threads (batch size: {})...",
+            "\nProcessing {} frequencies on {} threads (batch size: {})",
             n_freqs,
             rayon::current_num_threads(),
             effective_batch_size
@@ -913,10 +974,10 @@ fn run_fem_simulation(
                     // Solve for this frequency
                     let result = solve_single_frequency(
                         &mesh,
-                        &stiffness,
-                        &mass,
+                        &assembler,
                         &solver_config,
                         sources,
+                        simulation,
                         freq,
                         simulation.wavenumber(freq),
                         source_width,
@@ -980,7 +1041,8 @@ fn run_fem_simulation(
             .fold(0.0f64, |a, b| a.max(b));
         println!(
             "  Average iterations: {:.1}, Max residual: {:.2e}",
-            avg_iters, max_residual
+            avg_iters,
+            max_residual
         );
     }
 
@@ -1002,15 +1064,67 @@ fn run_fem_simulation(
     ))
 }
 
+/// Compute boundary coefficients map for a given frequency
+fn compute_boundary_coefficients(
+    simulation: &RoomSimulation,
+    frequency: f64,
+) -> HashMap<usize, Complex64> {
+    let mut coeffs = HashMap::new();
+    let k = simulation.wavenumber(frequency);
+    let rho_c = 1.21 * simulation.speed_of_sound; // Approx air impedance
+    
+    // Helper to get coefficient from config
+    let get_coeff = |config: &SurfaceConfig| -> Complex64 {
+        match config {
+            SurfaceConfig::Rigid => Complex64::new(0.0, 0.0),
+            SurfaceConfig::Absorption { coefficient } => {
+                let alpha = coefficient.clamp(0.0, 0.999);
+                let sqrt_1_minus_alpha = (1.0 - alpha).sqrt();
+                // Specific impedance Z for normal incidence
+                let z_norm = (1.0 + sqrt_1_minus_alpha) / (1.0 - sqrt_1_minus_alpha);
+                let z = z_norm * rho_c;
+                // Robin alpha = i * k * rho * c / Z
+                Complex64::new(0.0, k * rho_c) / Complex64::new(z, 0.0)
+            },
+            SurfaceConfig::Impedance { real, imag } => {
+                let z = Complex64::new(*real, *imag);
+                Complex64::new(0.0, k * rho_c) / z
+            }
+        }
+    };
+    
+    let b = &simulation.boundaries;
+    
+    // Default walls
+    let wall_coeff = get_coeff(&b.walls);
+    
+    // Apply defaults then overrides
+    // Floor
+    coeffs.insert(MARKER_FLOOR as usize, get_coeff(&b.floor));
+    // Ceiling
+    coeffs.insert(MARKER_CEILING as usize, get_coeff(&b.ceiling));
+    
+    // Walls with overrides
+    coeffs.insert(MARKER_FRONT as usize, b.front_wall.as_ref().map(get_coeff).unwrap_or(wall_coeff));
+    coeffs.insert(MARKER_BACK as usize, b.back_wall.as_ref().map(get_coeff).unwrap_or(wall_coeff));
+    coeffs.insert(MARKER_LEFT as usize, b.left_wall.as_ref().map(get_coeff).unwrap_or(wall_coeff));
+    coeffs.insert(MARKER_RIGHT as usize, b.right_wall.as_ref().map(get_coeff).unwrap_or(wall_coeff));
+    
+    // Other walls (e.g. L-shape inner) use default wall coeff
+    coeffs.insert(MARKER_OTHER as usize, wall_coeff);
+    
+    coeffs
+}
+
 /// Solve for a single frequency (called in parallel)
 ///
 /// Returns (spl_values, iterations, residual)
 fn solve_single_frequency(
     mesh: &Mesh,
-    stiffness: &StiffnessMatrix,
-    mass: &MassMatrix,
+    assembler: &HelmholtzAssembler,
     solver_config: &SolverConfig,
     sources: &[Source],
+    simulation: &RoomSimulation,
     frequency: f64,
     wavenumber: f64,
     source_width: f64,
@@ -1019,22 +1133,21 @@ fn solve_single_frequency(
 ) -> (Vec<f64>, usize, f64) {
     let k = Complex64::new(wavenumber, 0.0);
 
-    // Combine stiffness and mass into Helmholtz matrix: A = K - k²M
-    let helmholtz = HelmholtzMatrix::new(stiffness, mass, k);
+    // Compute boundary coefficients
+    let boundary_coeffs = compute_boundary_coefficients(simulation, frequency);
+
+    // Assemble matrix efficiently
+    let csr = assembler.assemble(k, &boundary_coeffs);
 
     // Assemble RHS for this frequency (parallel over elements)
     let rhs = assemble_rhs_parallel(mesh, sources, frequency, source_width);
-
-    // Create problem struct for solver
-    let problem = math_audio_fem::assembly::HelmholtzProblem {
-        matrix: helmholtz,
-        rhs,
-        stiffness: stiffness.clone(),
-        mass: mass.clone(),
-    };
+    
+    // Convert RHS to Array1
+    let rhs_array = ndarray::Array1::from(rhs);
 
     // Solve the system
-    let solution = solver::solve(&problem, solver_config).expect("Solver failed");
+    let solution = solver::solve_csr_with_guess(&csr, &rhs_array, None, solver_config)
+        .expect("Solver failed");
 
     // Evaluate pressure at all listening positions
     let spl_values: Vec<f64> = listening_positions
@@ -1050,256 +1163,6 @@ fn solve_single_frequency(
     (spl_values, solution.iterations, solution.residual)
 }
 
-/// Assemble RHS vector with parallel element processing
-fn assemble_rhs_parallel(
-    mesh: &Mesh,
-    sources: &[Source],
-    frequency: f64,
-    source_width: f64,
-) -> Vec<Complex64> {
-    use math_audio_fem::basis::{Jacobian, evaluate_shape};
-    use math_audio_fem::quadrature::for_mass;
-
-    let n_dofs = mesh.num_nodes();
-    let n_elems = mesh.num_elements();
-
-    // Compute element contributions in parallel
-    let element_contribs: Vec<Vec<(usize, Complex64)>> = (0..n_elems)
-        .into_par_iter()
-        .map(|elem_idx| {
-            let elem = &mesh.elements[elem_idx];
-            let elem_type = elem.element_type;
-            let vertices = elem.vertices();
-            let n_nodes = vertices.len();
-
-            let quad = for_mass(elem_type, 1); // P1 degree
-
-            let coords: Vec<[f64; 3]> = vertices
-                .iter()
-                .map(|&v| [mesh.nodes[v].x, mesh.nodes[v].y, mesh.nodes[v].z])
-                .collect();
-
-            let mut local_contribs = Vec::with_capacity(n_nodes);
-
-            for qp in quad.iter() {
-                let shape = evaluate_shape(
-                    elem_type,
-                    PolynomialDegree::P1,
-                    qp.xi(),
-                    qp.eta(),
-                    qp.zeta(),
-                );
-                let jac = Jacobian::from_3d(&shape.gradients, &coords);
-
-                // Physical coordinates at quadrature point
-                let x: f64 = shape
-                    .values
-                    .iter()
-                    .zip(&coords)
-                    .map(|(n, c)| n * c[0])
-                    .sum();
-                let y: f64 = shape
-                    .values
-                    .iter()
-                    .zip(&coords)
-                    .map(|(n, c)| n * c[1])
-                    .sum();
-                let z: f64 = shape
-                    .values
-                    .iter()
-                    .zip(&coords)
-                    .map(|(n, c)| n * c[2])
-                    .sum();
-
-                let f_val = compute_source_term(x, y, z, sources, frequency, source_width);
-                let det_j = jac.det.abs();
-
-                for i in 0..n_nodes {
-                    let contrib = f_val * Complex64::new(shape.values[i] * det_j * qp.weight, 0.0);
-                    if contrib.norm() > 1e-15 {
-                        local_contribs.push((vertices[i], contrib));
-                    }
-                }
-            }
-
-            local_contribs
-        })
-        .collect();
-
-    // Merge contributions into final RHS vector
-    let mut rhs = vec![Complex64::new(0.0, 0.0); n_dofs];
-    for contribs in element_contribs {
-        for (node_idx, val) in contribs {
-            rhs[node_idx] += val;
-        }
-    }
-
-    rhs
-}
-
-/// Compute source term at a point from all sources
-fn compute_source_term(
-    x: f64,
-    y: f64,
-    z: f64,
-    sources: &[Source],
-    frequency: f64,
-    source_width: f64,
-) -> Complex64 {
-    let point = Point3D::new(x, y, z);
-    let mut total = Complex64::new(0.0, 0.0);
-
-    for source in sources {
-        // Gaussian source distribution centered at source position
-        let r = source.position.distance_to(&point);
-
-        // Gaussian envelope with configurable width
-        let envelope = (-r * r / (2.0 * source_width * source_width)).exp();
-
-        // Get directional amplitude
-        let amplitude = source.amplitude_towards(&point, frequency);
-
-        total += Complex64::new(amplitude * envelope, 0.0);
-    }
-
-    total
-}
-
-/// Find the element containing a point using parallel search
-///
-/// Uses parallel iteration with early termination via find_map_any
-fn find_containing_element_parallel(mesh: &Mesh, point: Point3D) -> Option<usize> {
-    // Use parallel search with early termination
-    (0..mesh.elements.len())
-        .into_par_iter()
-        .find_map_any(|elem_idx| {
-            let elem = &mesh.elements[elem_idx];
-            if elem.element_type != ElementType::Tetrahedron {
-                return None;
-            }
-
-            let vertices = elem.vertices();
-            if vertices.len() != 4 {
-                return None;
-            }
-
-            let p0 = &mesh.nodes[vertices[0]];
-            let p1 = &mesh.nodes[vertices[1]];
-            let p2 = &mesh.nodes[vertices[2]];
-            let p3 = &mesh.nodes[vertices[3]];
-
-            if compute_barycentric_coords(point, p0, p1, p2, p3).is_some() {
-                Some(elem_idx)
-            } else {
-                None
-            }
-        })
-}
-
-/// Compute barycentric coordinates of a point in a tetrahedron
-/// Returns None if point is outside the tetrahedron
-fn compute_barycentric_coords(
-    p: Point3D,
-    v0: &Point,
-    v1: &Point,
-    v2: &Point,
-    v3: &Point,
-) -> Option<[f64; 4]> {
-    // Vectors from v0
-    let v0p = [p.x - v0.x, p.y - v0.y, p.z - v0.z];
-    let v01 = [v1.x - v0.x, v1.y - v0.y, v1.z - v0.z];
-    let v02 = [v2.x - v0.x, v2.y - v0.y, v2.z - v0.z];
-    let v03 = [v3.x - v0.x, v3.y - v0.y, v3.z - v0.z];
-
-    // Compute determinant of [v01, v02, v03]
-    let det = v01[0] * (v02[1] * v03[2] - v02[2] * v03[1])
-        - v01[1] * (v02[0] * v03[2] - v02[2] * v03[0])
-        + v01[2] * (v02[0] * v03[1] - v02[1] * v03[0]);
-
-    if det.abs() < 1e-15 {
-        return None; // Degenerate tetrahedron
-    }
-
-    let inv_det = 1.0 / det;
-
-    // Solve for barycentric coordinates using Cramer's rule
-    // [lambda1, lambda2, lambda3] = inv([v01, v02, v03]) * v0p
-    // Then lambda0 = 1 - lambda1 - lambda2 - lambda3
-
-    // Cofactor matrix (transposed for inverse)
-    let c00 = v02[1] * v03[2] - v02[2] * v03[1];
-    let c01 = -(v02[0] * v03[2] - v02[2] * v03[0]);
-    let c02 = v02[0] * v03[1] - v02[1] * v03[0];
-
-    let c10 = -(v01[1] * v03[2] - v01[2] * v03[1]);
-    let c11 = v01[0] * v03[2] - v01[2] * v03[0];
-    let c12 = -(v01[0] * v03[1] - v01[1] * v03[0]);
-
-    let c20 = v01[1] * v02[2] - v01[2] * v02[1];
-    let c21 = -(v01[0] * v02[2] - v01[2] * v02[0]);
-    let c22 = v01[0] * v02[1] - v01[1] * v02[0];
-
-    let lambda1 = (c00 * v0p[0] + c10 * v0p[1] + c20 * v0p[2]) * inv_det;
-    let lambda2 = (c01 * v0p[0] + c11 * v0p[1] + c21 * v0p[2]) * inv_det;
-    let lambda3 = (c02 * v0p[0] + c12 * v0p[1] + c22 * v0p[2]) * inv_det;
-    let lambda0 = 1.0 - lambda1 - lambda2 - lambda3;
-
-    // Check if inside (all barycentric coords >= 0, with small tolerance)
-    let tol = -1e-10;
-    if lambda0 >= tol && lambda1 >= tol && lambda2 >= tol && lambda3 >= tol {
-        Some([lambda0, lambda1, lambda2, lambda3])
-    } else {
-        None
-    }
-}
-
-/// Evaluate FEM solution at a specific point using shape function interpolation
-///
-/// If the containing element is known, uses proper barycentric interpolation.
-/// Falls back to nearest-neighbor if element lookup fails.
-fn evaluate_solution_at_point_interpolated(
-    mesh: &Mesh,
-    solution: &ndarray::Array1<Complex64>,
-    point: Point3D,
-    containing_element: Option<usize>,
-) -> Complex64 {
-    // Try shape function interpolation first
-    if let Some(elem_idx) = containing_element {
-        let elem = &mesh.elements[elem_idx];
-        let vertices = elem.vertices();
-
-        if vertices.len() == 4 {
-            let v0 = &mesh.nodes[vertices[0]];
-            let v1 = &mesh.nodes[vertices[1]];
-            let v2 = &mesh.nodes[vertices[2]];
-            let v3 = &mesh.nodes[vertices[3]];
-
-            if let Some(bary) = compute_barycentric_coords(point, v0, v1, v2, v3) {
-                // Interpolate using barycentric coordinates (which are the P1 shape functions)
-                return solution[vertices[0]] * bary[0]
-                    + solution[vertices[1]] * bary[1]
-                    + solution[vertices[2]] * bary[2]
-                    + solution[vertices[3]] * bary[3];
-            }
-        }
-    }
-
-    // Fallback to nearest-neighbor
-    let mut min_dist = f64::MAX;
-    let mut nearest_node = 0;
-
-    for (i, node) in mesh.nodes.iter().enumerate() {
-        let dist =
-            (node.x - point.x).powi(2) + (node.y - point.y).powi(2) + (node.z - point.z).powi(2);
-        if dist < min_dist {
-            min_dist = dist;
-            nearest_node = i;
-        }
-    }
-
-    solution[nearest_node]
-}
-
 /// Run hierarchical solve with warm starting
 ///
 /// Strategy:
@@ -1308,8 +1171,7 @@ fn evaluate_solution_at_point_interpolated(
 #[allow(clippy::too_many_arguments)]
 fn run_hierarchical_solve(
     mesh: &Mesh,
-    stiffness: &StiffnessMatrix,
-    mass: &MassMatrix,
+    assembler: &HelmholtzAssembler,
     solver_config: &SolverConfig,
     sources: &[Source],
     simulation: &RoomSimulation,
@@ -1359,10 +1221,10 @@ fn run_hierarchical_solve(
             let (solution, spl_values, iterations, residual) =
                 solve_single_frequency_returning_solution(
                     mesh,
-                    stiffness,
-                    mass,
+                    assembler,
                     solver_config,
                     sources,
+                    simulation,
                     freq,
                     simulation.wavenumber(freq),
                     source_width,
@@ -1456,10 +1318,10 @@ fn run_hierarchical_solve(
             // Solve with warm start
             let (_, spl_values, iterations, residual) = solve_single_frequency_returning_solution(
                 mesh,
-                stiffness,
-                mass,
+                assembler,
                 solver_config,
                 sources,
+                simulation,
                 freq,
                 simulation.wavenumber(freq),
                 source_width,
@@ -1559,10 +1421,10 @@ fn run_hierarchical_solve(
 #[allow(clippy::too_many_arguments)]
 fn solve_single_frequency_returning_solution(
     mesh: &Mesh,
-    stiffness: &StiffnessMatrix,
-    mass: &MassMatrix,
+    assembler: &HelmholtzAssembler,
     solver_config: &SolverConfig,
     sources: &[Source],
+    simulation: &RoomSimulation,
     frequency: f64,
     wavenumber: f64,
     source_width: f64,
@@ -1572,14 +1434,16 @@ fn solve_single_frequency_returning_solution(
 ) -> (ndarray::Array1<Complex64>, Vec<f64>, usize, f64) {
     let k = Complex64::new(wavenumber, 0.0);
 
-    // Combine stiffness and mass into Helmholtz matrix: A = K - k²M
-    let helmholtz = HelmholtzMatrix::new(stiffness, mass, k);
+    // Compute boundary coefficients
+    let boundary_coeffs = compute_boundary_coefficients(simulation, frequency);
+
+    // Assemble matrix efficiently
+    let csr = assembler.assemble(k, &boundary_coeffs);
 
     // Assemble RHS for this frequency (parallel over elements)
     let rhs = assemble_rhs_parallel(mesh, sources, frequency, source_width);
 
     // Convert to CSR and solve with optional initial guess
-    let csr = helmholtz.to_csr();
     let rhs_array = ndarray::Array1::from(rhs);
 
     let solution = solver::solve_csr_with_guess(&csr, &rhs_array, initial_guess, solver_config)
@@ -1602,4 +1466,223 @@ fn solve_single_frequency_returning_solution(
         solution.iterations,
         solution.residual,
     )
+}
+
+/// Assemble RHS vector with parallel element processing
+fn assemble_rhs_parallel(
+    mesh: &Mesh,
+    sources: &[Source],
+    frequency: f64,
+    source_width: f64,
+) -> Vec<Complex64> {
+    use math_audio_fem::basis::{Jacobian, evaluate_shape};
+    use math_audio_fem::quadrature::for_mass;
+
+    let n_dofs = mesh.num_nodes();
+    let n_elems = mesh.num_elements();
+
+    let element_contribs: Vec<Vec<(usize, Complex64)>> = (0..n_elems)
+        .into_par_iter()
+        .map(|elem_idx| {
+            let elem = &mesh.elements[elem_idx];
+            let elem_type = elem.element_type;
+            let vertices = elem.vertices();
+            let n_nodes = vertices.len();
+
+            let quad = for_mass(elem_type, 1); 
+
+            let coords: Vec<[f64; 3]> = vertices
+                .iter()
+                .map(|&v| [mesh.nodes[v].x, mesh.nodes[v].y, mesh.nodes[v].z])
+                .collect();
+
+            let mut local_contribs = Vec::with_capacity(n_nodes);
+
+            for qp in quad.iter() {
+                let shape = evaluate_shape(
+                    elem_type,
+                    PolynomialDegree::P1,
+                    qp.xi(),
+                    qp.eta(),
+                    qp.zeta(),
+                );
+                let jac = Jacobian::from_3d(&shape.gradients, &coords);
+
+                let x: f64 = shape
+                    .values
+                    .iter()
+                    .zip(&coords)
+                    .map(|(n, c)| n * c[0])
+                    .sum();
+                let y: f64 = shape
+                    .values
+                    .iter()
+                    .zip(&coords)
+                    .map(|(n, c)| n * c[1])
+                    .sum();
+                let z: f64 = shape
+                    .values
+                    .iter()
+                    .zip(&coords)
+                    .map(|(n, c)| n * c[2])
+                    .sum();
+
+                let f_val = compute_source_term(x, y, z, sources, frequency, source_width);
+                let det_j = jac.det.abs();
+
+                for i in 0..n_nodes {
+                    let contrib = f_val * Complex64::new(shape.values[i] * det_j * qp.weight, 0.0);
+                    if contrib.norm() > 1e-15 {
+                        local_contribs.push((vertices[i], contrib));
+                    }
+                }
+            }
+
+            local_contribs
+        })
+        .collect();
+
+    let mut rhs = vec![Complex64::new(0.0, 0.0); n_dofs];
+    for contribs in element_contribs {
+        for (node_idx, val) in contribs {
+            rhs[node_idx] += val;
+        }
+    }
+
+    rhs
+}
+
+fn compute_source_term(
+    x: f64,
+    y: f64,
+    z: f64,
+    sources: &[Source],
+    frequency: f64,
+    source_width: f64,
+) -> Complex64 {
+    let point = Point3D::new(x, y, z);
+    let mut total = Complex64::new(0.0, 0.0);
+
+    for source in sources {
+        let r = source.position.distance_to(&point);
+        let envelope = (-r * r / (2.0 * source_width * source_width)).exp();
+        let amplitude = source.amplitude_towards(&point, frequency);
+        total += Complex64::new(amplitude * envelope, 0.0);
+    }
+
+    total
+}
+
+fn find_containing_element_parallel(mesh: &Mesh, point: Point3D) -> Option<usize> {
+    (0..mesh.elements.len())
+        .into_par_iter()
+        .find_map_any(|elem_idx| {
+            let elem = &mesh.elements[elem_idx];
+            if elem.element_type != ElementType::Tetrahedron {
+                return None;
+            }
+
+            let vertices = elem.vertices();
+            if vertices.len() != 4 {
+                return None;
+            }
+
+            let p0 = &mesh.nodes[vertices[0]];
+            let p1 = &mesh.nodes[vertices[1]];
+            let p2 = &mesh.nodes[vertices[2]];
+            let p3 = &mesh.nodes[vertices[3]];
+
+            if compute_barycentric_coords(point, p0, p1, p2, p3).is_some() {
+                Some(elem_idx)
+            } else {
+                None
+            }
+        })
+}
+
+fn compute_barycentric_coords(
+    p: Point3D,
+    v0: &Point,
+    v1: &Point,
+    v2: &Point,
+    v3: &Point,
+) -> Option<[f64; 4]> {
+    let v0p = [p.x - v0.x, p.y - v0.y, p.z - v0.z];
+    let v01 = [v1.x - v0.x, v1.y - v0.y, v1.z - v0.z];
+    let v02 = [v2.x - v0.x, v2.y - v0.y, v2.z - v0.z];
+    let v03 = [v3.x - v0.x, v3.y - v0.y, v3.z - v0.z];
+
+    let det = v01[0] * (v02[1] * v03[2] - v02[2] * v03[1])
+        - v01[1] * (v02[0] * v03[2] - v02[2] * v03[0])
+        + v01[2] * (v02[0] * v03[1] - v02[1] * v03[0]);
+
+    if det.abs() < 1e-15 {
+        return None;
+    }
+
+    let inv_det = 1.0 / det;
+
+    let c00 = v02[1] * v03[2] - v02[2] * v03[1];
+    let c01 = -(v02[0] * v03[2] - v02[2] * v03[0]);
+    let c02 = v02[0] * v03[1] - v02[1] * v03[0];
+
+    let c10 = -(v01[1] * v03[2] - v01[2] * v03[1]);
+    let c11 = v01[0] * v03[2] - v01[2] * v03[0];
+    let c12 = -(v01[0] * v03[1] - v01[1] * v03[0]);
+
+    let c20 = v01[1] * v02[2] - v01[2] * v02[1];
+    let c21 = -(v01[0] * v02[2] - v01[2] * v02[0]);
+    let c22 = v01[0] * v02[1] - v01[1] * v02[0];
+
+    let lambda1 = (c00 * v0p[0] + c10 * v0p[1] + c20 * v0p[2]) * inv_det;
+    let lambda2 = (c01 * v0p[0] + c11 * v0p[1] + c21 * v0p[2]) * inv_det;
+    let lambda3 = (c02 * v0p[0] + c12 * v0p[1] + c22 * v0p[2]) * inv_det;
+    let lambda0 = 1.0 - lambda1 - lambda2 - lambda3;
+
+    let tol = -1e-10;
+    if lambda0 >= tol && lambda1 >= tol && lambda2 >= tol && lambda3 >= tol {
+        Some([lambda0, lambda1, lambda2, lambda3])
+    } else {
+        None
+    }
+}
+
+fn evaluate_solution_at_point_interpolated(
+    mesh: &Mesh,
+    solution: &ndarray::Array1<Complex64>,
+    point: Point3D,
+    containing_element: Option<usize>,
+) -> Complex64 {
+    if let Some(elem_idx) = containing_element {
+        let elem = &mesh.elements[elem_idx];
+        let vertices = elem.vertices();
+
+        if vertices.len() == 4 {
+            let v0 = &mesh.nodes[vertices[0]];
+            let v1 = &mesh.nodes[vertices[1]];
+            let v2 = &mesh.nodes[vertices[2]];
+            let v3 = &mesh.nodes[vertices[3]];
+
+            if let Some(bary) = compute_barycentric_coords(point, v0, v1, v2, v3) {
+                return solution[vertices[0]] * bary[0]
+                    + solution[vertices[1]] * bary[1]
+                    + solution[vertices[2]] * bary[2]
+                    + solution[vertices[3]] * bary[3];
+            }
+        }
+    }
+
+    let mut min_dist = f64::MAX;
+    let mut nearest_node = 0;
+
+    for (i, node) in mesh.nodes.iter().enumerate() {
+        let dist =
+            (node.x - point.x).powi(2) + (node.y - point.y).powi(2) + (node.z - point.z).powi(2);
+        if dist < min_dist {
+            min_dist = dist;
+            nearest_node = i;
+        }
+    }
+
+    solution[nearest_node]
 }

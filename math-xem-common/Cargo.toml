@@ -1,6 +1,6 @@
 [package]
 name = "math-xem-common"
-version = "0.3.0"
+version = "0.3.1"
 description = "Common types and utilities for BEM/FEM room acoustics simulators"
 edition = { workspace = true }
 authors = { workspace = true }
@@ -15,7 +15,7 @@ path = "src/lib.rs"
 
 [dependencies]
 # Core numerical computing
-ndarray = { workspace = true, features = ["serde"] }
+ndarray = { version = "0.17", default-features = false, features = ["rayon", "serde"] }
 num-complex = { workspace = true, features = ["serde"] }
 
 # Serialization

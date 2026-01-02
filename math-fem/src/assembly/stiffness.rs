@@ -5,7 +5,6 @@
 use crate::basis::{Jacobian, PolynomialDegree, evaluate_shape};
 use crate::mesh::{ElementType, Mesh};
 use crate::quadrature::{QuadratureRule, for_stiffness};
-use num_complex::Complex64;
 
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
@@ -17,8 +16,8 @@ pub struct StiffnessMatrix {
     pub rows: Vec<usize>,
     /// Column indices
     pub cols: Vec<usize>,
-    /// Values (complex for Helmholtz with PML)
-    pub values: Vec<Complex64>,
+    /// Values (real for standard stiffness)
+    pub values: Vec<f64>,
     /// Matrix dimension
     pub dim: usize,
 }
@@ -34,7 +33,7 @@ impl StiffnessMatrix {
     }
 
     /// Add a triplet (i, j, value)
-    pub fn add(&mut self, i: usize, j: usize, value: Complex64) {
+    pub fn add(&mut self, i: usize, j: usize, value: f64) {
         self.rows.push(i);
         self.cols.push(j);
         self.values.push(value);
@@ -52,7 +51,7 @@ fn element_stiffness_triangle_p1(
     elem_idx: usize,
     quad: &QuadratureRule,
     degree: PolynomialDegree,
-) -> (Vec<usize>, Vec<Vec<Complex64>>) {
+) -> (Vec<usize>, Vec<Vec<f64>>) {
     let elem = &mesh.elements[elem_idx];
     let vertices = elem.vertices();
     let n_nodes = vertices.len();
@@ -63,7 +62,7 @@ fn element_stiffness_triangle_p1(
         .map(|&v| [mesh.nodes[v].x, mesh.nodes[v].y])
         .collect();
 
-    let mut k_local = vec![vec![Complex64::new(0.0, 0.0); n_nodes]; n_nodes];
+    let mut k_local = vec![vec![0.0; n_nodes]; n_nodes];
 
     // Gauss quadrature
     for qp in quad.iter() {
@@ -88,7 +87,7 @@ fn element_stiffness_triangle_p1(
                     .zip(&grads_phys[j])
                     .map(|(a, b)| a * b)
                     .sum();
-                k_local[i][j] += Complex64::new(dot * det_j * qp.weight, 0.0);
+                k_local[i][j] += dot * det_j * qp.weight;
             }
         }
     }
@@ -102,7 +101,7 @@ fn element_stiffness_quad_q1(
     elem_idx: usize,
     quad: &QuadratureRule,
     degree: PolynomialDegree,
-) -> (Vec<usize>, Vec<Vec<Complex64>>) {
+) -> (Vec<usize>, Vec<Vec<f64>>) {
     let elem = &mesh.elements[elem_idx];
     let vertices = elem.vertices();
     let n_nodes = vertices.len();
@@ -112,7 +111,7 @@ fn element_stiffness_quad_q1(
         .map(|&v| [mesh.nodes[v].x, mesh.nodes[v].y])
         .collect();
 
-    let mut k_local = vec![vec![Complex64::new(0.0, 0.0); n_nodes]; n_nodes];
+    let mut k_local = vec![vec![0.0; n_nodes]; n_nodes];
 
     for qp in quad.iter() {
         let shape = evaluate_shape(ElementType::Quadrilateral, degree, qp.xi(), qp.eta(), 0.0);
@@ -132,7 +131,7 @@ fn element_stiffness_quad_q1(
                     .zip(&grads_phys[j])
                     .map(|(a, b)| a * b)
                     .sum();
-                k_local[i][j] += Complex64::new(dot * det_j * qp.weight, 0.0);
+                k_local[i][j] += dot * det_j * qp.weight;
             }
         }
     }
@@ -146,7 +145,7 @@ fn element_stiffness_tet_p1(
     elem_idx: usize,
     quad: &QuadratureRule,
     degree: PolynomialDegree,
-) -> (Vec<usize>, Vec<Vec<Complex64>>) {
+) -> (Vec<usize>, Vec<Vec<f64>>) {
     let elem = &mesh.elements[elem_idx];
     let vertices = elem.vertices();
     let n_nodes = vertices.len();
@@ -156,7 +155,7 @@ fn element_stiffness_tet_p1(
         .map(|&v| [mesh.nodes[v].x, mesh.nodes[v].y, mesh.nodes[v].z])
         .collect();
 
-    let mut k_local = vec![vec![Complex64::new(0.0, 0.0); n_nodes]; n_nodes];
+    let mut k_local = vec![vec![0.0; n_nodes]; n_nodes];
 
     for qp in quad.iter() {
         let shape = evaluate_shape(
@@ -182,7 +181,7 @@ fn element_stiffness_tet_p1(
                     .zip(&grads_phys[j])
                     .map(|(a, b)| a * b)
                     .sum();
-                k_local[i][j] += Complex64::new(dot * det_j * qp.weight, 0.0);
+                k_local[i][j] += dot * det_j * qp.weight;
             }
         }
     }
@@ -196,7 +195,7 @@ fn element_stiffness_hex_q1(
     elem_idx: usize,
     quad: &QuadratureRule,
     degree: PolynomialDegree,
-) -> (Vec<usize>, Vec<Vec<Complex64>>) {
+) -> (Vec<usize>, Vec<Vec<f64>>) {
     let elem = &mesh.elements[elem_idx];
     let vertices = elem.vertices();
     let n_nodes = vertices.len();
@@ -206,7 +205,7 @@ fn element_stiffness_hex_q1(
         .map(|&v| [mesh.nodes[v].x, mesh.nodes[v].y, mesh.nodes[v].z])
         .collect();
 
-    let mut k_local = vec![vec![Complex64::new(0.0, 0.0); n_nodes]; n_nodes];
+    let mut k_local = vec![vec![0.0; n_nodes]; n_nodes];
 
     for qp in quad.iter() {
         let shape = evaluate_shape(
@@ -232,7 +231,7 @@ fn element_stiffness_hex_q1(
                     .zip(&grads_phys[j])
                     .map(|(a, b)| a * b)
                     .sum();
-                k_local[i][j] += Complex64::new(dot * det_j * qp.weight, 0.0);
+                k_local[i][j] += dot * det_j * qp.weight;
             }
         }
     }
@@ -245,7 +244,7 @@ fn compute_element_stiffness(
     mesh: &Mesh,
     elem_idx: usize,
     degree: PolynomialDegree,
-) -> Vec<(usize, usize, Complex64)> {
+) -> Vec<(usize, usize, f64)> {
     let elem_type = mesh.elements[elem_idx].element_type;
     let quad = for_stiffness(elem_type, degree.degree());
 
@@ -259,7 +258,7 @@ fn compute_element_stiffness(
     let mut triplets = Vec::new();
     for (i, &gi) in global_nodes.iter().enumerate() {
         for (j, &gj) in global_nodes.iter().enumerate() {
-            if k_local[i][j].norm() > 1e-15 {
+            if k_local[i][j].abs() > 1e-15 {
                 triplets.push((gi, gj, k_local[i][j]));
             }
         }
@@ -271,22 +270,10 @@ fn compute_element_stiffness(
 pub fn assemble_stiffness(mesh: &Mesh, degree: PolynomialDegree) -> StiffnessMatrix {
     #[cfg(feature = "parallel")]
     {
-        /*
-                println!(
-                    "  [DEBUG] Using PARALLEL stiffness assembly ({} elements)",
-                    mesh.num_elements()
-            );
-        */
         assemble_stiffness_parallel(mesh, degree)
     }
     #[cfg(not(feature = "parallel"))]
     {
-        /*
-                println!(
-                    "  [DEBUG] Using SEQUENTIAL stiffness assembly ({} elements)",
-                    mesh.num_elements()
-            );
-        */
         assemble_stiffness_sequential(mesh, degree)
     }
 }
@@ -313,7 +300,7 @@ pub fn assemble_stiffness_parallel(mesh: &Mesh, degree: PolynomialDegree) -> Sti
     let n_elems = mesh.num_elements();
 
     // Compute all element contributions in parallel
-    let all_triplets: Vec<Vec<(usize, usize, Complex64)>> = (0..n_elems)
+    let all_triplets: Vec<Vec<(usize, usize, f64)>> = (0..n_elems)
         .into_par_iter()
         .map(|elem_idx| compute_element_stiffness(mesh, elem_idx, degree))
         .collect();
@@ -355,7 +342,7 @@ mod tests {
 
         // Accumulate into dense matrix for testing
         let n = stiffness.dim;
-        let mut dense = vec![vec![Complex64::new(0.0, 0.0); n]; n];
+        let mut dense = vec![vec![0.0; n]; n];
 
         for k in 0..stiffness.nnz() {
             dense[stiffness.rows[k]][stiffness.cols[k]] += stiffness.values[k];
@@ -364,7 +351,7 @@ mod tests {
         // Check symmetry
         for i in 0..n {
             for j in 0..n {
-                let diff = (dense[i][j] - dense[j][i]).norm();
+                let diff = (dense[i][j] - dense[j][i]).abs();
                 assert!(
                     diff < 1e-10,
                     "Asymmetric at ({}, {}): diff = {}",

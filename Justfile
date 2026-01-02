@@ -199,7 +199,7 @@ publish:
 qa: qa-fem qa-bem
 
 qa-fem:
-	cargo run --release --bin qa-suite -p math-fem --features="cli native"
+	cargo run --release --bin qa-suite -p math-fem --features="cli native parallel"
 
 qa-bem:
 	cargo run --release --bin qa-suite -p math-bem --features="native cli parallel"

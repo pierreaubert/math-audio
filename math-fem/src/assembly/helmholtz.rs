@@ -49,14 +49,14 @@ impl HelmholtzMatrix {
         for i in 0..stiffness.nnz() {
             rows.push(stiffness.rows[i]);
             cols.push(stiffness.cols[i]);
-            values.push(stiffness.values[i]);
+            values.push(Complex64::new(stiffness.values[i], 0.0));
         }
 
         // Subtract k²M entries (-k²M)
         for i in 0..mass.nnz() {
             rows.push(mass.rows[i]);
             cols.push(mass.cols[i]);
-            values.push(-k_sq * mass.values[i]);
+            values.push(-k_sq * Complex64::new(mass.values[i], 0.0));
         }
 
         combined_nnz = values.len();
@@ -368,7 +368,7 @@ mod tests {
         for i in 0..stiffness.nnz() {
             *stiff_map
                 .entry((stiffness.rows[i], stiffness.cols[i]))
-                .or_insert(Complex64::new(0.0, 0.0)) += stiffness.values[i];
+                .or_insert(Complex64::new(0.0, 0.0)) += Complex64::new(stiffness.values[i], 0.0);
         }
 
         // Check that Helmholtz values match stiffness values

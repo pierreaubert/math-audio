@@ -1,6 +1,6 @@
 //! Output JSON formatting for room acoustics simulations
 
-use crate::config::{MetadataConfig, RoomConfig, RoomSimulation, VisualizationConfig};
+use crate::config::{MetadataConfig, RoomConfig, RoomSimulation, VisualizationConfig, BoundaryConfig};
 use crate::geometry::RoomGeometry;
 use crate::types::{Point3D, RoomMesh, pressure_to_spl};
 use ndarray::{Array1, Array2};
@@ -287,7 +287,7 @@ pub fn print_config_summary(config: &RoomConfig) {
                 "    Bandpass: {:.0}-{:.0}Hz, order {}",
                 low_cutoff, high_cutoff, order
             ),
-            _ => {}
+            _ => {} // Ignore other crossover types
         }
     }
 
@@ -306,6 +306,19 @@ pub fn print_config_summary(config: &RoomConfig) {
         "  Adaptive integration: {}",
         config.solver.adaptive_integration
     );
+    
+    // Boundary summary
+    println!("\nBoundaries:");
+    let b = &config.boundaries;
+    let format_bc = |s: &crate::config::SurfaceConfig| match s {
+        crate::config::SurfaceConfig::Rigid => "Rigid".to_string(),
+        crate::config::SurfaceConfig::Absorption { coefficient } => format!("Abs α={:.2}", coefficient),
+        crate::config::SurfaceConfig::Impedance { real, imag } => format!("Z={:.1}+{:.1}i", real, imag),
+    };
+    
+    println!("  Default walls: {}", format_bc(&b.walls));
+    println!("  Floor:         {}", format_bc(&b.floor));
+    println!("  Ceiling:       {}", format_bc(&b.ceiling));
 }
 
 /// Create a default room configuration for testing
@@ -339,6 +352,7 @@ pub fn create_default_config() -> RoomConfig {
             spacing: "logarithmic".to_string(),
         },
         solver: crate::config::SolverConfig::default(),
+        boundaries: BoundaryConfig::default(),
         visualization: VisualizationConfig::default(),
         metadata: MetadataConfig::default(),
     }

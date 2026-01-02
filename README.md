@@ -78,7 +78,7 @@ This crate implements a BEM (Boundary Element Method) solver, see [BEM README](m
 
 Status: ok-ish
 
-### math-bem
+### math-fem
 
 This crate implements a FEM (Finite Element Method) solver, see [FEM README](math-fem/README.md)
 

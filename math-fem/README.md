@@ -1,6 +1,6 @@
 # math-fem
 
-Multigrid FEM solver for the Helmholtz equation.
+Multigrid Finite Element Method (FEM) solver for the Helmholtz equation, optimized for acoustics.
 
 ## Installation
 
@@ -15,20 +15,44 @@ math-fem = { version = "0.3" }
 
 - **2D and 3D meshes**: Triangles, quadrilaterals, tetrahedra, hexahedra
 - **Lagrange elements**: P1, P2, P3 polynomial basis functions
-- **Boundary conditions**: Dirichlet, Neumann, Robin, PML
+- **Boundary conditions**: Dirichlet, Neumann, Robin (impedance/absorption), PML
+- **Optimized Assembly**: `HelmholtzAssembler` for efficient frequency sweeps without CSR topology reconstruction
 - **Multigrid solver**: V-cycle, W-cycle with geometric coarsening
-- **Adaptive refinement**: h-refinement with residual-based error estimation
+- **Parallel processing**: Rayon-based parallel matrix and RHS assembly
+- **Room Acoustics Simulator**: CLI tool for frequency-domain room simulation
 
 ## Usage
 
 ```rust
-use fem::{mesh, boundary::BoundaryConditions};
+use math_audio_fem::{mesh, basis::PolynomialDegree};
+use math_audio_fem::assembly::HelmholtzAssembler;
+use num_complex::Complex64;
 
-// Create a 2D mesh
-let mesh = mesh::unit_square_triangles(10);
+// Create a 3D mesh for a room
+let mesh = mesh::box_mesh_tetrahedra(0.0, 5.0, 0.0, 4.0, 0.0, 2.5, 10, 8, 5);
 
-// Create a 3D mesh
-let mesh_3d = mesh::unit_cube_tetrahedra(5);
+// Create an efficient assembler
+let assembler = HelmholtzAssembler::new(&mesh, PolynomialDegree::P1);
+
+// Assemble system for a specific frequency (wavenumber k)
+let k = Complex64::new(1.5, 0.01); // k = omega/c + i*damping
+let system_matrix = assembler.assemble(k, &std::collections::HashMap::new());
+```
+
+## Binaries
+
+### roomsim-fem
+
+A high-performance room acoustics simulator. It supports:
+- Rectangular and L-shaped geometries
+- Configurable wall absorption and impedance
+- Directional sound sources with crossovers
+- Hierarchical warm-starting for fast frequency sweeps
+
+**Documentation:** [Room Simulator Guide](docs/room_simulator.md) | [JSON Schema](docs/room_config_schema.json)
+
+```bash
+cargo run --release --bin roomsim-fem --features "cli native" -- --config room.json
 ```
 
 ## Modules
@@ -38,72 +62,30 @@ let mesh_3d = mesh::unit_cube_tetrahedra(5);
 Mesh generators for common domains:
 
 ```rust
-use fem::mesh::*;
+use math_audio_fem::mesh::*;
 
-// 2D meshes
-let rect = rectangular_mesh_triangles(0.0, 1.0, 0.0, 1.0, 10, 10);
-let quads = rectangular_mesh_quads(0.0, 1.0, 0.0, 1.0, 10, 10);
-let circle = circular_mesh_triangles(0.0, 0.0, 1.0, 5, 16);
-let annulus = annular_mesh_triangles(0.0, 0.0, 0.5, 2.0, 4, 16);
-
-// 3D meshes
+// 3D box mesh with tetrahedra
 let box_tet = box_mesh_tetrahedra(0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 5, 5, 5);
-let box_hex = box_mesh_hexahedra(0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 5, 5, 5);
-
-// Convenience functions
-let square = unit_square_triangles(10);
-let cube = unit_cube_tetrahedra(5);
 ```
 
 ### basis
 
-Lagrange polynomial basis functions:
-
-- P1, P2, P3 for simplices (triangles, tetrahedra)
-- Q1, Q2 for quads/hexes
+Lagrange polynomial basis functions (P1, P2, P3).
 
 ### boundary
 
-Boundary condition handling:
-
-```rust
-use fem::boundary::BoundaryConditions;
-use num_complex::Complex64;
-
-let mut bcs = BoundaryConditions::new();
-
-// Dirichlet: u = g on boundary
-bcs.add_dirichlet(1, |x, y, z| Complex64::new(1.0, 0.0));
-
-// Neumann: du/dn = h on boundary
-bcs.add_neumann(2, |x, y, z| Complex64::new(0.0, 0.0));
-
-// Robin: du/dn + alpha*u = g on boundary
-bcs.add_robin(3,
-    |x, y, z| Complex64::new(1.0, 0.0),  // alpha
-    |x, y, z| Complex64::new(0.0, 0.0),  // g
-);
-```
+Boundary condition handling including Robin (Impedance) conditions for acoustics.
 
 ### assembly
 
-Matrix assembly for FEM:
-
-- Stiffness matrix assembly
-- Mass matrix assembly
-- Helmholtz matrix (K - k²M)
-
-### quadrature
-
-Gaussian quadrature rules for numerical integration.
+High-performance matrix assembly:
+- **Stiffness & Mass**: Stored as `f64` for memory efficiency.
+- **HelmholtzAssembler**: Pre-assembles sparsity patterns for lightning-fast frequency updates.
+- **Boundary Mass**: Efficiently integrates terms over boundary surfaces.
 
 ### multigrid
 
-Geometric multigrid solver:
-
-- V-cycle, W-cycle, F-cycle methods
-- Gauss-Seidel smoothing
-- Linear interpolation transfer operators
+Geometric multigrid solver for large systems.
 
 ## Element Types
 
@@ -116,12 +98,13 @@ Geometric multigrid solver:
 
 ## Feature Flags
 
-- `native` (default) - Enables rayon parallelism and native BLAS
+- `native` (default) - Enables rayon parallelism and hardware-specific BLAS
 - `parallel` - Enables rayon for parallel assembly
+- `cli` - Enables CLI dependencies for `roomsim-fem`
 
 ## Dependencies
 
-- `math-solvers` - Sparse linear algebra solvers
-- `ndarray` - N-dimensional arrays
-- `num-complex` - Complex number support
-- `rayon` (optional) - Parallel processing
+- `math-solvers` - Iterative solvers (GMRES, AMG, Schwarz)
+- `math-xem-common` - Shared room acoustics types and configurations
+- `ndarray` - N-dimensional arrays for numerical computing
+- `num-complex` - Complex number support for Helmholtz systems

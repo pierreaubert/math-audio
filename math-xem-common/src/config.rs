@@ -18,6 +18,9 @@ pub struct RoomConfig {
     pub listening_positions: Vec<Point3DConfig>,
     /// Frequency configuration
     pub frequencies: FrequencyConfig,
+    /// Boundary conditions
+    #[serde(default)]
+    pub boundaries: BoundaryConfig,
     /// Solver configuration
     #[serde(default)]
     pub solver: SolverConfig,
@@ -81,6 +84,61 @@ impl RoomGeometryConfig {
             ))),
         }
     }
+}
+
+/// Boundary conditions configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BoundaryConfig {
+    /// Floor boundary condition
+    #[serde(default = "default_rigid")]
+    pub floor: SurfaceConfig,
+    /// Ceiling boundary condition
+    #[serde(default = "default_rigid")]
+    pub ceiling: SurfaceConfig,
+    /// Default condition for all vertical walls
+    #[serde(default = "default_rigid")]
+    pub walls: SurfaceConfig,
+    /// Override for front wall (y=0)
+    pub front_wall: Option<SurfaceConfig>,
+    /// Override for back wall (y=depth)
+    pub back_wall: Option<SurfaceConfig>,
+    /// Override for left wall (x=0)
+    pub left_wall: Option<SurfaceConfig>,
+    /// Override for right wall (x=width)
+    pub right_wall: Option<SurfaceConfig>,
+}
+
+impl Default for BoundaryConfig {
+    fn default() -> Self {
+        Self {
+            floor: SurfaceConfig::Rigid,
+            ceiling: SurfaceConfig::Rigid,
+            walls: SurfaceConfig::Rigid,
+            front_wall: None,
+            back_wall: None,
+            left_wall: None,
+            right_wall: None,
+        }
+    }
+}
+
+fn default_rigid() -> SurfaceConfig {
+    SurfaceConfig::Rigid
+}
+
+/// Surface boundary condition type
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum SurfaceConfig {
+    /// Perfectly rigid (Neumann BC, velocity = 0)
+    #[serde(rename = "rigid")]
+    Rigid,
+    /// Absorption coefficient (0.0 to 1.0)
+    #[serde(rename = "absorption")]
+    Absorption { coefficient: f64 },
+    /// Specific acoustic impedance (complex)
+    #[serde(rename = "impedance")]
+    Impedance { real: f64, imag: f64 },
 }
 
 /// 3D point configuration
@@ -562,6 +620,7 @@ impl RoomConfig {
             sources,
             listening_positions,
             frequencies,
+            boundaries: self.boundaries.clone(), // Pass boundaries
             speed_of_sound: crate::types::constants::SPEED_OF_SOUND_20C,
         })
     }
@@ -578,6 +637,9 @@ pub struct RoomSimulation {
     pub listening_positions: Vec<Point3D>,
     /// Frequencies to simulate
     pub frequencies: Vec<f64>,
+    /// Boundary conditions
+    #[serde(default)]
+    pub boundaries: BoundaryConfig,
     /// Speed of sound (m/s)
     pub speed_of_sound: f64,
 }
@@ -596,6 +658,7 @@ impl RoomSimulation {
             sources,
             listening_positions,
             frequencies,
+            boundaries: BoundaryConfig::default(),
             speed_of_sound: crate::types::constants::SPEED_OF_SOUND_20C,
         }
     }
@@ -616,6 +679,7 @@ impl RoomSimulation {
             sources,
             listening_positions,
             frequencies,
+            boundaries: BoundaryConfig::default(),
             speed_of_sound: crate::types::constants::SPEED_OF_SOUND_20C,
         }
     }
