@@ -118,7 +118,7 @@ fn test_1d_standing_wave_nodes() {
 
     // Verify nodes at boundaries
     let first_magnitude = analytical.pressure[0].norm();
-    let last_magnitude = analytical.pressure[analytical.pressure.len() - 1].norm();
+    let _last_magnitude = analytical.pressure[analytical.pressure.len() - 1].norm();
 
     // sin(0) and sin(π) should be near zero
     assert!(first_magnitude < 1e-10, "First node should be ~0");

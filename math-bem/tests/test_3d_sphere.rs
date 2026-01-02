@@ -12,7 +12,6 @@ use math_audio_bem::analytical::{
     sphere_rcs_3d, sphere_scattering_3d, sphere_scattering_efficiency_3d,
 };
 use math_audio_bem::testing::ValidationResult;
-use num_complex::Complex64;
 use std::f64::consts::PI;
 use std::path::PathBuf;
 
