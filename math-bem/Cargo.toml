@@ -38,14 +38,8 @@ num-complex = { workspace = true, features = ["serde"] }
 # BLAS/LAPACK (native only - not portable to WASM)
 ndarray-linalg = { workspace = true, optional = true }
 
-[target.'cfg(target_os = "macos")'.dependencies]
-ndarray-linalg = { workspace = true, optional = true, features = ["openblas-system"] }
-
-[target.'cfg(any(target_os = "linux", target_os = "windows"))'.dependencies]
-ndarray-linalg = { workspace = true, optional = true, features = ["openblas-system"] }
-
 # Parallel processing
-rayon = { workspace = true, optional = true }
+rayon = { workspace = true }
 
 # WASM-specific dependencies
 wasm-bindgen = { workspace = true, optional = true }
@@ -71,10 +65,16 @@ chrono = { workspace = true }
 clap = { workspace = true, optional = true }
 
 # feature dependant
-criterion = { workspace = true, optional=true }
-num_cpus = { workspace = true, optional=true }
-memory-stats = { workspace = true, optional=true }
-sysinfo = { workspace = true, optional=true }
+criterion = { workspace = true, optional = true }
+num_cpus = { workspace = true, optional = true }
+memory-stats = { workspace = true, optional = true }
+sysinfo = { workspace = true, optional = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+ndarray-linalg = { workspace = true, optional = true, features = ["openblas-system"] }
+
+[target.'cfg(any(target_os = "linux", target_os = "windows"))'.dependencies]
+ndarray-linalg = { workspace = true, optional = true, features = ["openblas-system"] }
 
 [dev-dependencies]
 criterion = { workspace = true, features = ["html_reports"] }
@@ -89,22 +89,21 @@ native = [
     "ndarray/blas",
     "ndarray/rayon",
     "ndarray-linalg",
-    "rayon",
-    "env_logger",
-    "memory-stats",
-    "sysinfo",
-    "num_cpus",
+    "dep:env_logger",
+    "dep:memory-stats",
+    "dep:sysinfo",
+    "dep:num_cpus",
 ]
 
 # CLI requires native features
-cli = ["native", "clap"]
+cli = ["native", "dep:clap"]
 
 # Parallel assembly - works with both native and wasm via rayon
 # Note: Previously required "native", but rayon works in WASM via wasm-bindgen-rayon
-parallel = ["rayon"]
+parallel = []
 
 # Benchmarking
-benchmarks = ["criterion"]
+benchmarks = ["dep:criterion"]
 
 # Memory optimization features
 memory-optimized = []
@@ -113,9 +112,8 @@ out-of-core = []  # Stream data from disk for very large problems
 # WASM feature: enables parallel processing via wasm-bindgen-rayon
 # This requires the browser to support SharedArrayBuffer and Web Workers
 wasm = [
-    "rayon",
-    "wasm-bindgen",
-    "wasm-bindgen-rayon",
+    "dep:wasm-bindgen",
+    "dep:wasm-bindgen-rayon",
 ]
 
 # Alias for native - used by examples that need ndarray-linalg
@@ -125,4 +123,3 @@ pure-rust = ["native"]
 [[example]]
 name = "simple_sphere_test"
 required-features = ["native"]
-
