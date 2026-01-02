@@ -1,6 +1,6 @@
 [package]
 name = "math-fem"
-version = "0.2.5"
+version = "0.3.0"
 description = "Multigrid FEM solver for the Helmholtz equation"
 edition = { workspace = true }
 authors = { workspace = true }
@@ -10,7 +10,7 @@ keywords = ["fem", "finite-element", "helmholtz", "multigrid", "acoustics"]
 categories = ["science", "mathematics", "simulation"]
 
 [lib]
-name = "fem"
+name = "math_audio_fem"
 path = "src/lib.rs"
 
 [[bin]]

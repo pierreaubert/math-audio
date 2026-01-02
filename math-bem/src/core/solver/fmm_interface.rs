@@ -3,14 +3,14 @@
 //! This module provides a unified interface for solving BEM systems using
 //! either direct methods (TBEM) or iterative methods with FMM acceleration.
 
-use ndarray::{Array1, Array2};
-use num_complex::Complex64;
-use solvers::iterative::{
+use math_audio_solvers::iterative::{
     BiCgstabConfig, BiCgstabSolution, CgsConfig, CgsSolution, GmresConfig, GmresSolution,
 };
-use solvers::iterative::{bicgstab, cgs, gmres};
-use solvers::preconditioners::IluPreconditioner;
-use solvers::traits::{LinearOperator, Preconditioner};
+use math_audio_solvers::iterative::{bicgstab, cgs, gmres};
+use math_audio_solvers::preconditioners::IluPreconditioner;
+use math_audio_solvers::traits::{LinearOperator, Preconditioner};
+use ndarray::{Array1, Array2};
+use num_complex::Complex64;
 
 use crate::core::assembly::mlfmm::MlfmmSystem;
 #[cfg(any(feature = "native", feature = "wasm"))]
@@ -394,7 +394,7 @@ pub fn solve_with_ilu(
     // Convert to CSR for ILU
     // This is expensive but necessary if using math-solvers ILU which requires CSR
     // For TBEM, we might want to avoid this or add Dense ILU to math-solvers
-    let csr = solvers::sparse::CsrMatrix::from_dense(matrix, 1e-15);
+    let csr = math_audio_solvers::sparse::CsrMatrix::from_dense(matrix, 1e-15);
     let _precond = IluPreconditioner::from_csr(&csr);
     let op = DenseOperator::new(matrix.clone());
 
@@ -452,10 +452,10 @@ pub fn gmres_solve_with_ilu(
     b: &Array1<Complex64>,
     config: &GmresConfig<f64>,
 ) -> GmresSolution<Complex64> {
-    let csr = solvers::sparse::CsrMatrix::from_dense(matrix, 1e-15);
+    let csr = math_audio_solvers::sparse::CsrMatrix::from_dense(matrix, 1e-15);
     let precond = IluPreconditioner::from_csr(&csr);
     let op = DenseOperator::new(matrix.clone());
-    solvers::iterative::gmres_preconditioned(&op, &precond, b, config)
+    math_audio_solvers::iterative::gmres_preconditioned(&op, &precond, b, config)
 }
 
 /// Solves a linear system using GMRES with an ILU preconditioner derived from a nearfield matrix for a given operator.
@@ -465,9 +465,9 @@ pub fn gmres_solve_with_ilu_operator<O: LinearOperator<Complex64>>(
     b: &Array1<Complex64>,
     config: &GmresConfig<f64>,
 ) -> GmresSolution<Complex64> {
-    let csr = solvers::sparse::CsrMatrix::from_dense(nearfield_matrix, 1e-15);
+    let csr = math_audio_solvers::sparse::CsrMatrix::from_dense(nearfield_matrix, 1e-15);
     let precond = IluPreconditioner::from_csr(&csr);
-    solvers::iterative::gmres_preconditioned(operator, &precond, b, config)
+    math_audio_solvers::iterative::gmres_preconditioned(operator, &precond, b, config)
 }
 
 /// Solves a TBEM system (dense matrix) using GMRES with an ILU preconditioner.
@@ -494,7 +494,7 @@ pub fn gmres_solve_with_hierarchical_precond(
 ) -> GmresSolution<Complex64> {
     let op = SlfmmOperator::new(fmm_system.clone());
     let precond = HierarchicalFmmPreconditioner::from_slfmm(fmm_system);
-    solvers::iterative::gmres_preconditioned(&op, &precond, b, config)
+    math_audio_solvers::iterative::gmres_preconditioned(&op, &precond, b, config)
 }
 
 /// Solves a linear system using GMRES with a hierarchical FMM preconditioner.
@@ -508,7 +508,7 @@ pub fn gmres_solve_fmm_hierarchical(
 ) -> GmresSolution<Complex64> {
     let precond = HierarchicalFmmPreconditioner::from_slfmm(fmm_operator.system());
     let b = fmm_operator.rhs();
-    solvers::iterative::gmres_preconditioned(fmm_operator, &precond, b, config)
+    math_audio_solvers::iterative::gmres_preconditioned(fmm_operator, &precond, b, config)
 }
 
 /// Solves a linear system using GMRES with a batched FMM operator (unpreconditioned).
@@ -531,9 +531,9 @@ pub fn gmres_solve_fmm_batched_with_ilu(
 ) -> GmresSolution<Complex64> {
     let op = SlfmmOperator::new(fmm_system.clone());
     let nearfield_matrix = fmm_system.extract_near_field_matrix();
-    let csr = solvers::sparse::CsrMatrix::from_dense(&nearfield_matrix, 1e-15);
+    let csr = math_audio_solvers::sparse::CsrMatrix::from_dense(&nearfield_matrix, 1e-15);
     let precond = IluPreconditioner::from_csr(&csr);
-    solvers::iterative::gmres_preconditioned(&op, &precond, b, config)
+    math_audio_solvers::iterative::gmres_preconditioned(&op, &precond, b, config)
 }
 
 // ============================================================================

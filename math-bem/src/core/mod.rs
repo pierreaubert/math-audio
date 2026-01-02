@@ -23,7 +23,7 @@
 pub mod assembly;
 pub mod bem_solver;
 pub mod constants;
-// pub mod greens; // Removed - use math_wave::greens instead
+// pub mod greens; // Removed - use math_audio_wave::greens instead
 pub mod incident;
 pub mod integration;
 pub mod io;

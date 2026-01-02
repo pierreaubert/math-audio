@@ -1,6 +1,6 @@
 /// Shared function registry for differential evolution benchmarks and plotting
 use crate::Strategy;
-use math_test_functions::*;
+use math_audio_test_functions::*;
 use ndarray::Array1;
 use std::collections::HashMap;
 

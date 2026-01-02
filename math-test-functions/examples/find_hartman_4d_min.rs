@@ -1,6 +1,6 @@
 //! Find the precise Hartmann 4-D minimum using refined search
 
-use math_test_functions::*;
+use math_audio_test_functions::*;
 use ndarray::Array1;
 
 fn main() {

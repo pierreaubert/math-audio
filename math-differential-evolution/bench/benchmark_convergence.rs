@@ -1,6 +1,8 @@
-use autoeq_de::{DEConfigBuilder, Strategy, run_recorded_differential_evolution};
-use math_test_functions::*;
 use clap::{Arg, Command};
+use math_audio_differential_evolution::{
+    DEConfigBuilder, Strategy, run_recorded_differential_evolution,
+};
+use math_audio_test_functions::*;
 use ndarray::Array1;
 use std::collections::HashMap;
 use std::fmt;
@@ -345,6 +347,7 @@ struct BenchmarkConfig {
 }
 
 /// Generate benchmark configurations for all test functions
+#[allow(clippy::vec_init_then_push)]
 fn generate_all_benchmarks() -> HashMap<String, Box<dyn Fn() -> BenchmarkResult>> {
     let mut benchmarks: HashMap<String, Box<dyn Fn() -> BenchmarkResult>> = HashMap::new();
     let _metadata = get_function_metadata();
@@ -1809,7 +1812,7 @@ fn run_benchmark(
     name: &str,
     function: fn(&Array1<f64>) -> f64,
     bounds: Vec<(f64, f64)>,
-    config: autoeq_de::DEConfig,
+    config: math_audio_differential_evolution::DEConfig,
     fun_tolerance: f64,
     expected_optimum: Vec<f64>,
     position_tolerance: f64,

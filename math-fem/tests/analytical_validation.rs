@@ -3,17 +3,17 @@
 //! These tests verify that the FEM solver produces correct results by comparing
 //! against known analytical solutions from the math-wave crate.
 
-use fem::assembly::HelmholtzProblem;
-use fem::basis::PolynomialDegree;
-use fem::boundary::{DirichletBC, apply_dirichlet};
-use fem::mesh::{
-    annular_mesh_triangles, box_mesh_tetrahedra, rectangular_mesh_triangles,
-    spherical_shell_mesh_tetrahedra, unit_square_triangles, BoundaryType,
+use math_audio_fem::assembly::HelmholtzProblem;
+use math_audio_fem::basis::PolynomialDegree;
+use math_audio_fem::boundary::{DirichletBC, apply_dirichlet};
+use math_audio_fem::mesh::{
+    BoundaryType, annular_mesh_triangles, box_mesh_tetrahedra, rectangular_mesh_triangles,
+    spherical_shell_mesh_tetrahedra, unit_square_triangles,
 };
-use math_wave::analytical::{legendre_p, spherical_bessel_j, spherical_bessel_y};
+use math_audio_solvers::{CsrMatrix, GmresConfig, gmres};
+use math_audio_wave::analytical::{legendre_p, spherical_bessel_j, spherical_bessel_y};
 use ndarray::Array1;
 use num_complex::Complex64;
-use solvers::{CsrMatrix, GmresConfig, gmres};
 use std::f64::consts::PI;
 
 /// Convert HelmholtzProblem matrix to CsrMatrix for solver
@@ -30,7 +30,11 @@ fn to_csr_matrix(problem: &HelmholtzProblem) -> CsrMatrix<Complex64> {
 }
 
 /// Compute L2 error between FEM solution and analytical solution
-fn l2_error<F>(mesh: &fem::mesh::Mesh, fem_solution: &Array1<Complex64>, analytical: F) -> f64
+fn l2_error<F>(
+    mesh: &math_audio_fem::mesh::Mesh,
+    fem_solution: &Array1<Complex64>,
+    analytical: F,
+) -> f64
 where
     F: Fn(f64, f64, f64) -> Complex64,
 {
@@ -348,7 +352,7 @@ fn test_manufactured_solution() {
 /// This test uses the analytical solution from math-wave and compares with FEM
 #[test]
 fn test_with_math_wave_plane_wave_1d() {
-    use math_wave::analytical::plane_wave_1d;
+    use math_audio_wave::analytical::plane_wave_1d;
 
     let k = 2.0;
     let x_min = 0.0;
@@ -416,7 +420,7 @@ fn test_with_math_wave_plane_wave_1d() {
 /// d²u/dx² + k²u = sin(nπx/L) / (k² - (nπ/L)²)
 #[test]
 fn test_with_math_wave_helmholtz_mode() {
-    use math_wave::analytical::helmholtz_1d_mode;
+    use math_audio_wave::analytical::helmholtz_1d_mode;
 
     let k = 2.0; // Not at resonance
     let l = 1.0;
@@ -480,7 +484,7 @@ fn test_with_math_wave_helmholtz_mode() {
 /// Test damped wave solution from math-wave
 #[test]
 fn test_with_math_wave_damped_wave() {
-    use math_wave::analytical::damped_wave_1d;
+    use math_audio_wave::analytical::damped_wave_1d;
 
     let k = 1.0;
     let alpha = 0.5; // Damping coefficient
@@ -546,7 +550,7 @@ fn test_with_math_wave_damped_wave() {
 // ============================================================================
 
 /// Helper: solve Helmholtz problem with MMS and return L2 error
-fn solve_mms_problem<U, F>(mesh: &fem::mesh::Mesh, k: f64, exact_u: U, source: F) -> f64
+fn solve_mms_problem<U, F>(mesh: &math_audio_fem::mesh::Mesh, k: f64, exact_u: U, source: F) -> f64
 where
     U: Fn(f64, f64, f64) -> Complex64 + Copy + 'static,
     F: Fn(f64, f64, f64) -> Complex64 + Sync,
@@ -1335,8 +1339,7 @@ fn test_cylinder_scattering_rigid() {
 
     let n_radial = 16;
     let n_angular = 32;
-    let mesh =
-        annular_mesh_triangles(0.0, 0.0, cylinder_radius, outer_radius, n_radial, n_angular);
+    let mesh = annular_mesh_triangles(0.0, 0.0, cylinder_radius, outer_radius, n_radial, n_angular);
 
     let num_terms = 30;
     let exact_u = move |x: f64, y: f64, _z: f64| {
@@ -1499,9 +1502,8 @@ fn test_sphere_scattering_rigid() {
     let mesh = spherical_shell_mesh_tetrahedra(0.0, 0.0, 0.0, a, outer_r, 1, 4);
 
     let num_terms = 15;
-    let exact_u = move |x: f64, y: f64, z: f64| {
-        sphere_scattering_point(k, a, x, y, z, num_terms, "rigid")
-    };
+    let exact_u =
+        move |x: f64, y: f64, z: f64| sphere_scattering_point(k, a, x, y, z, num_terms, "rigid");
 
     let k_complex = Complex64::new(k, 0.0);
     let mut problem =

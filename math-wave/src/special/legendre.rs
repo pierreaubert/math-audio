@@ -22,7 +22,7 @@
 ///
 /// # Example
 /// ```
-/// use math_wave::special::legendre_polynomials;
+/// use math_audio_wave::special::legendre_polynomials;
 /// let p = legendre_polynomials(5, 0.5);
 /// assert!((p[0] - 1.0).abs() < 1e-10);
 /// assert!((p[1] - 0.5).abs() < 1e-10);

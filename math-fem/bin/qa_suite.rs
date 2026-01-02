@@ -7,27 +7,27 @@
 //! Usage:
 //!     cargo run --bin qa-suite --release
 
-use fem::assembly::HelmholtzProblem;
-use fem::basis::PolynomialDegree;
-use fem::boundary::{DirichletBC, apply_dirichlet};
-use fem::mesh::{annular_mesh_triangles, spherical_shell_mesh_tetrahedra};
-use ndarray::Array1;
-use num_complex::Complex64;
-use serde::{Deserialize, Serialize};
-use solvers::iterative::{
+use math_audio_fem::assembly::HelmholtzProblem;
+use math_audio_fem::basis::PolynomialDegree;
+use math_audio_fem::boundary::{DirichletBC, apply_dirichlet};
+use math_audio_fem::mesh::{annular_mesh_triangles, spherical_shell_mesh_tetrahedra};
+use math_audio_solvers::iterative::{
     BiCgstabConfig, CgsConfig, GmresConfig, bicgstab, cgs, gmres, gmres_pipelined,
     gmres_preconditioned,
 };
-use solvers::preconditioners::{IluColoringPreconditioner, IluPreconditioner};
-use solvers::sparse::CsrMatrix;
-use solvers::traits::LinearOperator;
+use math_audio_solvers::preconditioners::{IluColoringPreconditioner, IluPreconditioner};
+use math_audio_solvers::sparse::CsrMatrix;
+use math_audio_solvers::traits::LinearOperator;
+use ndarray::Array1;
+use num_complex::Complex64;
+use serde::{Deserialize, Serialize};
 use spec_math::Bessel;
 use std::f64::consts::PI;
 use std::path::Path;
 use std::time::Instant;
 
 // Import 3D analytical solution
-use math_wave::analytical::solutions_3d::sphere_scattering_3d;
+use math_audio_wave::analytical::solutions_3d::sphere_scattering_3d;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum SolverType {
@@ -209,12 +209,12 @@ fn run_sphere_scattering_test(
             let prefactor = 2.0 * n_f64 + 1.0;
             let i_pow = Complex64::new((n_f64 * PI / 2.0).cos(), (n_f64 * PI / 2.0).sin());
 
-            let j_vals = math_wave::special::spherical_bessel_j(n as usize + 1, kr);
-            let y_vals = math_wave::special::spherical_bessel_y(n as usize + 1, kr);
+            let j_vals = math_audio_wave::special::spherical_bessel_j(n as usize + 1, kr);
+            let y_vals = math_audio_wave::special::spherical_bessel_y(n as usize + 1, kr);
             let jn = j_vals[n as usize];
             let yn = y_vals[n as usize];
             let hn = Complex64::new(jn, yn);
-            let pn = math_wave::special::legendre_p(n as usize, cos_theta);
+            let pn = math_audio_wave::special::legendre_p(n as usize, cos_theta);
 
             total += prefactor * i_pow * (jn - coeff * hn) * pn;
         }
@@ -287,19 +287,19 @@ fn compute_rigid_sphere_coefficients(ka: f64, num_terms: usize) -> Vec<Complex64
         let n_f64 = n as f64;
 
         // Compute jn(ka) and yn(ka)
-        let j_n_vals = math_wave::special::spherical_bessel_j(n as usize + 1, ka);
-        let y_n_vals = math_wave::special::spherical_bessel_y(n as usize + 1, ka);
+        let j_n_vals = math_audio_wave::special::spherical_bessel_j(n as usize + 1, ka);
+        let y_n_vals = math_audio_wave::special::spherical_bessel_y(n as usize + 1, ka);
         let jn = j_n_vals[n as usize];
         let yn = y_n_vals[n as usize];
 
         // Compute j_{n-1}(ka) and y_{n-1}(ka)
         let jn_minus_1 = if n > 0 {
-            math_wave::special::spherical_bessel_j(n as usize, ka)[(n - 1) as usize]
+            math_audio_wave::special::spherical_bessel_j(n as usize, ka)[(n - 1) as usize]
         } else {
             ka.cos() / ka
         };
         let yn_minus_1 = if n > 0 {
-            math_wave::special::spherical_bessel_y(n as usize, ka)[(n - 1) as usize]
+            math_audio_wave::special::spherical_bessel_y(n as usize, ka)[(n - 1) as usize]
         } else {
             -ka.sin() / ka
         };
@@ -561,7 +561,11 @@ fn to_csr_matrix(problem: &HelmholtzProblem) -> CsrMatrix<Complex64> {
     CsrMatrix::from_triplets(n, n, triplets)
 }
 
-fn l2_error<F>(mesh: &fem::mesh::Mesh, fem_solution: &Array1<Complex64>, analytical: F) -> f64
+fn l2_error<F>(
+    mesh: &math_audio_fem::mesh::Mesh,
+    fem_solution: &Array1<Complex64>,
+    analytical: F,
+) -> f64
 where
     F: Fn(f64, f64, f64) -> Complex64,
 {

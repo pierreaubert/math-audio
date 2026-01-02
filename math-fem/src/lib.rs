@@ -14,7 +14,7 @@
 //! # Example
 //!
 //! ```ignore
-//! use fem::{FemProblem, FemSolver, mesh};
+//! use math_audio_fem::{FemProblem, FemSolver, mesh};
 //!
 //! // Create a 2D mesh
 //! let mesh = mesh::unit_square_triangles(10);

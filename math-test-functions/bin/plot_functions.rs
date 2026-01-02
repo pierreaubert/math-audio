@@ -1,4 +1,5 @@
 use clap::Parser;
+use directories::ProjectDirs;
 use ndarray::Array1;
 use plotly::common::{ColorScale, ColorScalePalette, Marker, Mode, Title};
 use plotly::contour::Contour;
@@ -6,11 +7,9 @@ use plotly::{Layout, Plot, Scatter};
 use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::Write;
-use directories::ProjectDirs;
-
 
 // Import the test functions and metadata
-use math_test_functions::{FunctionMetadata, functions, get_function_metadata};
+use math_audio_test_functions::{FunctionMetadata, functions, get_function_metadata};
 
 type TestFunction = fn(&Array1<f64>) -> f64;
 

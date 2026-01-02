@@ -115,8 +115,8 @@ pub fn apply_dirichlet(problem: &mut HelmholtzProblem, mesh: &Mesh, dirichlet_bc
     }
 
     // Apply RHS correction
-    for i in 0..n {
-        problem.rhs[i] -= rhs_correction[i];
+    for (rhs_i, &corr) in problem.rhs.iter_mut().zip(rhs_correction.iter()) {
+        *rhs_i -= corr;
     }
 
     // Set Dirichlet values in RHS

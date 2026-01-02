@@ -14,7 +14,7 @@
 //! # Example
 //!
 //! ```rust
-//! use math_wave::analytical::{plane_wave_1d, sphere_scattering_3d};
+//! use math_audio_wave::analytical::{plane_wave_1d, sphere_scattering_3d};
 //! use std::f64::consts::PI;
 //!
 //! // 1D plane wave

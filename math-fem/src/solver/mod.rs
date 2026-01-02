@@ -10,14 +10,16 @@
 //! - **GMRES+ILU**: GMRES with ILU(0) preconditioning (recommended for large problems)
 
 use crate::assembly::HelmholtzProblem;
-use ndarray::Array1;
-use num_complex::Complex64;
-use solvers::iterative::{gmres_pipelined, gmres_preconditioned, gmres_preconditioned_with_guess};
-use solvers::{
+use math_audio_solvers::iterative::{
+    gmres_pipelined, gmres_preconditioned, gmres_preconditioned_with_guess,
+};
+use math_audio_solvers::{
     AdditiveSchwarzPreconditioner, AmgConfig, AmgPreconditioner, CsrMatrix, DiagonalPreconditioner,
     GmresConfig, IdentityPreconditioner, IluColoringPreconditioner, IluFixedPointPreconditioner,
     IluPreconditioner, gmres, lu_solve,
 };
+use ndarray::Array1;
+use num_complex::Complex64;
 use std::time::Instant;
 use thiserror::Error;
 
@@ -150,15 +152,15 @@ pub fn solve(problem: &HelmholtzProblem, config: &SolverConfig) -> Result<Soluti
     };
     let solve_time = solve_start.elapsed();
 
-    if config.verbosity > 0 {
-        if let Ok(ref sol) = result {
-            println!(
-                "  [FEM] Solve: {} iters, residual {:.2e}, time {:.1}ms",
-                sol.iterations,
-                sol.residual,
-                solve_time.as_secs_f64() * 1000.0
-            );
-        }
+    if config.verbosity > 0
+        && let Ok(ref sol) = result
+    {
+        println!(
+            "  [FEM] Solve: {} iters, residual {:.2e}, time {:.1}ms",
+            sol.iterations,
+            sol.residual,
+            solve_time.as_secs_f64() * 1000.0
+        );
     }
 
     result
@@ -1071,13 +1073,13 @@ pub fn solve_csr_with_guess(
         });
     }
 
-    if let Some(guess) = x0 {
-        if guess.len() != rhs.len() {
-            return Err(SolverError::DimensionMismatch {
-                expected: rhs.len(),
-                actual: guess.len(),
-            });
-        }
+    if let Some(guess) = x0
+        && guess.len() != rhs.len()
+    {
+        return Err(SolverError::DimensionMismatch {
+            expected: rhs.len(),
+            actual: guess.len(),
+        });
     }
 
     match config.solver_type {

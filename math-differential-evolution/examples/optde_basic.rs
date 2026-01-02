@@ -1,4 +1,4 @@
-use autoeq_de::{
+use math_audio_differential_evolution::{
     CallbackAction, Crossover, DEConfig, Mutation, PolishConfig, Strategy, differential_evolution,
 };
 use ndarray::Array1;
@@ -57,8 +57,7 @@ fn main() {
         maxeval: 400,
     });
 
-    let report = differential_evolution(&ackley, &bounds, cfg)
-        .expect("optimization failed");
+    let report = differential_evolution(&ackley, &bounds, cfg).expect("optimization failed");
 
     println!(
         "success={} message=\"{}\"\nbest f={:.6e}\nbest x={:?}",

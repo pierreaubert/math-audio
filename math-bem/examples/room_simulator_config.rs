@@ -10,7 +10,7 @@
 //!   cargo run --release --example room_simulator_config -- lshaped
 //!   cargo run --release --example room_simulator_config -- multi-source
 
-use bem::room_acoustics::*;
+use math_audio_bem::room_acoustics::*;
 use ndarray::Array2;
 use std::env;
 use std::fs;

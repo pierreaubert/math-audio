@@ -431,7 +431,7 @@ impl<T: ComplexField + Send + Sync> AdditiveSchwarzPreconditioner<T> {
             fn add(&self, i: usize, val: U) {
                 unsafe {
                     let vec = &mut (*self.0.get());
-                    vec[i] = vec[i] + val;
+                    vec[i] += val;
                 }
             }
         }

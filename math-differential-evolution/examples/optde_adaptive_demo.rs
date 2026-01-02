@@ -1,5 +1,7 @@
-use autoeq_de::{AdaptiveConfig, DEConfigBuilder, Mutation, Strategy, differential_evolution};
-use math_test_functions::{ackley, quadratic, rosenbrock};
+use math_audio_differential_evolution::{
+    AdaptiveConfig, DEConfigBuilder, Mutation, Strategy, differential_evolution,
+};
+use math_audio_test_functions::{ackley, quadratic, rosenbrock};
 use ndarray::Array1;
 
 /// Adaptive Differential Evolution Demo
@@ -104,8 +106,7 @@ fn main() {
         .build();
 
     println!("Running adaptive DE on Rosenbrock function with progress display...");
-    let result = differential_evolution(&rosenbrock, &bounds, config)
-        .expect("optimization failed");
+    let result = differential_evolution(&rosenbrock, &bounds, config).expect("optimization failed");
 
     println!(
         "Final result: f = {:.6e} at x = [{:.4}, {:.4}]",
@@ -123,7 +124,10 @@ fn main() {
     }
 }
 
-fn run_traditional_de(func: fn(&Array1<f64>) -> f64, bounds: &[(f64, f64)]) -> autoeq_de::DEReport {
+fn run_traditional_de(
+    func: fn(&Array1<f64>) -> f64,
+    bounds: &[(f64, f64)],
+) -> math_audio_differential_evolution::DEReport {
     let config = DEConfigBuilder::new()
         .seed(42)
         .maxiter(100)
@@ -133,15 +137,14 @@ fn run_traditional_de(func: fn(&Array1<f64>) -> f64, bounds: &[(f64, f64)]) -> a
         .recombination(0.7)
         .build();
 
-    differential_evolution(&func, bounds, config)
-        .expect("optimization failed")
+    differential_evolution(&func, bounds, config).expect("optimization failed")
 }
 
 fn run_adaptive_de(
     func: fn(&Array1<f64>) -> f64,
     bounds: &[(f64, f64)],
     enable_wls: bool,
-) -> autoeq_de::DEReport {
+) -> math_audio_differential_evolution::DEReport {
     let adaptive_config = AdaptiveConfig {
         adaptive_mutation: true,
         wls_enabled: enable_wls,
@@ -161,6 +164,5 @@ fn run_adaptive_de(
         .adaptive(adaptive_config)
         .build();
 
-    differential_evolution(&func, bounds, config)
-        .expect("optimization failed")
+    differential_evolution(&func, bounds, config).expect("optimization failed")
 }

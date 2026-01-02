@@ -7,7 +7,7 @@
 
 #[cfg(feature = "pure-rust")]
 fn main() {
-    use bem::core::mesh::generators::{generate_icosphere_mesh, generate_sphere_mesh};
+    use math_audio_bem::core::mesh::generators::{generate_icosphere_mesh, generate_sphere_mesh};
     use std::f64::consts::PI;
 
     let radius = 0.1;
@@ -32,13 +32,13 @@ fn main() {
 
 #[cfg(feature = "pure-rust")]
 fn test_e_constant(
-    mesh: &bem::core::types::Mesh,
+    mesh: &math_audio_bem::core::types::Mesh,
     frequency: f64,
     speed_of_sound: f64,
     density: f64,
 ) {
-    use bem::core::assembly::tbem::build_tbem_system;
-    use bem::core::types::{BoundaryCondition, PhysicsParams};
+    use math_audio_bem::core::assembly::tbem::build_tbem_system;
+    use math_audio_bem::core::types::{BoundaryCondition, PhysicsParams};
     use ndarray::Array1;
     use num_complex::Complex64;
 

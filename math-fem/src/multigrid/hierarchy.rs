@@ -97,7 +97,7 @@ impl MultigridHierarchy {
         let n_levels = meshes.len();
         let mut levels = Vec::with_capacity(n_levels);
 
-        for (_i, mesh) in meshes.into_iter().enumerate() {
+        for mesh in meshes {
             let n_dofs = mesh.num_nodes();
             levels.push(MultigridLevel {
                 mesh,
@@ -136,7 +136,7 @@ impl MultigridHierarchy {
         // Generate coarser meshes by selecting every other node
         // This is a simplified coarsening - real implementations use graph coarsening
         for _ in 1..n_levels {
-            let coarse = coarsen_mesh(&meshes.last().unwrap());
+            let coarse = coarsen_mesh(meshes.last().unwrap());
             if coarse.num_nodes() < 4 {
                 break; // Too coarse
             }

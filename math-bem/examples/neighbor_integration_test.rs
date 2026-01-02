@@ -5,11 +5,11 @@
 
 #[cfg(feature = "pure-rust")]
 fn main() {
-    use bem::core::integration::{
+    use math_audio_bem::core::integration::{
         regular_integration, regular_integration_fixed_order, singular_integration,
     };
-    use bem::core::mesh::generators::generate_icosphere_mesh;
-    use bem::core::types::PhysicsParams;
+    use math_audio_bem::core::mesh::generators::generate_icosphere_mesh;
+    use math_audio_bem::core::types::PhysicsParams;
     use num_complex::Complex64;
     use std::collections::HashSet;
     use std::f64::consts::PI;

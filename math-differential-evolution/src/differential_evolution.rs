@@ -24,7 +24,7 @@ use ndarray::Array1;
 /// # Example
 ///
 /// ```rust
-/// use autoeq_de::{differential_evolution, DEConfigBuilder};
+/// use math_audio_differential_evolution::{differential_evolution, DEConfigBuilder};
 ///
 /// let result = differential_evolution(
 ///     &|x| x[0].powi(2) + x[1].powi(2),
@@ -34,7 +34,11 @@ use ndarray::Array1;
 ///
 /// assert!(result.fun < 0.01);
 /// ```
-pub fn differential_evolution<F>(func: &F, bounds: &[(f64, f64)], config: DEConfig) -> Result<DEReport>
+pub fn differential_evolution<F>(
+    func: &F,
+    bounds: &[(f64, f64)],
+    config: DEConfig,
+) -> Result<DEReport>
 where
     F: Fn(&Array1<f64>) -> f64 + Sync,
 {

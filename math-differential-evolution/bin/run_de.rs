@@ -1,10 +1,10 @@
-use autoeq_de::{
+use clap::{Parser, ValueEnum};
+use math_audio_differential_evolution::{
     CallbackAction, Crossover, DEConfigBuilder, Init, Mutation, ParallelConfig, Strategy,
     differential_evolution,
     function_registry::{FunctionRegistry, TestFunction},
 };
-use math_test_functions::{FunctionMetadata, get_function_metadata};
-use clap::{Parser, ValueEnum};
+use math_audio_test_functions::{FunctionMetadata, get_function_metadata};
 use ndarray::Array1;
 use std::fmt::Write as FmtWrite;
 use std::process;
@@ -13,7 +13,7 @@ use std::time::Instant;
 
 #[derive(Parser, Debug)]
 #[command(
-    name = "run_autoeq_de",
+    name = "run_math_audio_differential_evolution",
     about = "Optimize AutoEQ differential evolution on a selected benchmark function"
 )]
 struct Cli {

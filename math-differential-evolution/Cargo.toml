@@ -1,6 +1,6 @@
 [package]
 name = "math-differential-evolution"
-version = "0.2.53"
+version = "0.3.0"
 description = "Non linear optimisation library with own DE solvers and interface to NLOpt and MetaHeuristics"
 edition = { workspace = true }
 repository = { workspace = true }
@@ -46,17 +46,17 @@ plotly_static = ["dep:plotly_static"]
 [target.'cfg(all(target_os = "windows", target_arch="aarch64"))'.dependencies]
 
 [[bin]]
-name = "plot_autoeq_de"
-path = "bin/plot_autoeq_de.rs"
+name = "plot_de"
+path = "bin/plot_de.rs"
 
 [[bin]]
 name = "benchmark_convergence"
 path = "bench/benchmark_convergence.rs"
 
 [[bin]]
-name = "run-autoeq-de"
-path = "bin/run_autoeq_de.rs"
+name = "run-de"
+path = "bin/run_de.rs"
 
 [lib]
-name = "autoeq_de"
+name = "math_audio_differential_evolution"
 path = "src/mod.rs"

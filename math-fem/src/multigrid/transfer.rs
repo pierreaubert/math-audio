@@ -23,18 +23,18 @@ pub fn restrict(r: &TransferMatrix, r_fine: &[Complex64]) -> Vec<Complex64> {
 /// Uses weights based on position relative to coarse nodes
 pub fn full_weighting_1d(fine: &[Complex64]) -> Vec<Complex64> {
     let n_fine = fine.len();
-    let n_coarse = (n_fine + 1) / 2;
+    let n_coarse = n_fine.div_ceil(2);
     let mut coarse = vec![Complex64::new(0.0, 0.0); n_coarse];
 
-    for i in 0..n_coarse {
+    for (i, c) in coarse.iter_mut().enumerate() {
         let fi = 2 * i;
         if fi == 0 {
-            coarse[i] = fine[0];
+            *c = fine[0];
         } else if fi >= n_fine - 1 {
-            coarse[i] = fine[n_fine - 1];
+            *c = fine[n_fine - 1];
         } else {
             // Interior: full weighting 1/4 * (f[fi-1] + 2*f[fi] + f[fi+1])
-            coarse[i] = Complex64::new(0.25, 0.0) * fine[fi - 1]
+            *c = Complex64::new(0.25, 0.0) * fine[fi - 1]
                 + Complex64::new(0.5, 0.0) * fine[fi]
                 + Complex64::new(0.25, 0.0) * fine[fi + 1];
         }

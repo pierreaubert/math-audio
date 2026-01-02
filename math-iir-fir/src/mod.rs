@@ -14,7 +14,7 @@
 //! # Example
 //!
 //! ```rust
-//! use autoeq_iir::{Biquad, BiquadFilterType, SRATE};
+//! use math_audio_iir_fir::{Biquad, BiquadFilterType, SRATE};
 //!
 //! // Create a peak filter at 1kHz with Q=2 and +3dB gain
 //! let filter = Biquad::new(BiquadFilterType::Peak, 1000.0, SRATE, 2.0, 3.0);

@@ -41,7 +41,7 @@ This crate provides IIR (Infinite Impulse Response) filter implementations for a
 ### Basic Biquad Filter
 
 ```rust
-use autoeq_iir::{Biquad, BiquadFilterType};
+use math_audio_iir_fir::{Biquad, BiquadFilterType};
 
 // Create a peak filter at 1kHz with Q=1.0 and 3dB gain
 let filter = Biquad::new(
@@ -64,7 +64,7 @@ print!("Response at 1kHz: {:.2} dB", response_db);
 ### Parametric EQ (PEQ)
 
 ```rust
-use autoeq_iir::{Biquad, BiquadFilterType, Peq, peq_spl, peq_preamp_gain, peq_format_apo};
+use math_audio_iir_fir::{Biquad, BiquadFilterType, Peq, peq_spl, peq_preamp_gain, peq_format_apo};
 use ndarray::Array1;
 
 // Create a multi-band EQ
@@ -98,7 +98,7 @@ print!("{}", apo_config);
 ### Filter Design
 
 ```rust
-use autoeq_iir::{peq_butterworth_lowpass, peq_linkwitzriley_highpass};
+use math_audio_iir_fir::{peq_butterworth_lowpass, peq_linkwitzriley_highpass};
 
 // Create a 4th-order Butterworth lowpass at 2kHz
 let lp_filter = peq_butterworth_lowpass(4, 2000.0, 48000.0);
@@ -138,7 +138,7 @@ print!("LR HP has {} sections", hp_filter.len());
 ## Advanced Example: Building a Complete Audio Processor
 
 ```rust
-use autoeq_iir::*;
+use math_audio_iir_fir::*;
 use ndarray::Array1;
 
 fn create_studio_eq() -> Peq {
@@ -240,7 +240,7 @@ Fast analytical approach (microseconds):
 ### Basic Example
 
 ```rust
-use autoeq_iir::{Biquad, BiquadFilterType, Peq, peq_loudness_gain, peq_preamp_gain};
+use math_audio_iir_fir::{Biquad, BiquadFilterType, Peq, peq_loudness_gain, peq_preamp_gain};
 
 // Create your PEQ filters
 let bass_boost = Biquad::new(BiquadFilterType::Peak, 100.0, 48000.0, 1.0, 6.0);

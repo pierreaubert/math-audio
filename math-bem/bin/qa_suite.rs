@@ -8,17 +8,17 @@
 //! Usage:
 //!     cargo run --bin qa-suite --release
 
-use bem::analytical::sphere_scattering_3d;
-use bem::core::assembly::tbem::build_tbem_system_with_beta;
-use bem::core::incident::IncidentField;
-use bem::core::mesh::generators::generate_icosphere_mesh;
-use bem::core::solver::{
+use math_audio_bem::analytical::sphere_scattering_3d;
+use math_audio_bem::core::assembly::tbem::build_tbem_system_with_beta;
+use math_audio_bem::core::incident::IncidentField;
+use math_audio_bem::core::mesh::generators::generate_icosphere_mesh;
+use math_audio_bem::core::solver::{
     BiCgstabConfig, CgsConfig, DenseOperator, GmresConfig, direct::lu_solve,
     gmres_solve_tbem_with_ilu, solve_bicgstab, solve_cgs,
 };
-use bem::core::types::{BoundaryCondition, PhysicsParams};
-use bem::testing::ValidationResult;
-use math_wave::analytical::{AnalyticalSolution, Point};
+use math_audio_bem::core::types::{BoundaryCondition, PhysicsParams};
+use math_audio_bem::testing::ValidationResult;
+use math_audio_wave::analytical::{AnalyticalSolution, Point};
 use num_complex::Complex64;
 use std::f64::consts::PI;
 use std::path::Path;

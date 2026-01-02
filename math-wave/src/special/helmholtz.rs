@@ -23,7 +23,7 @@ use std::f64::consts::PI;
 ///
 /// # Example
 /// ```
-/// use math_wave::special::helmholtz::greens_function_3d;
+/// use math_audio_wave::special::helmholtz::greens_function_3d;
 ///
 /// let g = greens_function_3d(1.0, 2.0);
 /// // |G| = 1/(4.0 * std::f64::consts::PI) for any k

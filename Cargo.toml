@@ -13,7 +13,7 @@ members = [
 resolver = "3"
 
 [workspace.package]
-version = "0.2.34"
+version = "0.3.0"
 authors = ["Pierre F. Aubert pierre@spinorama.org"]
 description = "Toolkit for audio modelisation"
 edition = "2024"
@@ -54,10 +54,10 @@ num-traits = "0.2"
 rayon = "1.11"
 nlopt = "0.8.1"
 spec_math = "0.1.6"
-math-test-functions = { path = "math-test-functions", version = "0.2", default-features = false }
-math-solvers = { path = "math-solvers", version = "0.2", default-features = false }
-math-wave = { path = "math-wave", version = "0.2" }
-math-xem-common = { path = "math-xem-common", version = "0.2" }
+math-test-functions = { path = "math-test-functions", version = "0.3", default-features = false }
+math-solvers = { path = "math-solvers", version = "0.3", default-features = false }
+math-wave = { path = "math-wave", version = "0.3" }
+math-xem-common = { path = "math-xem-common", version = "0.3" }
 
 # Plotting and visualization
 plotly = { version = "0.13.5" }

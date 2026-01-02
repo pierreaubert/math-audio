@@ -1,6 +1,6 @@
 [package]
 name = "math-wave"
-version = "0.2.1"
+version = "0.3.0"
 edition = { workspace = true }
 authors = { workspace = true }
 description = "Analytical solutions for wave and Helmholtz equations"
@@ -10,7 +10,7 @@ keywords = ["wave", "helmholtz", "acoustics", "analytical", "bessel"]
 categories = ["science", "mathematics"]
 
 [lib]
-name = "math_wave"
+name = "math_audio_wave"
 path = "src/lib.rs"
 
 [dependencies]

@@ -9,13 +9,13 @@
 //!   RAYON_NUM_THREADS=4 cargo run -p math-fem --example scaling_3d --release
 //!   RAYON_NUM_THREADS=8 cargo run -p math-fem --example scaling_3d --release
 
-use fem::assembly::HelmholtzProblem;
-use fem::basis::PolynomialDegree;
-use fem::boundary::{DirichletBC, apply_dirichlet};
-use fem::mesh::unit_cube_tetrahedra;
+use math_audio_fem::assembly::HelmholtzProblem;
+use math_audio_fem::basis::PolynomialDegree;
+use math_audio_fem::boundary::{DirichletBC, apply_dirichlet};
+use math_audio_fem::mesh::unit_cube_tetrahedra;
+use math_audio_solvers::{CsrMatrix, GmresConfig, gmres};
 use ndarray::Array1;
 use num_complex::Complex64;
-use solvers::{CsrMatrix, GmresConfig, gmres};
 use std::f64::consts::PI;
 use std::time::Instant;
 

@@ -24,7 +24,7 @@ pub const SPEED_OF_SOUND: f64 = 343.0;
 /// # Example
 ///
 /// ```rust
-/// use math_wave::analytical::plane_wave_1d;
+/// use math_audio_wave::analytical::plane_wave_1d;
 /// use std::f64::consts::PI;
 ///
 /// let solution = plane_wave_1d(1.0, 0.0, 2.0 * PI, 100);
@@ -87,7 +87,7 @@ pub fn plane_wave_1d(
 /// # Example
 ///
 /// ```rust
-/// use math_wave::analytical::standing_wave_1d;
+/// use math_audio_wave::analytical::standing_wave_1d;
 /// use std::f64::consts::PI;
 ///
 /// let solution = standing_wave_1d(1.0, 0.0, PI, 100);
@@ -152,7 +152,7 @@ pub fn standing_wave_1d(
 /// # Example
 ///
 /// ```rust
-/// use math_wave::analytical::damped_wave_1d;
+/// use math_audio_wave::analytical::damped_wave_1d;
 ///
 /// let solution = damped_wave_1d(1.0, 0.1, 0.0, 10.0, 100);
 /// // Magnitude should decay exponentially

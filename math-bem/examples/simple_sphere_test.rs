@@ -3,12 +3,12 @@
 //! Tests a rigid sphere scattering problem and compares with analytical Mie solution.
 //! Helps isolate accuracy issues in the BEM implementation.
 
-use bem::analytical::sphere_scattering_3d;
-use bem::core::assembly::tbem::build_tbem_system_with_beta;
-use bem::core::incident::IncidentField;
-use bem::core::mesh::generators::generate_icosphere_mesh;
-use bem::core::solver::direct::lu_solve;
-use bem::core::types::{BoundaryCondition, PhysicsParams};
+use math_audio_bem::analytical::sphere_scattering_3d;
+use math_audio_bem::core::assembly::tbem::build_tbem_system_with_beta;
+use math_audio_bem::core::incident::IncidentField;
+use math_audio_bem::core::mesh::generators::generate_icosphere_mesh;
+use math_audio_bem::core::solver::direct::lu_solve;
+use math_audio_bem::core::types::{BoundaryCondition, PhysicsParams};
 use ndarray::Array2;
 use num_complex::Complex64;
 use std::f64::consts::PI;

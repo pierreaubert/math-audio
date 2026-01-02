@@ -17,12 +17,12 @@
 //!   cargo run --release --bin roomsim-fem -- --help
 
 use clap::{Parser, ValueEnum};
-use fem::assembly::{
+use math_audio_fem::assembly::{
     HelmholtzMatrix, MassMatrix, StiffnessMatrix, assemble_mass, assemble_stiffness,
 };
-use fem::basis::PolynomialDegree;
-use fem::mesh::{ElementType, Mesh, Point};
-use fem::solver::{self, GmresConfigF64, SolverConfig, SolverType};
+use math_audio_fem::basis::PolynomialDegree;
+use math_audio_fem::mesh::{ElementType, Mesh, Point};
+use math_audio_fem::solver::{self, GmresConfigF64, SolverConfig, SolverType};
 use num_complex::Complex64;
 use rayon::prelude::*;
 use std::fs;
@@ -31,7 +31,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
 // Import common types from math-xem-common
-use xem_common::{
+use math_audio_xem_common::{
     Point3D, RoomConfig, RoomSimulation, Source, create_default_config, create_output_json,
     pressure_to_spl, print_config_summary,
 };
@@ -1026,7 +1026,7 @@ fn solve_single_frequency(
     let rhs = assemble_rhs_parallel(mesh, sources, frequency, source_width);
 
     // Create problem struct for solver
-    let problem = fem::assembly::HelmholtzProblem {
+    let problem = math_audio_fem::assembly::HelmholtzProblem {
         matrix: helmholtz,
         rhs,
         stiffness: stiffness.clone(),
@@ -1057,8 +1057,8 @@ fn assemble_rhs_parallel(
     frequency: f64,
     source_width: f64,
 ) -> Vec<Complex64> {
-    use fem::basis::{Jacobian, evaluate_shape};
-    use fem::quadrature::for_mass;
+    use math_audio_fem::basis::{Jacobian, evaluate_shape};
+    use math_audio_fem::quadrature::for_mass;
 
     let n_dofs = mesh.num_nodes();
     let n_elems = mesh.num_elements();

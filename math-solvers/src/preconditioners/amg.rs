@@ -20,7 +20,7 @@
 //! ## Usage
 //!
 //! ```ignore
-//! use solvers::{AmgPreconditioner, AmgConfig, CsrMatrix};
+//! use math_audio_solvers::{AmgPreconditioner, AmgConfig, CsrMatrix};
 //!
 //! let config = AmgConfig::default();
 //! let precond = AmgPreconditioner::from_csr(&matrix, config);

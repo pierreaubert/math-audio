@@ -40,10 +40,10 @@ fn get_records_dir() -> Result<std::path::PathBuf, String> {
 }
 
 // Import the test functions and metadata
-use math_test_functions::{FunctionMetadata, get_function_metadata};
+use math_audio_test_functions::{FunctionMetadata, get_function_metadata};
 
 // Import shared function registry
-use autoeq_de::function_registry::TestFunction;
+use math_audio_differential_evolution::function_registry::TestFunction;
 
 /// CLI arguments for plotting test functions
 #[derive(Parser)]
@@ -185,8 +185,8 @@ fn read_csv_trace(csv_path: &str) -> Result<OptimizationTrace, Box<dyn std::erro
             // Parse x coordinates (between generation and f_value/best_so_far/is_improvement)
             let x_end = parts.len() - 3; // f_value, best_so_far, is_improvement
             let mut x = Vec::new();
-            for i in 2..x_end {
-                let coord: f64 = parts[i].parse().map_err(|_| {
+            for (i, part) in parts.iter().enumerate().skip(2).take(x_end - 2) {
+                let coord: f64 = part.parse().map_err(|_| {
                     format!(
                         "Line {}: invalid x coordinate at column {}",
                         line_idx + 2,
@@ -234,8 +234,8 @@ fn read_csv_trace(csv_path: &str) -> Result<OptimizationTrace, Box<dyn std::erro
             let x_columns_end = parts.len() - 3; // best_result, convergence, is_improvement
             let mut x = Vec::new();
 
-            for i in 1..x_columns_end {
-                let coord: f64 = parts[i].parse().map_err(|_| {
+            for (i, part) in parts.iter().enumerate().skip(1).take(x_columns_end - 1) {
+                let coord: f64 = part.parse().map_err(|_| {
                     format!(
                         "Line {}: invalid x coordinate at column {}",
                         line_idx + 2,
@@ -281,7 +281,10 @@ fn read_csv_trace(csv_path: &str) -> Result<OptimizationTrace, Box<dyn std::erro
 }
 
 fn find_csv_for_function(csv_dir: &str, function_name: &str) -> Vec<String> {
-    autoeq_de::function_registry::find_csv_files_for_function(csv_dir, function_name)
+    math_audio_differential_evolution::function_registry::find_csv_files_for_function(
+        csv_dir,
+        function_name,
+    )
 }
 
 fn add_optimization_trace(
@@ -540,7 +543,7 @@ fn main() {
         .unwrap_or_else(|| match get_data_generated_dir() {
             Ok(data_dir) => {
                 let mut path = data_dir;
-                path.push("plot_autoeq_de");
+                path.push("plot_math_audio_differential_evolution");
                 path.to_string_lossy().to_string()
             }
             Err(e) => {
@@ -1090,7 +1093,7 @@ fn generate_interactive_html(
 
 /// Automatically get all test functions using the shared registry
 fn get_test_functions() -> Vec<(String, TestFunction)> {
-    let registry = autoeq_de::function_registry::FunctionRegistry::new();
+    let registry = math_audio_differential_evolution::function_registry::FunctionRegistry::new();
     let metadata = get_function_metadata();
     let mut functions = Vec::new();
 

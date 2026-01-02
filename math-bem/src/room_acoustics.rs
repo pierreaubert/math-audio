@@ -19,13 +19,13 @@ pub use config::*;
 pub use solver::*;
 
 // Re-export common types from math-xem-common
-pub use xem_common::{
+pub use math_audio_xem_common::{
     CrossoverFilter, DirectivityPattern, FrequencyResult, LShapedRoom, ListeningPosition, Point3D,
     RectangularRoom, RoomGeometry, RoomMesh, RoomSimulation, SimulationResults, SliceData, Source,
     SurfaceElement, constants, log_space, pressure_to_spl, wavenumber,
 };
 // Re-export output utilities
-pub use xem_common::{
+pub use math_audio_xem_common::{
     create_default_config, create_output_json, create_output_json_with_sources,
     generate_spatial_slices, print_config_summary,
 };

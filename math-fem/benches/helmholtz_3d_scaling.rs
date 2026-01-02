@@ -15,13 +15,13 @@
 //!   RAYON_NUM_THREADS=4 cargo bench -p math-fem --bench helmholtz_3d_scaling -- --verbose
 
 use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
-use fem::assembly::HelmholtzProblem;
-use fem::basis::PolynomialDegree;
-use fem::boundary::{DirichletBC, apply_dirichlet};
-use fem::mesh::unit_cube_tetrahedra;
+use math_audio_fem::assembly::HelmholtzProblem;
+use math_audio_fem::basis::PolynomialDegree;
+use math_audio_fem::boundary::{DirichletBC, apply_dirichlet};
+use math_audio_fem::mesh::unit_cube_tetrahedra;
+use math_audio_solvers::{CsrMatrix, GmresConfig, gmres};
 use ndarray::Array1;
 use num_complex::Complex64;
-use solvers::{CsrMatrix, GmresConfig, gmres};
 use std::f64::consts::PI;
 use std::time::Duration;
 

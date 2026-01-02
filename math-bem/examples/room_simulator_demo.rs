@@ -7,7 +7,7 @@
 //! - Frequency response calculation
 //! - Horizontal and vertical contour plots
 
-use bem::room_acoustics::*;
+use math_audio_bem::room_acoustics::*;
 use ndarray::Array2;
 use std::fs;
 

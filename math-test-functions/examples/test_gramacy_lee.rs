@@ -1,6 +1,6 @@
 //! Test Gramacy & Lee function to find the correct implementation
 
-use math_test_functions::*;
+use math_audio_test_functions::*;
 use ndarray::Array1;
 
 fn main() {

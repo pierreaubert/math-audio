@@ -4,9 +4,9 @@
 
 #[cfg(feature = "pure-rust")]
 fn main() {
-    use bem::core::integration::regular_integration;
-    use bem::core::mesh::generators::{generate_icosphere_mesh, generate_sphere_mesh};
-    use bem::core::types::{BoundaryCondition, ElementType, PhysicsParams};
+    use math_audio_bem::core::integration::regular_integration;
+    use math_audio_bem::core::mesh::generators::{generate_icosphere_mesh, generate_sphere_mesh};
+    use math_audio_bem::core::types::{BoundaryCondition, ElementType, PhysicsParams};
     use ndarray::{Array1, Array2};
     use num_complex::Complex64;
     use std::f64::consts::PI;
@@ -35,14 +35,14 @@ fn main() {
 
 #[cfg(feature = "pure-rust")]
 fn test_integration(
-    mesh: &bem::core::types::Mesh,
+    mesh: &math_audio_bem::core::types::Mesh,
     frequency: f64,
     speed_of_sound: f64,
     density: f64,
     radius: f64,
 ) {
-    use bem::core::integration::regular_integration;
-    use bem::core::types::{BoundaryCondition, PhysicsParams};
+    use math_audio_bem::core::integration::regular_integration;
+    use math_audio_bem::core::types::{BoundaryCondition, PhysicsParams};
     use ndarray::{Array1, Array2};
     use num_complex::Complex64;
     use std::f64::consts::PI;

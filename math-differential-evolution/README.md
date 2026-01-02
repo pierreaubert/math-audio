@@ -1,6 +1,6 @@
 <!-- markdownlint-disable-file MD013 -->
 
-# AutoEQ Differential Evolution
+# Math Audio Differential Evolution
 
 This crate provides a pure Rust implementation of Differential Evolution (DE) global optimization algorithm with advanced features.
 
@@ -30,7 +30,7 @@ This crate provides a pure Rust implementation of Differential Evolution (DE) gl
 ## Usage
 
 ```rust
-use autoeq_de::{differential_evolution, DEConfig, Strategy, Mutation};
+use math_audio_differential_evolution::{differential_evolution, DEConfig, Strategy, Mutation};
 use ndarray::Array1;
 
 // Example objective function (Rosenbrock)
@@ -53,7 +53,8 @@ let config = DEConfig {
     ..Default::default()
 };
 
-let result = differential_evolution(&objective, &bounds, config);
+let result = differential_evolution(&objective, &bounds, config)
+    .expect("optimization should succeed");
 println!("Best solution: {:?}", result.x);
 println!("Best fitness: {}", result.fun);
 ```
@@ -63,7 +64,7 @@ println!("Best fitness: {}", result.fun);
 ### Linear Constraints
 
 ```rust
-use autoeq_de::{LinearConstraintHelper, DEConfig};
+use math_audio_differential_evolution::{LinearConstraintHelper, DEConfig};
 use ndarray::{Array1, Array2};
 
 // Linear constraint: x1 + x2 <= 1.0
@@ -100,11 +101,11 @@ cargo run --bin plot_functions -- --csv-dir traces/ --show-traces
 
 ## Integration
 
-This crate is part of the AutoEQ ecosystem:
+This crate is part of the Math Audio ecosystem:
 
 - Used by `autoeq` for filter parameter optimization
-- Integrates with `autoeq-testfunctions` for validation
-- Works with `autoeq-iir` for audio filter optimization
+- Integrates with `math-audio-testfunctions` for validation
+- Works with `math-audio-iir-fir` for audio filter optimization
 
 ## Examples
 

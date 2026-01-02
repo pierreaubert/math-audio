@@ -14,7 +14,7 @@
 //! # Example
 //!
 //! ```ignore
-//! use solvers::{CsrMatrix, gmres, GmresConfig};
+//! use math_audio_solvers::{CsrMatrix, gmres, GmresConfig};
 //! use num_complex::Complex64;
 //!
 //! // Create a sparse system matrix

@@ -1,6 +1,6 @@
 //! Example demonstrating FIR filter usage
 
-use autoeq_iir::*;
+use math_audio_iir_fir::*;
 use ndarray::{Array1, array};
 
 fn main() {

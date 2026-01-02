@@ -2,7 +2,7 @@
 //!
 //! This example demonstrates the newly implemented functions from the SFU Virtual Library
 
-use math_test_functions::*;
+use math_audio_test_functions::*;
 use ndarray::Array1;
 
 fn main() {

@@ -41,7 +41,7 @@ use std::f64::consts::PI;
 /// # Example
 ///
 /// ```rust
-/// use math_wave::analytical::sphere_scattering_3d;
+/// use math_audio_wave::analytical::sphere_scattering_3d;
 /// use std::f64::consts::PI;
 ///
 /// // ka = 1 (Mie regime)

@@ -10,15 +10,15 @@
 
 #![cfg(feature = "pure-rust")]
 
-use bem::core::assembly::{
+use math_audio_bem::core::assembly::{
     CsrMatrix, build_cluster_tree, build_mlfmm_system, build_slfmm_system, build_tbem_system,
 };
-use bem::core::mesh::generators::generate_icosphere_mesh;
-use bem::core::solver::{
+use math_audio_bem::core::mesh::generators::generate_icosphere_mesh;
+use math_audio_bem::core::solver::{
     CgsConfig, DenseOperator, GmresConfig, IluOperator, LinearOperator, SlfmmOperator,
     gmres_solve_with_ilu, ilu_diagnostics, solve_cgs, solve_gmres, solve_with_ilu,
 };
-use bem::core::types::{BoundaryCondition, Cluster, PhysicsParams};
+use math_audio_bem::core::types::{BoundaryCondition, Cluster, PhysicsParams};
 use ndarray::{Array1, array};
 use num_complex::Complex64;
 use std::f64::consts::PI;
@@ -27,7 +27,7 @@ use std::f64::consts::PI;
 fn setup_test_problem(
     subdivisions: usize,
 ) -> (
-    Vec<bem::core::types::Element>,
+    Vec<math_audio_bem::core::types::Element>,
     ndarray::Array2<f64>,
     PhysicsParams,
 ) {
@@ -357,7 +357,7 @@ fn test_slfmm_operator_matvec() {
 // ILU Preconditioning Tests
 // ============================================================================
 
-use bem::core::solver::{
+use math_audio_bem::core::solver::{
     GmresConfig, IluMethod, IluOperator, IluScanningDegree, gmres_solve_with_ilu, ilu_diagnostics,
     solve_gmres, solve_tbem_with_ilu, solve_with_ilu,
 };

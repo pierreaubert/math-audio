@@ -1,6 +1,6 @@
 //! Example demonstrating the usage shown in README.md
 
-use autoeq_iir::*;
+use math_audio_iir_fir::*;
 use ndarray::Array1;
 
 fn create_studio_eq() -> Peq {

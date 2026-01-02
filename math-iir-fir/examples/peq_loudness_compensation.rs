@@ -8,7 +8,7 @@
 //!
 //! Run with: cargo run --example peq_loudness_compensation
 
-use autoeq_iir::{Biquad, BiquadFilterType, Peq, peq_loudness_gain, peq_preamp_gain};
+use math_audio_iir_fir::{Biquad, BiquadFilterType, Peq, peq_loudness_gain, peq_preamp_gain};
 
 fn main() {
     println!("=== PEQ Loudness Compensation Example ===\n");

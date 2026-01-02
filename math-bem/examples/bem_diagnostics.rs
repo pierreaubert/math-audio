@@ -10,12 +10,12 @@
 
 #[cfg(feature = "pure-rust")]
 fn main() {
-    use bem::analytical::sphere_scattering_3d;
-    use bem::core::assembly::tbem::build_tbem_system;
-    use bem::core::incident::IncidentField;
-    use bem::core::mesh::generators::generate_sphere_mesh;
-    use bem::core::solver::direct::lu_solve;
-    use bem::core::types::{BoundaryCondition, PhysicsParams};
+    use math_audio_bem::analytical::sphere_scattering_3d;
+    use math_audio_bem::core::assembly::tbem::build_tbem_system;
+    use math_audio_bem::core::incident::IncidentField;
+    use math_audio_bem::core::mesh::generators::generate_sphere_mesh;
+    use math_audio_bem::core::solver::direct::lu_solve;
+    use math_audio_bem::core::types::{BoundaryCondition, PhysicsParams};
     use ndarray::{Array1, Array2};
     use num_complex::Complex64;
     use std::f64::consts::PI;
@@ -58,12 +58,12 @@ fn main() {
 
 #[cfg(feature = "pure-rust")]
 fn investigate_incident_field(
-    mesh: &bem::core::types::Mesh,
-    physics: &bem::core::types::PhysicsParams,
+    mesh: &math_audio_bem::core::types::Mesh,
+    physics: &math_audio_bem::core::types::PhysicsParams,
     k: f64,
     radius: f64,
 ) {
-    use bem::core::incident::IncidentField;
+    use math_audio_bem::core::incident::IncidentField;
     use ndarray::Array2;
     use std::f64::consts::PI;
 
@@ -167,12 +167,12 @@ fn investigate_incident_field(
 
 #[cfg(feature = "pure-rust")]
 fn investigate_system_matrix(
-    mesh: &bem::core::types::Mesh,
-    physics: &bem::core::types::PhysicsParams,
+    mesh: &math_audio_bem::core::types::Mesh,
+    physics: &math_audio_bem::core::types::PhysicsParams,
 ) {
-    use bem::core::assembly::tbem::build_tbem_system;
-    use bem::core::integration::singular_integration;
-    use bem::core::types::BoundaryCondition;
+    use math_audio_bem::core::assembly::tbem::build_tbem_system;
+    use math_audio_bem::core::integration::singular_integration;
+    use math_audio_bem::core::types::BoundaryCondition;
     use ndarray::Array2;
     use num_complex::Complex64;
 
@@ -386,16 +386,16 @@ fn investigate_system_matrix(
 
 #[cfg(feature = "pure-rust")]
 fn investigate_solution(
-    mesh: &bem::core::types::Mesh,
-    physics: &bem::core::types::PhysicsParams,
+    mesh: &math_audio_bem::core::types::Mesh,
+    physics: &math_audio_bem::core::types::PhysicsParams,
     k: f64,
     radius: f64,
 ) {
-    use bem::analytical::sphere_scattering_3d;
-    use bem::core::assembly::tbem::{build_tbem_system, build_tbem_system_with_beta};
-    use bem::core::incident::IncidentField;
-    use bem::core::solver::direct::lu_solve;
-    use bem::core::types::BoundaryCondition;
+    use math_audio_bem::analytical::sphere_scattering_3d;
+    use math_audio_bem::core::assembly::tbem::{build_tbem_system, build_tbem_system_with_beta};
+    use math_audio_bem::core::incident::IncidentField;
+    use math_audio_bem::core::solver::direct::lu_solve;
+    use math_audio_bem::core::types::BoundaryCondition;
     use ndarray::{Array1, Array2};
     use num_complex::Complex64;
     use std::f64::consts::PI;

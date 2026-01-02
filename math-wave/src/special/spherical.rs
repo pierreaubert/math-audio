@@ -38,7 +38,7 @@ use num_complex::Complex64;
 ///
 /// # Example
 /// ```
-/// use math_wave::special::spherical::spherical_bessel_j;
+/// use math_audio_wave::special::spherical::spherical_bessel_j;
 /// let j = spherical_bessel_j(5, 1.0);
 /// // j[0] = sin(1)/1 ≈ 0.8414709848
 /// ```

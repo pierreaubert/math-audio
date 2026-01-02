@@ -4,11 +4,11 @@
 
 #[cfg(feature = "pure-rust")]
 fn main() {
-    use bem::core::assembly::tbem::build_tbem_system;
-    use bem::core::incident::IncidentField;
-    use bem::core::mesh::generators::{generate_icosphere_mesh, generate_sphere_mesh};
-    use bem::core::solver::direct::lu_solve;
-    use bem::core::types::{BoundaryCondition, PhysicsParams};
+    use math_audio_bem::core::assembly::tbem::build_tbem_system;
+    use math_audio_bem::core::incident::IncidentField;
+    use math_audio_bem::core::mesh::generators::{generate_icosphere_mesh, generate_sphere_mesh};
+    use math_audio_bem::core::solver::direct::lu_solve;
+    use math_audio_bem::core::types::{BoundaryCondition, PhysicsParams};
     use ndarray::Array2;
     use num_complex::Complex64;
     use std::f64::consts::PI;
@@ -34,15 +34,15 @@ fn main() {
 
 #[cfg(feature = "pure-rust")]
 fn analyze_system(
-    mesh: &bem::core::types::Mesh,
+    mesh: &math_audio_bem::core::types::Mesh,
     frequency: f64,
     speed_of_sound: f64,
     density: f64,
 ) {
-    use bem::core::assembly::tbem::build_tbem_system;
-    use bem::core::incident::IncidentField;
-    use bem::core::solver::direct::lu_solve;
-    use bem::core::types::{BoundaryCondition, PhysicsParams};
+    use math_audio_bem::core::assembly::tbem::build_tbem_system;
+    use math_audio_bem::core::incident::IncidentField;
+    use math_audio_bem::core::solver::direct::lu_solve;
+    use math_audio_bem::core::types::{BoundaryCondition, PhysicsParams};
     use ndarray::{Array1, Array2};
     use num_complex::Complex64;
 

@@ -174,9 +174,9 @@ impl Jacobian {
         let dim = self.inverse.len();
         let mut result = vec![0.0; dim];
 
-        for i in 0..dim {
-            for j in 0..dim {
-                result[i] += self.inverse[j][i] * grad_ref[j];
+        for (i, result_i) in result.iter_mut().enumerate() {
+            for (j, &grad_j) in grad_ref.iter().enumerate() {
+                *result_i += self.inverse[j][i] * grad_j;
             }
         }
 

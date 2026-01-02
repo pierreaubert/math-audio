@@ -29,16 +29,16 @@
 
 #[cfg(feature = "pure-rust")]
 fn main() {
-    use bem::analytical::sphere_scattering_3d;
-    use bem::core::assembly::mlfmm::{build_cluster_tree, build_mlfmm_system};
-    use bem::core::assembly::tbem::build_tbem_system_scaled;
-    use bem::core::incident::IncidentField;
-    use bem::core::mesh::generators::generate_icosphere_mesh;
-    use bem::core::solver::IluPreconditioner;
-    use bem::core::solver::Preconditioner;
-    use bem::core::solver::direct::lu_solve;
-    use bem::core::solver::{CgsConfig, solve_cgs, solve_with_ilu};
-    use bem::core::types::{BoundaryCondition, PhysicsParams};
+    use math_audio_bem::analytical::sphere_scattering_3d;
+    use math_audio_bem::core::assembly::mlfmm::{build_cluster_tree, build_mlfmm_system};
+    use math_audio_bem::core::assembly::tbem::build_tbem_system_scaled;
+    use math_audio_bem::core::incident::IncidentField;
+    use math_audio_bem::core::mesh::generators::generate_icosphere_mesh;
+    use math_audio_bem::core::solver::IluPreconditioner;
+    use math_audio_bem::core::solver::Preconditioner;
+    use math_audio_bem::core::solver::direct::lu_solve;
+    use math_audio_bem::core::solver::{CgsConfig, solve_cgs, solve_with_ilu};
+    use math_audio_bem::core::types::{BoundaryCondition, PhysicsParams};
     use ndarray::{Array1, Array2};
     use num_complex::Complex64;
     use std::f64::consts::PI;

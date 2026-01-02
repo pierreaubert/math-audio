@@ -4,14 +4,14 @@
 
 #[cfg(feature = "pure-rust")]
 fn main() {
-    use bem::analytical::sphere_scattering_3d;
-    use bem::core::assembly::slfmm::build_slfmm_system;
-    use bem::core::assembly::tbem::build_tbem_system_scaled;
-    use bem::core::incident::IncidentField;
-    use bem::core::mesh::generators::generate_icosphere_mesh;
-    use bem::core::solver::direct::lu_solve;
-    use bem::core::solver::{CgsConfig, solve_cgs};
-    use bem::core::types::{BoundaryCondition, Cluster, PhysicsParams};
+    use math_audio_bem::analytical::sphere_scattering_3d;
+    use math_audio_bem::core::assembly::slfmm::build_slfmm_system;
+    use math_audio_bem::core::assembly::tbem::build_tbem_system_scaled;
+    use math_audio_bem::core::incident::IncidentField;
+    use math_audio_bem::core::mesh::generators::generate_icosphere_mesh;
+    use math_audio_bem::core::solver::direct::lu_solve;
+    use math_audio_bem::core::solver::{CgsConfig, solve_cgs};
+    use math_audio_bem::core::types::{BoundaryCondition, Cluster, PhysicsParams};
     use ndarray::{Array1, Array2};
     use num_complex::Complex64;
     use std::f64::consts::PI;
@@ -110,7 +110,7 @@ fn main() {
         let start = Instant::now();
 
         // Wrap FMM system in operator
-        use bem::core::solver::SlfmmOperator;
+        use math_audio_bem::core::solver::SlfmmOperator;
         let op = SlfmmOperator::new(slfmm_system.clone());
 
         let config = CgsConfig {
@@ -184,7 +184,7 @@ fn main() {
     let slfmm_system = build_slfmm_system(&elements, &mesh.nodes, &clusters, &physics, 8, 16, 10);
 
     // Wrap FMM system in operator
-    use bem::core::solver::SlfmmOperator;
+    use math_audio_bem::core::solver::SlfmmOperator;
     let op = SlfmmOperator::new(slfmm_system.clone());
 
     let config = CgsConfig {

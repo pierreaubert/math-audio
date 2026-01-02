@@ -2,9 +2,9 @@
 
 #[cfg(feature = "pure-rust")]
 fn main() {
-    use bem::analytical::sphere_scattering_3d;
-    use bem::core::incident::IncidentField;
-    use bem::core::types::PhysicsParams;
+    use math_audio_bem::analytical::sphere_scattering_3d;
+    use math_audio_bem::core::incident::IncidentField;
+    use math_audio_bem::core::types::PhysicsParams;
     use ndarray::Array2;
     use std::f64::consts::PI;
 

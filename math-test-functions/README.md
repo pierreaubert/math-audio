@@ -51,7 +51,7 @@ For **constrained optimization** algorithms:
 
 ```rust
 use ndarray::Array1;
-use autoeq_testfunctions::*;
+use math_audio_test_functions::*;
 
 // Evaluate sphere function
 let x = Array1::from_vec(vec![1.0, 2.0]);
@@ -65,7 +65,7 @@ let result = rosenbrock(&x); // Returns 0.0 (global minimum)
 ### Function Metadata and Bounds
 
 ```rust
-use autoeq_testfunctions::{get_function_metadata, get_function_bounds, get_function_bounds_2d};
+use math_audio_test_functions::{get_function_metadata, get_function_bounds, get_function_bounds_2d};
 // Get all function metadata
 let metadata = get_function_metadata();
 println!("Available functions: {}", metadata.len());
@@ -82,7 +82,7 @@ let bounds_2d = get_function_bounds_2d("sphere", (-5.0, 5.0));
 
 ```rust
 use ndarray::Array1;
-use autoeq_testfunctions::*;
+use math_audio_test_functions::*;
 
 let x = Array1::from_vec(vec![1.0, 1.0]);
 // Unimodal functions (good for convergence testing)

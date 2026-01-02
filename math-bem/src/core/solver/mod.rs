@@ -16,11 +16,11 @@ pub mod batched_blas;
 pub mod fmm_interface;
 
 // Re-export core solver functionality from math-solvers
-pub use solvers::direct;
+pub use math_audio_solvers::direct;
 // Modules are private in math-solvers, so we can't re-export them directly.
 // We access their contents via the iterative module or specific re-exports.
 
-pub use solvers::traits::{LinearOperator, Preconditioner};
+pub use math_audio_solvers::traits::{LinearOperator, Preconditioner};
 
 // Core operator types from fmm_interface
 pub use fmm_interface::{CsrOperator, DenseOperator, DiagonalPreconditioner, MlfmmOperator};
@@ -52,11 +52,11 @@ pub use fmm_interface::{
 };
 
 // Re-export specific configuration types for convenience
-pub use solvers::iterative::{BiCgstabConfig, BiCgstabSolution};
-pub use solvers::iterative::{CgsConfig, CgsSolution};
-pub use solvers::iterative::{GmresConfig, GmresSolution};
-pub use solvers::preconditioners::IluPreconditioner;
-pub use solvers::preconditioners::{AmgConfig, AmgPreconditioner};
+pub use math_audio_solvers::iterative::{BiCgstabConfig, BiCgstabSolution};
+pub use math_audio_solvers::iterative::{CgsConfig, CgsSolution};
+pub use math_audio_solvers::iterative::{GmresConfig, GmresSolution};
+pub use math_audio_solvers::preconditioners::IluPreconditioner;
+pub use math_audio_solvers::preconditioners::{AmgConfig, AmgPreconditioner};
 
 // Batched BLAS operations (native only)
 #[cfg(feature = "native")]

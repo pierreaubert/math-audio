@@ -24,7 +24,7 @@ use crate::core::parallel::{parallel_enumerate_filter_map, parallel_flat_map, pa
 
 use crate::core::integration::{regular_integration, singular_integration, unit_sphere_quadrature};
 use crate::core::types::{BoundaryCondition, Cluster, Element, PhysicsParams};
-use math_wave::special::spherical_hankel_first_kind;
+use math_audio_wave::special::spherical_hankel_first_kind;
 
 /// Result of SLFMM assembly
 #[derive(Clone)]

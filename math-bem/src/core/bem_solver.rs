@@ -10,7 +10,7 @@
 //! # Example
 //!
 //! ```ignore
-//! use bem::core::{BemSolver, BemProblem, IncidentField};
+//! use math_audio_bem::core::{BemSolver, BemProblem, IncidentField};
 //!
 //! // Create a rigid sphere scattering problem
 //! let problem = BemProblem::rigid_sphere_scattering(
@@ -41,7 +41,7 @@ use crate::core::incident::IncidentField;
 use crate::core::mesh::generators::{generate_icosphere_mesh, generate_sphere_mesh};
 use crate::core::postprocess::pressure::{FieldPoint, compute_total_field};
 use crate::core::types::{BoundaryCondition, Element, Mesh, PhysicsParams};
-use solvers::direct::lu_solve;
+use math_audio_solvers::direct::lu_solve;
 
 /// Solver method for the linear system
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

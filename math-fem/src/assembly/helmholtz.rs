@@ -11,8 +11,8 @@ use super::mass::{MassMatrix, assemble_mass};
 use super::stiffness::{StiffnessMatrix, assemble_stiffness};
 use crate::basis::PolynomialDegree;
 use crate::mesh::Mesh;
+use math_audio_solvers::CsrMatrix;
 use num_complex::Complex64;
-use solvers::CsrMatrix;
 
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
@@ -261,8 +261,8 @@ where
 
         let f_val = source(x, y, z);
 
-        for i in 0..n_nodes {
-            f_local[i] += f_val * Complex64::new(shape.values[i] * det_j * qp.weight, 0.0);
+        for (f, &s) in f_local.iter_mut().zip(shape.values.iter()) {
+            *f += f_val * Complex64::new(s * det_j * qp.weight, 0.0);
         }
     }
 

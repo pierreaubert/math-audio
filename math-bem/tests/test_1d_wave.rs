@@ -3,9 +3,9 @@
 //! Tests plane wave, standing wave, and damped wave propagation.
 //! Generates JSON output for visualization.
 
-use bem::analytical::{damped_wave_1d, plane_wave_1d, standing_wave_1d};
-use bem::testing::ValidationResult;
 use directories::ProjectDirs;
+use math_audio_bem::analytical::{damped_wave_1d, plane_wave_1d, standing_wave_1d};
+use math_audio_bem::testing::ValidationResult;
 use num_complex::Complex64;
 use std::path::PathBuf;
 

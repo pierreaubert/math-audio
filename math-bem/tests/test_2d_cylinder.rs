@@ -3,11 +3,11 @@
 //! Tests rigid cylinder scattering using Bessel/Hankel function series.
 //! Generates JSON output for 2D field plots and directivity patterns.
 
-use bem::analytical::{
+use directories::ProjectDirs;
+use math_audio_bem::analytical::{
     cylinder_directivity_2d, cylinder_scattering_2d, cylinder_scattering_cross_section_2d,
 };
-use bem::testing::ValidationResult;
-use directories::ProjectDirs;
+use math_audio_bem::testing::ValidationResult;
 use num_complex::Complex64;
 use std::f64::consts::PI;
 use std::path::PathBuf;

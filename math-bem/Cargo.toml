@@ -1,6 +1,6 @@
 [package]
 name = "math-bem"
-version = "0.2.7"
+version = "0.3.0"
 edition = { workspace = true }
 authors = { workspace = true }
 description = "High-performance Boundary Element Method library for acoustic scattering"
@@ -10,7 +10,7 @@ keywords = ["bem", "boundary-element", "acoustics", "numerical", "hrtf"]
 categories = ["science", "mathematics", "simulation"]
 
 [lib]
-name = "bem"
+name = "math_audio_bem"
 path = "src/lib.rs"
 
 [[bin]]

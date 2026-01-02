@@ -1,6 +1,6 @@
 //! Test Hartmann 4-D function to find the correct implementation and minimum
 
-use math_test_functions::*;
+use math_audio_test_functions::*;
 use ndarray::Array1;
 
 fn main() {

@@ -10,8 +10,8 @@
 
 #[cfg(feature = "pure-rust")]
 fn main() {
-    use bem::analytical::sphere_scattering_3d;
-    use bem::core::{BemProblem, BemSolver};
+    use math_audio_bem::analytical::sphere_scattering_3d;
+    use math_audio_bem::core::{BemProblem, BemSolver};
     use ndarray::Array2;
     use std::f64::consts::PI;
 

@@ -77,7 +77,10 @@ impl DEError {
     ///
     /// This includes `BoundsMismatch` and `InvalidBounds` variants.
     pub fn is_bounds_error(&self) -> bool {
-        matches!(self, DEError::BoundsMismatch { .. } | DEError::InvalidBounds { .. })
+        matches!(
+            self,
+            DEError::BoundsMismatch { .. } | DEError::InvalidBounds { .. }
+        )
     }
 
     /// Returns `true` if this is a configuration-related error.

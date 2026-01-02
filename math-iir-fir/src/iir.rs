@@ -191,7 +191,7 @@ impl Biquad {
     /// # Example
     ///
     /// ```rust
-    /// use autoeq_iir::{Biquad, BiquadFilterType, SRATE};
+    /// use math_audio_iir_fir::{Biquad, BiquadFilterType, SRATE};
     ///
     /// // Valid filter
     /// let filter = Biquad::try_new(BiquadFilterType::Peak, 1000.0, SRATE, 2.0, 3.0)
@@ -1325,7 +1325,7 @@ fn k_weighting_db(f: f64) -> f64 {
 ///
 /// # Example
 /// ```no_run
-/// use autoeq_iir::{Biquad, BiquadFilterType, peq_loudness_gain};
+/// use math_audio_iir_fir::{Biquad, BiquadFilterType, peq_loudness_gain};
 ///
 /// let bq = Biquad::new(BiquadFilterType::Peak, 1000.0, 48000.0, 1.0, 6.0);
 /// let peq = vec![(1.0, bq)];

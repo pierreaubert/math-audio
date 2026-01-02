@@ -49,7 +49,7 @@ pub(crate) fn mutant_adaptive<R: Rng + ?Sized>(
 #[cfg(test)]
 mod tests {
     use crate::{AdaptiveConfig, DEConfigBuilder, Mutation, Strategy, differential_evolution};
-    use math_test_functions::quadratic;
+    use math_audio_test_functions::quadratic;
 
     #[test]
     fn test_adaptive_basic() {

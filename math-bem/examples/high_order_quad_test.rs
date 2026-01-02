@@ -5,9 +5,9 @@
 
 #[cfg(feature = "pure-rust")]
 fn main() {
-    use bem::core::assembly::tbem::build_tbem_system_with_beta;
-    use bem::core::mesh::generators::generate_icosphere_mesh;
-    use bem::core::types::{BoundaryCondition, PhysicsParams};
+    use math_audio_bem::core::assembly::tbem::build_tbem_system_with_beta;
+    use math_audio_bem::core::mesh::generators::generate_icosphere_mesh;
+    use math_audio_bem::core::types::{BoundaryCondition, PhysicsParams};
     use ndarray::{Array1, Array2};
     use num_complex::Complex64;
     use std::f64::consts::PI;

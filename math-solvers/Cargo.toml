@@ -1,6 +1,6 @@
 [package]
 name = "math-solvers"
-version = "0.2.5"
+version = "0.3.0"
 description = "High-performance linear solvers for BEM and FEM"
 edition = { workspace = true }
 authors = { workspace = true }
@@ -10,7 +10,7 @@ keywords = ["linear-algebra", "solvers", "gmres", "preconditionner"]
 categories = ["science", "mathematics"]
 
 [lib]
-name = "solvers"
+name = "math_audio_solvers"
 path = "src/lib.rs"
 
 [dependencies]

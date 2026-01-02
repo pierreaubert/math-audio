@@ -1,6 +1,6 @@
 [package]
 name = "math-convex-hull"
-version = "0.2.7"
+version = "0.3.0"
 authors.workspace = true
 description = "3D Convex Hull and Computational Geometry library"
 edition.workspace = true

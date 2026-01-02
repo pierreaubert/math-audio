@@ -40,7 +40,7 @@ use std::f64::consts::PI;
 /// # Example
 ///
 /// ```rust
-/// use math_wave::analytical::cylinder_scattering_2d;
+/// use math_audio_wave::analytical::cylinder_scattering_2d;
 /// use std::f64::consts::PI;
 ///
 /// // ka = 1 (low frequency)

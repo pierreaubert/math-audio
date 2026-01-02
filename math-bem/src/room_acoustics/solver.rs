@@ -269,7 +269,7 @@ pub fn calculate_field_pressure(
     pressures
 }
 
-// pressure_to_spl is now in xem_common::types
+// pressure_to_spl is now in math_audio_xem_common::types
 
 /// Simple GMRES solver for complex linear systems
 /// Solves Ax = b using restarted GMRES

@@ -7,7 +7,7 @@
 // the Free Software Foundation, either version 3 of the License, or
 // (at your option) any later version.
 
-use autoeq_iir::{Biquad, BiquadFilterType, Peq, peq_format_rme_room};
+use math_audio_iir_fir::{Biquad, BiquadFilterType, Peq, peq_format_rme_room};
 
 fn main() {
     // Create a sample PEQ for the left channel

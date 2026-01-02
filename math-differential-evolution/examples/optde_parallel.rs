@@ -1,4 +1,6 @@
-use autoeq_de::{DEConfig, Mutation, ParallelConfig, Strategy, differential_evolution};
+use math_audio_differential_evolution::{
+    DEConfig, Mutation, ParallelConfig, Strategy, differential_evolution,
+};
 use ndarray::Array1;
 use std::time::Instant;
 
@@ -39,8 +41,8 @@ fn main() {
     cfg_seq.parallel.enabled = false; // Disable parallel evaluation
 
     let start_seq = Instant::now();
-    let report_seq = differential_evolution(&rastrigin, &bounds, cfg_seq)
-        .expect("optimization failed");
+    let report_seq =
+        differential_evolution(&rastrigin, &bounds, cfg_seq).expect("optimization failed");
     let duration_seq = start_seq.elapsed();
 
     println!("\nSequential Results:");
@@ -66,8 +68,8 @@ fn main() {
     };
 
     let start_par = Instant::now();
-    let report_par = differential_evolution(&rastrigin, &bounds, cfg_par)
-        .expect("optimization failed");
+    let report_par =
+        differential_evolution(&rastrigin, &bounds, cfg_par).expect("optimization failed");
     let duration_par = start_par.elapsed();
 
     println!("\nParallel Results:");
@@ -105,8 +107,8 @@ fn main() {
         };
 
         let start = Instant::now();
-        let _ = differential_evolution(&rastrigin, &bounds, cfg_threads)
-            .expect("optimization failed");
+        let _ =
+            differential_evolution(&rastrigin, &bounds, cfg_threads).expect("optimization failed");
         let duration = start.elapsed();
 
         println!(

@@ -68,10 +68,10 @@ fn element_mass_triangle_p1(
         let det_j = jac.det.abs();
 
         // Assemble: M_ij += N_i * N_j * det(J) * weight
-        for i in 0..n_nodes {
-            for j in 0..n_nodes {
+        for (i, row) in m_local.iter_mut().enumerate() {
+            for (j, m_ij) in row.iter_mut().enumerate() {
                 let val = shape.values[i] * shape.values[j] * det_j * qp.weight;
-                m_local[i][j] += Complex64::new(val, 0.0);
+                *m_ij += Complex64::new(val, 0.0);
             }
         }
     }
@@ -102,10 +102,10 @@ fn element_mass_quad_q1(
         let jac = Jacobian::from_2d(&shape.gradients, &coords);
         let det_j = jac.det.abs();
 
-        for i in 0..n_nodes {
-            for j in 0..n_nodes {
+        for (i, row) in m_local.iter_mut().enumerate() {
+            for (j, m_ij) in row.iter_mut().enumerate() {
                 let val = shape.values[i] * shape.values[j] * det_j * qp.weight;
-                m_local[i][j] += Complex64::new(val, 0.0);
+                *m_ij += Complex64::new(val, 0.0);
             }
         }
     }
@@ -142,10 +142,10 @@ fn element_mass_tet_p1(
         let jac = Jacobian::from_3d(&shape.gradients, &coords);
         let det_j = jac.det.abs();
 
-        for i in 0..n_nodes {
-            for j in 0..n_nodes {
+        for (i, row) in m_local.iter_mut().enumerate() {
+            for (j, m_ij) in row.iter_mut().enumerate() {
                 let val = shape.values[i] * shape.values[j] * det_j * qp.weight;
-                m_local[i][j] += Complex64::new(val, 0.0);
+                *m_ij += Complex64::new(val, 0.0);
             }
         }
     }
@@ -182,10 +182,10 @@ fn element_mass_hex_q1(
         let jac = Jacobian::from_3d(&shape.gradients, &coords);
         let det_j = jac.det.abs();
 
-        for i in 0..n_nodes {
-            for j in 0..n_nodes {
+        for (i, row) in m_local.iter_mut().enumerate() {
+            for (j, m_ij) in row.iter_mut().enumerate() {
                 let val = shape.values[i] * shape.values[j] * det_j * qp.weight;
-                m_local[i][j] += Complex64::new(val, 0.0);
+                *m_ij += Complex64::new(val, 0.0);
             }
         }
     }

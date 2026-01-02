@@ -11,10 +11,12 @@
 //!   cargo run --release --bin room_simulator_bem -- --config configs/example_multi_source.json
 //!   cargo run --release --bin room_simulator_bem -- --help
 
-use bem::core::solver::{GmresConfig, gmres_solve_fmm_batched_with_ilu, gmres_solve_with_ilu};
-use bem::room_acoustics::*;
+use math_audio_bem::core::solver::{
+    GmresConfig, gmres_solve_fmm_batched_with_ilu, gmres_solve_with_ilu,
+};
+use math_audio_bem::room_acoustics::*;
 // Re-import FMM solver types from room_acoustics (they're re-exported from solver.rs)
-// FmmSolverConfig, solve_bem_fmm_gmres_ilu are available via bem::room_acoustics
+// FmmSolverConfig, solve_bem_fmm_gmres_ilu are available via math_audio_bem::room_acoustics
 use clap::{Parser, ValueEnum};
 use ndarray::Array1;
 use num_complex::Complex64;

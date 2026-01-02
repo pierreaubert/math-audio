@@ -16,7 +16,7 @@
 //! # Example
 //!
 //! ```rust
-//! use autoeq_de::{differential_evolution, DEConfigBuilder};
+//! use math_audio_differential_evolution::{differential_evolution, DEConfigBuilder};
 //!
 //! // Minimize the sphere function: f(x) = sum(x_i^2)
 //! let bounds = vec![(-5.0, 5.0), (-5.0, 5.0)];
@@ -610,7 +610,7 @@ impl Default for DEConfig {
 /// # Example
 ///
 /// ```rust
-/// use autoeq_de::{DEConfigBuilder, Strategy, Mutation};
+/// use math_audio_differential_evolution::{DEConfigBuilder, Strategy, Mutation};
 ///
 /// let config = DEConfigBuilder::new()
 ///     .maxiter(500)

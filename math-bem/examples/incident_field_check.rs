@@ -6,9 +6,9 @@
 
 #[cfg(feature = "pure-rust")]
 fn main() {
-    use bem::core::incident::IncidentField;
-    use bem::core::mesh::generators::generate_icosphere_mesh;
-    use bem::core::types::PhysicsParams;
+    use math_audio_bem::core::incident::IncidentField;
+    use math_audio_bem::core::mesh::generators::generate_icosphere_mesh;
+    use math_audio_bem::core::types::PhysicsParams;
     use ndarray::Array2;
     use std::f64::consts::PI;
 
