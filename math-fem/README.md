@@ -8,7 +8,7 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-math-fem = { path = "../math-fem" }
+math-fem = { version = "0.3" }
 ```
 
 ## Features
