@@ -442,6 +442,106 @@ impl CpuCoreInfo {
     }
 }
 
+/// Frequency band with associated mesh resolution
+#[derive(Debug, Clone)]
+struct FrequencyBand {
+    /// Frequencies in this band
+    frequencies: Vec<f64>,
+    /// Original indices of these frequencies
+    indices: Vec<usize>,
+    /// Mesh resolution for this band (elements per meter)
+    mesh_resolution: usize,
+    /// Maximum frequency in this band
+    max_freq: f64,
+}
+
+/// Compute required mesh resolution for a given frequency
+///
+/// For accurate FEM solutions, we need approximately `elements_per_wavelength` elements
+/// per wavelength at the given frequency.
+fn compute_mesh_resolution(
+    frequency: f64,
+    speed_of_sound: f64,
+    elements_per_wavelength: usize,
+    min_resolution: usize,
+) -> usize {
+    let wavelength = speed_of_sound / frequency;
+    let required = (elements_per_wavelength as f64 / wavelength).ceil() as usize;
+    required.max(min_resolution)
+}
+
+/// Group frequencies into bands with similar mesh resolution requirements
+fn group_frequencies_into_bands(
+    frequencies: &[f64],
+    speed_of_sound: f64,
+    elements_per_wavelength: usize,
+    min_resolution: usize,
+) -> Vec<FrequencyBand> {
+    if frequencies.is_empty() {
+        return Vec::new();
+    }
+
+    // Compute required resolution for each frequency
+    let resolutions: Vec<usize> = frequencies
+        .iter()
+        .map(|&f| compute_mesh_resolution(f, speed_of_sound, elements_per_wavelength, min_resolution))
+        .collect();
+
+    // Group frequencies by resolution (using power-of-2-ish bands to limit mesh count)
+    // We'll use resolution bands: min, 2*min, 4*min, 8*min, etc.
+    let mut bands: Vec<FrequencyBand> = Vec::new();
+    let mut current_band_resolution = 0usize;
+    let mut current_frequencies: Vec<f64> = Vec::new();
+    let mut current_indices: Vec<usize> = Vec::new();
+
+    // Sort frequencies with their indices
+    let mut freq_with_idx: Vec<(usize, f64, usize)> = frequencies
+        .iter()
+        .enumerate()
+        .map(|(i, &f)| (i, f, resolutions[i]))
+        .collect();
+    freq_with_idx.sort_by(|a, b| a.2.cmp(&b.2).then(a.1.partial_cmp(&b.1).unwrap()));
+
+    for (orig_idx, freq, resolution) in freq_with_idx {
+        // Determine the band resolution (round up to nearest "nice" value)
+        let band_resolution = if resolution <= min_resolution {
+            min_resolution
+        } else {
+            // Round up to multiples of min_resolution that roughly double
+            let factor = (resolution as f64 / min_resolution as f64).ceil() as usize;
+            min_resolution * factor
+        };
+
+        if band_resolution != current_band_resolution && !current_frequencies.is_empty() {
+            // Start a new band
+            let max_freq = current_frequencies.iter().cloned().fold(0.0f64, f64::max);
+            bands.push(FrequencyBand {
+                frequencies: std::mem::take(&mut current_frequencies),
+                indices: std::mem::take(&mut current_indices),
+                mesh_resolution: current_band_resolution,
+                max_freq,
+            });
+        }
+
+        current_band_resolution = band_resolution;
+        current_frequencies.push(freq);
+        current_indices.push(orig_idx);
+    }
+
+    // Push the last band
+    if !current_frequencies.is_empty() {
+        let max_freq = current_frequencies.iter().cloned().fold(0.0f64, f64::max);
+        bands.push(FrequencyBand {
+            frequencies: current_frequencies,
+            indices: current_indices,
+            mesh_resolution: current_band_resolution,
+            max_freq,
+        });
+    }
+
+    bands
+}
+
 #[derive(Parser, Debug)]
 #[command(name = "room-simulator-fem")]
 #[command(about = "Room acoustics simulator using Finite Element Method")]
@@ -498,6 +598,18 @@ struct Args {
     /// Enable verbose output
     #[arg(short, long)]
     verbose: bool,
+
+    /// Enable adaptive mesh resolution (uses finer mesh at higher frequencies)
+    #[arg(long)]
+    adaptive_mesh: bool,
+
+    /// Elements per wavelength for adaptive mesh (default: 8)
+    #[arg(long, default_value = "8")]
+    elements_per_wavelength: usize,
+
+    /// Minimum mesh resolution (elements per meter)
+    #[arg(long, default_value = "3")]
+    min_mesh_resolution: usize,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -596,20 +708,37 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let available_memory_gb = args.memory_gb.or_else(get_system_memory_gb);
 
-    let output_data = run_fem_simulation(
-        &simulation,
-        &config,
-        internal_solver_type,
-        args.krylov_size,
-        args.schwarz_domains,
-        args.source_width,
-        args.batch_size,
-        args.warm_start,
-        args.anchor_stride,
-        available_memory_gb,
-        &cpu_info,
-        args.verbose,
-    )?;
+    let output_data = if args.adaptive_mesh {
+        run_fem_simulation_adaptive(
+            &simulation,
+            &config,
+            internal_solver_type,
+            args.krylov_size,
+            args.schwarz_domains,
+            args.source_width,
+            args.batch_size,
+            available_memory_gb,
+            &cpu_info,
+            args.verbose,
+            args.elements_per_wavelength,
+            args.min_mesh_resolution,
+        )?
+    } else {
+        run_fem_simulation(
+            &simulation,
+            &config,
+            internal_solver_type,
+            args.krylov_size,
+            args.schwarz_domains,
+            args.source_width,
+            args.batch_size,
+            args.warm_start,
+            args.anchor_stride,
+            available_memory_gb,
+            &cpu_info,
+            args.verbose,
+        )?
+    };
 
     println!("\nSaving results to: {}", args.output.display());
     fs::write(&args.output, serde_json::to_string_pretty(&output_data)?)?;
@@ -1042,6 +1171,259 @@ fn run_fem_simulation(
     }
 
     // Use first listening position for backward compatibility
+    Ok(create_output_json(
+        simulation,
+        config,
+        all_lp_spl_values[0].clone(),
+        &solver_name,
+    ))
+}
+
+/// Run FEM simulation with adaptive mesh resolution
+///
+/// This function groups frequencies into bands and uses different mesh resolutions
+/// for each band. Higher frequencies get finer meshes to maintain accuracy.
+#[allow(clippy::too_many_arguments)]
+fn run_fem_simulation_adaptive(
+    simulation: &RoomSimulation,
+    config: &RoomConfig,
+    solver_type: SolverType,
+    krylov_size: usize,
+    schwarz_domains: usize,
+    source_width: f64,
+    batch_size: usize,
+    available_memory_gb: Option<f64>,
+    _cpu_info: &CpuCoreInfo,
+    verbose: bool,
+    elements_per_wavelength: usize,
+    min_mesh_resolution: usize,
+) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+    let solver_name = format!("{:?}", solver_type);
+    println!("\n=== {} Solver (Adaptive Mesh) ===", solver_name.to_uppercase());
+
+    // Group frequencies into bands
+    let bands = group_frequencies_into_bands(
+        &simulation.frequencies,
+        simulation.speed_of_sound,
+        elements_per_wavelength,
+        min_mesh_resolution,
+    );
+
+    println!("\nFrequency bands ({} total):", bands.len());
+    for (i, band) in bands.iter().enumerate() {
+        println!(
+            "  Band {}: {} frequencies up to {:.0} Hz (mesh: {} elem/m)",
+            i + 1,
+            band.frequencies.len(),
+            band.max_freq,
+            band.mesh_resolution
+        );
+    }
+
+    // Configure solver
+    let solver_config = SolverConfig {
+        solver_type,
+        gmres: GmresConfigF64 {
+            max_iterations: config.solver.gmres.max_iter,
+            restart: krylov_size,
+            tolerance: config.solver.gmres.tolerance,
+            print_interval: 0,
+        },
+        verbosity: 0,
+        schwarz_subdomains: schwarz_domains,
+        schwarz_overlap: 2,
+    };
+
+    let n_freqs = simulation.frequencies.len();
+    let n_lps = simulation.listening_positions.len();
+    let sources = &simulation.sources;
+    let listening_positions = &simulation.listening_positions;
+
+    // Results storage - indexed by original frequency index
+    let mut all_spl_values: Vec<Option<Vec<f64>>> = vec![None; n_freqs];
+    let mut all_iterations: Vec<usize> = vec![0; n_freqs];
+    let mut all_residuals: Vec<f64> = vec![0.0; n_freqs];
+
+    let total_start = Instant::now();
+    let mut total_completed = 0usize;
+
+    // Process each frequency band with its own mesh
+    for (band_idx, band) in bands.iter().enumerate() {
+        println!(
+            "\n--- Band {} of {}: {:.0}-{:.0} Hz ({} elem/m) ---",
+            band_idx + 1,
+            bands.len(),
+            band.frequencies.iter().cloned().fold(f64::INFINITY, f64::min),
+            band.max_freq,
+            band.mesh_resolution
+        );
+
+        // Create mesh for this band
+        let mesh_start = Instant::now();
+        let mesh = create_room_mesh(simulation, band.mesh_resolution);
+        println!(
+            "  Mesh: {} nodes, {} elements (created in {:.1}ms)",
+            mesh.num_nodes(),
+            mesh.num_elements(),
+            mesh_start.elapsed().as_secs_f64() * 1000.0
+        );
+
+        // Assemble matrices
+        let matrix_start = Instant::now();
+        let stiffness = assemble_stiffness(&mesh, PolynomialDegree::P1);
+        let mass = assemble_mass(&mesh, PolynomialDegree::P1);
+
+        let markers = [
+            MARKER_FLOOR, MARKER_CEILING, MARKER_FRONT, MARKER_BACK, MARKER_LEFT, MARKER_RIGHT
+        ];
+        let mut boundary_matrices = Vec::new();
+        for &marker in &markers {
+            let b_mass = assemble_boundary_mass(&mesh, PolynomialDegree::P1, marker);
+            if b_mass.nnz() > 0 {
+                boundary_matrices.push((marker as usize, b_mass));
+            }
+        }
+
+        let assembler = HelmholtzAssembler::from_matrices(&stiffness, &mass, &boundary_matrices);
+        println!(
+            "  Assembly: {:.1}ms (K: {} nnz)",
+            matrix_start.elapsed().as_secs_f64() * 1000.0,
+            stiffness.nnz()
+        );
+
+        // Memory estimation for this band
+        if verbose {
+            let mem_estimate = MemoryEstimate {
+                n_dofs: mesh.num_nodes(),
+                k_nnz: stiffness.nnz(),
+                m_nnz: mass.nnz(),
+                krylov_size,
+                solver_type,
+                schwarz_domains,
+            };
+            println!(
+                "  Memory per freq: {}",
+                MemoryEstimate::format_bytes(mem_estimate.per_frequency_memory())
+            );
+        }
+
+        // Locate listening positions in this mesh
+        let lp_elements: Vec<Option<usize>> = listening_positions
+            .par_iter()
+            .map(|lp| find_containing_element_parallel(&mesh, *lp))
+            .collect();
+
+        // Determine batch size for this band
+        let effective_batch_size = if batch_size == 0 {
+            if let Some(gb) = available_memory_gb {
+                let mem_estimate = MemoryEstimate {
+                    n_dofs: mesh.num_nodes(),
+                    k_nnz: stiffness.nnz(),
+                    m_nnz: mass.nnz(),
+                    krylov_size,
+                    solver_type,
+                    schwarz_domains,
+                };
+                mem_estimate.recommended_batch_size(gb, rayon::current_num_threads())
+            } else {
+                band.frequencies.len()
+            }
+        } else {
+            batch_size
+        };
+
+        let band_n_freqs = band.frequencies.len();
+        let progress_counter = AtomicUsize::new(0);
+        let solve_start = Instant::now();
+
+        println!(
+            "  Processing {} frequencies (batch size: {})",
+            band_n_freqs, effective_batch_size
+        );
+
+        // Process frequencies in this band
+        for batch_start in (0..band_n_freqs).step_by(effective_batch_size) {
+            let batch_end = (batch_start + effective_batch_size).min(band_n_freqs);
+            let batch_freqs = &band.frequencies[batch_start..batch_end];
+            let batch_indices = &band.indices[batch_start..batch_end];
+
+            let batch_results: Vec<(usize, Vec<f64>, usize, f64)> = batch_freqs
+                .par_iter()
+                .zip(batch_indices.par_iter())
+                .map(|(&freq, &orig_idx)| {
+                    let result = solve_single_frequency(
+                        &mesh,
+                        &assembler,
+                        &solver_config,
+                        sources,
+                        simulation,
+                        freq,
+                        simulation.wavenumber(freq),
+                        source_width,
+                        listening_positions,
+                        &lp_elements,
+                    );
+
+                    let completed = progress_counter.fetch_add(1, Ordering::Relaxed) + 1;
+                    if verbose || completed % 10 == 0 || completed == band_n_freqs {
+                        let elapsed = solve_start.elapsed().as_secs_f64();
+                        let rate = completed as f64 / elapsed;
+                        print!(
+                            "\r  Progress: {}/{} ({:.1}%) - {:.1} freq/s    ",
+                            total_completed + completed,
+                            n_freqs,
+                            100.0 * (total_completed + completed) as f64 / n_freqs as f64,
+                            rate
+                        );
+                        use std::io::Write;
+                        std::io::stdout().flush().ok();
+                    }
+
+                    (orig_idx, result.0, result.1, result.2)
+                })
+                .collect();
+
+            // Store results
+            for (orig_idx, spl_values, iterations, residual) in batch_results {
+                all_spl_values[orig_idx] = Some(spl_values);
+                all_iterations[orig_idx] = iterations;
+                all_residuals[orig_idx] = residual;
+            }
+        }
+
+        total_completed += band_n_freqs;
+        println!(); // New line after progress
+    }
+
+    let total_time = total_start.elapsed();
+    let freq_per_sec = n_freqs as f64 / total_time.as_secs_f64();
+    println!(
+        "\nSolve complete: {:.2}s total ({:.1} frequencies/sec)",
+        total_time.as_secs_f64(),
+        freq_per_sec
+    );
+
+    // Report statistics
+    if verbose {
+        let total_iters: usize = all_iterations.iter().sum();
+        let avg_iters = total_iters as f64 / n_freqs as f64;
+        let max_residual = all_residuals.iter().cloned().fold(0.0f64, f64::max);
+        println!(
+            "  Average iterations: {:.1}, Max residual: {:.2e}",
+            avg_iters, max_residual
+        );
+    }
+
+    // Collect results sorted by frequency
+    let mut all_lp_spl_values: Vec<Vec<f64>> = vec![Vec::with_capacity(n_freqs); n_lps];
+    for spl_values_opt in &all_spl_values {
+        if let Some(spl_values) = spl_values_opt {
+            for (lp_idx, &spl) in spl_values.iter().enumerate() {
+                all_lp_spl_values[lp_idx].push(spl);
+            }
+        }
+    }
+
     Ok(create_output_json(
         simulation,
         config,
