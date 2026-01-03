@@ -18,7 +18,7 @@
 
 use clap::{Parser, ValueEnum};
 use math_audio_fem::assembly::{
-    HelmholtzAssembler, MassMatrix, StiffnessMatrix, assemble_mass, assemble_stiffness,
+    HelmholtzAssembler, assemble_mass, assemble_stiffness,
     assemble_boundary_mass,
 };
 use math_audio_fem::basis::PolynomialDegree;
@@ -35,7 +35,7 @@ use std::collections::HashMap;
 // Import common types from math-xem-common
 use math_audio_xem_common::{
     Point3D, RoomConfig, RoomSimulation, Source, create_default_config, create_output_json,
-    pressure_to_spl, print_config_summary, SurfaceConfig, BoundaryConfig,
+    pressure_to_spl, print_config_summary, SurfaceConfig,
 };
 
 /// Default source width in meters (Gaussian sigma)
@@ -168,12 +168,6 @@ impl MemoryEstimate {
                 amg_matrices + amg_interp
             }
         }
-    }
-
-    /// Estimate memory for warm-start anchor storage in bytes
-    fn anchor_storage_memory(&self, n_anchors: usize) -> usize {
-        // Each anchor stores a full solution vector
-        n_anchors * self.n_dofs * Self::COMPLEX_SIZE
     }
 
     /// Calculate recommended batch size given available memory
@@ -349,7 +343,9 @@ struct CpuCoreInfo {
 impl CpuCoreInfo {
     /// Detect CPU core configuration
     fn detect() -> Self {
-        let total_cores = rayon::current_num_threads();
+        let total_cores = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1);
 
         #[cfg(target_os = "macos")]
         {
@@ -423,16 +419,6 @@ impl CpuCoreInfo {
         }
     }
 
-    /// Get recommended thread count for compute-intensive work
-    fn recommended_threads(&self) -> usize {
-        if self.is_heterogeneous {
-            // Use only P-cores for latency-sensitive batch work
-            self.perf_cores.unwrap_or(self.total_cores)
-        } else {
-            self.total_cores
-        }
-    }
-
     /// Print CPU info and recommendations
     fn print_info(&self) {
         if self.is_heterogeneous {
@@ -473,7 +459,7 @@ struct Args {
     solver: CliSolverType,
 
     /// Override preconditioner
-    #[arg(short, long)]
+    #[arg(short, long, default_value = "amg")]
     preconditioner: Option<CliPreconditionerType>,
 
     /// Krylov subspace size (restart)
@@ -743,7 +729,7 @@ fn create_room_mesh(simulation: &RoomSimulation, elements_per_meter: usize) -> M
     
     // For L-shaped or other rooms, remaining walls (marker 0) can be tagged as OTHER
     // We update anything still marked as 0
-    mesh.set_boundary_condition(BoundaryType::Neumann, MARKER_OTHER, |pts| {
+    mesh.set_boundary_condition(BoundaryType::Neumann, MARKER_OTHER, |_pts| {
         // This predicate is a bit loose but catches "untagged" boundaries
         // Ideally we check if marker is 0, but set_boundary_condition iterates all.
         // We can just assume any remaining boundaries are "walls".
