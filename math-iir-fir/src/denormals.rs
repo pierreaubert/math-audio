@@ -17,10 +17,16 @@
 //! ```
 
 #[cfg(target_arch = "x86_64")]
-use std::arch::x86_64::{
-    _MM_DENORMALS_ZERO_MASK, _MM_DENORMALS_ZERO_ON, _MM_FLUSH_ZERO_MASK, _MM_FLUSH_ZERO_ON,
-    _mm_getcsr, _mm_setcsr,
-};
+use std::arch::x86_64::{_mm_getcsr, _mm_setcsr};
+#[cfg(target_arch = "x86")]
+use std::arch::x86::{_mm_getcsr, _mm_setcsr};
+
+// MXCSR bit masks - defined here for cross-platform compatibility
+// (not all platforms expose these constants in std::arch)
+#[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
+const FTZ_ON: u32 = 0x8000; // Flush-to-Zero bit (bit 15)
+#[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
+const DAZ_ON: u32 = 0x0040; // Denormals-Are-Zero bit (bit 6)
 
 /// A guard that enables Flush-to-Zero (FTZ) and Denormals-Are-Zero (DAZ)
 /// when instantiated, and restores the previous state when dropped.
@@ -28,25 +34,25 @@ use std::arch::x86_64::{
 /// This is useful for optimizing audio processing loops where denormal numbers
 /// (extremely small values close to zero) can cause significant performance penalties.
 pub struct ScopedFlushToZero {
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
     original_csr: u32,
     #[cfg(target_arch = "aarch64")]
     original_fpcr: u64,
-    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "x86", target_arch = "aarch64")))]
     _dummy: (),
 }
 
 impl ScopedFlushToZero {
     /// Create a new guard that enables FTZ/DAZ mode on the current thread.
     pub fn new() -> Self {
-        #[cfg(target_arch = "x86_64")]
+        #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
         unsafe {
             let original_csr = _mm_getcsr();
             let mut new_csr = original_csr;
             // set Flush to Zero
-            new_csr |= _MM_FLUSH_ZERO_ON;
+            new_csr |= FTZ_ON;
             // set Denormals Are Zero
-            new_csr |= _MM_DENORMALS_ZERO_ON;
+            new_csr |= DAZ_ON;
             _mm_setcsr(new_csr);
 
             ScopedFlushToZero { original_csr }
@@ -65,7 +71,7 @@ impl ScopedFlushToZero {
             ScopedFlushToZero { original_fpcr }
         }
 
-        #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+        #[cfg(not(any(target_arch = "x86_64", target_arch = "x86", target_arch = "aarch64")))]
         {
             ScopedFlushToZero { _dummy: () }
         }
@@ -74,7 +80,7 @@ impl ScopedFlushToZero {
 
 impl Drop for ScopedFlushToZero {
     fn drop(&mut self) {
-        #[cfg(target_arch = "x86_64")]
+        #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
         unsafe {
             _mm_setcsr(self.original_csr);
         }
