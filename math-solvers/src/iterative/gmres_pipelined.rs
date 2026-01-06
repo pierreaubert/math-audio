@@ -4,6 +4,7 @@
 //! This solver overlaps the matrix-vector product with global reductions to hide communication latency
 //! and improve scalability on parallel systems.
 
+use crate::blas_helpers::{inner_product, vector_norm};
 use crate::iterative::gmres::{GmresConfig, GmresSolution};
 use crate::traits::{ComplexField, LinearOperator, Preconditioner};
 use ndarray::{Array1, Array2};
@@ -224,21 +225,6 @@ where
 }
 
 // Helpers
-
-#[inline]
-fn inner_product<T: ComplexField>(x: &Array1<T>, y: &Array1<T>) -> T {
-    x.iter()
-        .zip(y.iter())
-        .fold(T::zero(), |acc, (&xi, &yi)| acc + xi.conj() * yi)
-}
-
-#[inline]
-fn vector_norm<T: ComplexField>(x: &Array1<T>) -> T::Real {
-    x.iter()
-        .map(|xi| xi.norm_sqr())
-        .fold(T::Real::zero(), |acc, val| acc + val)
-        .sqrt()
-}
 
 #[inline]
 fn givens_rotation<T: ComplexField>(a: T, b: T) -> (T, T) {

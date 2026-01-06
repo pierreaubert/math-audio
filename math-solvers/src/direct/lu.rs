@@ -79,6 +79,7 @@ impl<T: ComplexField> LuFactorization<T> {
 }
 
 /// Compute LU factorization with partial pivoting (pure Rust implementation)
+#[allow(dead_code)]
 pub fn lu_factorize<T: ComplexField>(a: &Array2<T>) -> Result<LuFactorization<T>, LuError> {
     let n = a.nrows();
     if n != a.ncols() {

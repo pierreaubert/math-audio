@@ -25,6 +25,7 @@
 //! let solution = gmres(&matrix, &rhs, &config)?;
 //! ```
 
+mod blas_helpers;
 pub mod direct;
 pub mod iterative;
 pub mod parallel;
