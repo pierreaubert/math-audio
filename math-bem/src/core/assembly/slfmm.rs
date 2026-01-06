@@ -359,6 +359,26 @@ impl SlfmmSystem {
     }
 }
 
+use math_audio_solvers::traits::LinearOperator;
+
+impl LinearOperator<Complex64> for SlfmmSystem {
+    fn num_rows(&self) -> usize {
+        self.num_dofs
+    }
+
+    fn num_cols(&self) -> usize {
+        self.num_dofs
+    }
+
+    fn apply(&self, x: &Array1<Complex64>) -> Array1<Complex64> {
+        self.matvec(x)
+    }
+
+    fn apply_transpose(&self, x: &Array1<Complex64>) -> Array1<Complex64> {
+        self.matvec_transpose(x)
+    }
+}
+
 /// Build the SLFMM system matrices
 ///
 /// # Arguments
