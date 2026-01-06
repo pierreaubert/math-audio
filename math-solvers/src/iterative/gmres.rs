@@ -6,6 +6,7 @@
 //! It minimizes the residual in a Krylov subspace and has smooth, monotonic
 //! convergence behavior.
 
+use crate::blas_helpers::{axpy, inner_product, vector_norm};
 use crate::traits::{ComplexField, LinearOperator, Preconditioner};
 use ndarray::{Array1, Array2};
 use num_traits::{Float, FromPrimitive, One, ToPrimitive, Zero};
@@ -183,7 +184,7 @@ where
             for i in 0..=j {
                 h[[i, j]] = inner_product(&v[i], &w);
                 let h_ij = h[[i, j]];
-                w = &w - &v[i].mapv(|vi| vi * h_ij);
+                axpy(-h_ij, &v[i], &mut w);
             }
 
             let w_norm = vector_norm(&w);
@@ -194,7 +195,10 @@ where
             if w_norm < breakdown_tol {
                 inner_converged = true;
             } else {
-                v.push(w.mapv(|wi| wi * T::from_real(T::Real::one() / w_norm)));
+                let inv_norm = T::from_real(T::Real::one() / w_norm);
+                let mut new_v = w.clone();
+                axpy(inv_norm - T::one(), &w, &mut new_v);
+                v.push(new_v);
             }
 
             // Apply previous Givens rotations to new column of H
@@ -235,7 +239,7 @@ where
 
                 // Update solution x = x + V * y
                 for (i, &yi) in y.iter().enumerate() {
-                    x = &x + &v[i].mapv(|vi| vi * yi);
+                    axpy(yi, &v[i], &mut x);
                 }
 
                 return GmresSolution {
@@ -252,7 +256,7 @@ where
         let y = solve_upper_triangular(&h, &g, m);
 
         for (i, &yi) in y.iter().enumerate() {
-            x = &x + &v[i].mapv(|vi| vi * yi);
+            axpy(yi, &v[i], &mut x);
         }
 
         restarts += 1;
@@ -578,23 +582,6 @@ where
         residual: rel_residual,
         converged: false,
     }
-}
-
-/// Compute inner product (x, y) = Σ conj(x_i) * y_i
-#[inline]
-fn inner_product<T: ComplexField>(x: &Array1<T>, y: &Array1<T>) -> T {
-    x.iter()
-        .zip(y.iter())
-        .fold(T::zero(), |acc, (&xi, &yi)| acc + xi.conj() * yi)
-}
-
-/// Compute vector 2-norm
-#[inline]
-fn vector_norm<T: ComplexField>(x: &Array1<T>) -> T::Real {
-    x.iter()
-        .map(|xi| xi.norm_sqr())
-        .fold(T::Real::zero(), |acc, v| acc + v)
-        .sqrt()
 }
 
 /// Compute Givens rotation coefficients

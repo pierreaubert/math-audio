@@ -3,9 +3,10 @@
 //! BiCGSTAB is a Krylov subspace method for non-symmetric systems.
 //! It often converges faster than GMRES for certain problem types.
 
+use crate::blas_helpers::{inner_product, vector_norm};
 use crate::traits::{ComplexField, LinearOperator};
 use ndarray::Array1;
-use num_traits::{Float, FromPrimitive, ToPrimitive, Zero};
+use num_traits::{FromPrimitive, ToPrimitive, Zero};
 
 /// BiCGSTAB solver configuration
 #[derive(Debug, Clone)]
@@ -183,21 +184,6 @@ where
         residual: rel_residual,
         converged: false,
     }
-}
-
-#[inline]
-fn inner_product<T: ComplexField>(x: &Array1<T>, y: &Array1<T>) -> T {
-    x.iter()
-        .zip(y.iter())
-        .fold(T::zero(), |acc, (&xi, &yi)| acc + xi.conj() * yi)
-}
-
-#[inline]
-fn vector_norm<T: ComplexField>(x: &Array1<T>) -> T::Real {
-    x.iter()
-        .map(|xi| xi.norm_sqr())
-        .fold(T::Real::zero(), |acc, v| acc + v)
-        .sqrt()
 }
 
 #[cfg(test)]

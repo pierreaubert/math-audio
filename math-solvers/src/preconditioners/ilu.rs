@@ -26,6 +26,9 @@ pub struct IluPreconditioner<T: ComplexField> {
     u_diag: Vec<T>,
     /// Matrix dimension
     n: usize,
+    #[allow(dead_code)]
+    /// Precomputed diagonal indices for fast lookup during factorization
+    diag_indices: Vec<usize>,
 }
 
 impl<T: ComplexField> IluPreconditioner<T> {
@@ -33,62 +36,64 @@ impl<T: ComplexField> IluPreconditioner<T> {
     pub fn from_csr(matrix: &CsrMatrix<T>) -> Self {
         let n = matrix.num_rows;
 
-        // For ILU(0), we use the same sparsity pattern as A
-        // L is strictly lower triangular with unit diagonal
-        // U is upper triangular
+        let col_indices = &matrix.col_indices;
+        let row_ptrs = &matrix.row_ptrs;
 
-        // Initialize with a copy of the matrix
-        let mut values = matrix.values.clone();
-        let col_indices = matrix.col_indices.clone();
-        let row_ptrs = matrix.row_ptrs.clone();
-
-        // Perform incomplete factorization
+        let mut diag_indices = vec![usize::MAX; n];
         for i in 0..n {
-            // Skip diagonal detection - we process all entries below
+            #[allow(clippy::needless_range_loop)]
+            for idx in row_ptrs[i]..row_ptrs[i + 1] {
+                if col_indices[idx] == i {
+                    diag_indices[i] = idx;
+                    break;
+                }
+            }
+        }
 
-            // For each row k < i where a_ik != 0
+        let mut values = matrix.values.clone();
+
+        for i in 0..n {
             for idx in row_ptrs[i]..row_ptrs[i + 1] {
                 let k = col_indices[idx];
                 if k >= i {
                     break;
                 }
 
-                // Find u_kk (diagonal of U in row k)
-                let mut u_kk = T::zero();
-                for k_idx in row_ptrs[k]..row_ptrs[k + 1] {
-                    if col_indices[k_idx] == k {
-                        u_kk = values[k_idx];
-                        break;
-                    }
+                let u_kk_idx = diag_indices[k];
+                if u_kk_idx == usize::MAX {
+                    continue;
                 }
+
+                let u_kk = values[u_kk_idx];
 
                 if u_kk.norm() < T::Real::from_f64(1e-30).unwrap() {
                     continue;
                 }
 
-                // Compute l_ik = a_ik / u_kk
                 let l_ik = values[idx] * u_kk.inv();
                 values[idx] = l_ik;
 
-                // Update a_ij for j > k where both a_ij and u_kj exist
                 for j_idx in row_ptrs[i]..row_ptrs[i + 1] {
                     let j = col_indices[j_idx];
                     if j <= k {
                         continue;
                     }
 
-                    // Find u_kj
-                    for k_j_idx in row_ptrs[k]..row_ptrs[k + 1] {
-                        if col_indices[k_j_idx] == j {
-                            values[j_idx] = values[j_idx] - l_ik * values[k_j_idx];
-                            break;
+                    let u_kj_idx = diag_indices[k] + 1;
+                    if u_kj_idx < row_ptrs[k + 1] && col_indices[u_kj_idx] == j {
+                        values[j_idx] = values[j_idx] - l_ik * values[u_kj_idx];
+                    } else {
+                        for search_idx in (row_ptrs[k] + 1)..row_ptrs[k + 1] {
+                            if col_indices[search_idx] == j {
+                                values[j_idx] = values[j_idx] - l_ik * values[search_idx];
+                                break;
+                            }
                         }
                     }
                 }
             }
         }
 
-        // Extract L and U separately
         let mut l_values = Vec::new();
         let mut l_col_indices = Vec::new();
         let mut l_row_ptrs = vec![0];
@@ -104,11 +109,9 @@ impl<T: ComplexField> IluPreconditioner<T> {
                 let val = values[idx];
 
                 if j < i {
-                    // Lower triangular (L)
                     l_values.push(val);
                     l_col_indices.push(j);
                 } else {
-                    // Upper triangular (U)
                     u_values.push(val);
                     u_col_indices.push(j);
                     if j == i {
@@ -129,6 +132,7 @@ impl<T: ComplexField> IluPreconditioner<T> {
             u_row_ptrs,
             u_diag,
             n,
+            diag_indices,
         }
     }
 }

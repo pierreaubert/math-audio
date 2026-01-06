@@ -35,7 +35,6 @@ use crate::sparse::CsrMatrix;
 use crate::traits::{ComplexField, Preconditioner};
 use ndarray::Array1;
 use num_traits::FromPrimitive;
-use std::collections::HashMap;
 
 /// Coarsening algorithm for AMG hierarchy construction
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -824,36 +823,14 @@ where
 
     /// Compute Galerkin coarse grid operator: A_c = R * A * P
     fn galerkin_product(r: &CsrMatrix<T>, a: &CsrMatrix<T>, p: &CsrMatrix<T>) -> CsrMatrix<T> {
-        let ap = Self::sparse_matmul(a, p);
-        Self::sparse_matmul(r, &ap)
+        let ap = a.matmul(p);
+        r.matmul(&ap)
     }
 
-    /// Sparse matrix multiplication
+    /// Sparse matrix multiplication - now uses optimized CSR matmul
+    #[allow(dead_code)]
     fn sparse_matmul(a: &CsrMatrix<T>, b: &CsrMatrix<T>) -> CsrMatrix<T> {
-        assert_eq!(a.num_cols, b.num_rows, "Matrix dimension mismatch");
-
-        let m = a.num_rows;
-        let n = b.num_cols;
-        let mut triplets: Vec<(usize, usize, T)> = Vec::new();
-
-        for i in 0..m {
-            let mut row_acc: HashMap<usize, T> = HashMap::new();
-
-            for (k, a_ik) in a.row_entries(i) {
-                for (j, b_kj) in b.row_entries(k) {
-                    *row_acc.entry(j).or_insert(T::zero()) += a_ik * b_kj;
-                }
-            }
-
-            let tol = T::Real::from_f64(1e-15).unwrap();
-            for (j, val) in row_acc {
-                if val.norm() > tol {
-                    triplets.push((i, j, val));
-                }
-            }
-        }
-
-        CsrMatrix::from_triplets(m, n, triplets)
+        a.matmul(b)
     }
 
     /// Compute grid and operator complexities
