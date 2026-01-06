@@ -1341,6 +1341,7 @@ fn solve_gmres_shifted_laplacian_mg(
 }
 
 /// Solve using GMRES with Shifted-Laplacian preconditioner, with optional initial guess
+#[allow(dead_code)]
 fn solve_gmres_shifted_laplacian_with_guess(
     problem: &HelmholtzProblem,
     csr: &CsrMatrix<Complex64>,
@@ -1385,6 +1386,7 @@ fn solve_gmres_shifted_laplacian_with_guess(
 }
 
 /// Solve using GMRES with Shifted-Laplacian+V-cycle, with optional initial guess
+#[allow(dead_code)]
 fn solve_gmres_shifted_laplacian_mg_with_guess(
     problem: &HelmholtzProblem,
     csr: &CsrMatrix<Complex64>,

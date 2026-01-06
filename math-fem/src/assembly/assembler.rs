@@ -157,12 +157,10 @@ impl HelmholtzAssembler {
             row_ptrs[r + 1] = 0;
         }
 
-        for i in 1..entries.len() {
-            let e = &entries[i];
-
-            if e.row == last_r && e.col == last_c {
+        for entry in entries.iter().skip(1) {
+            if entry.row == last_r && entry.col == last_c {
                 // Same position, accumulate
-                accumulate(e, &mut acc_k, &mut acc_m, &mut acc_boundaries);
+                accumulate(entry, &mut acc_k, &mut acc_m, &mut acc_boundaries);
             } else {
                 // New position, push previous
                 k_values.push(acc_k);
@@ -173,20 +171,20 @@ impl HelmholtzAssembler {
                 col_indices.push(last_c);
 
                 // Update row pointers
-                if e.row != last_r {
+                if entry.row != last_r {
                     row_ptrs[last_r + 1] = k_values.len();
-                    for r in (last_r + 1)..e.row {
+                    for r in (last_r + 1)..entry.row {
                         row_ptrs[r + 1] = k_values.len();
                     }
                 }
 
                 // Start new accumulation
-                last_r = e.row;
-                last_c = e.col;
+                last_r = entry.row;
+                last_c = entry.col;
                 acc_k = 0.0;
                 acc_m = 0.0;
                 acc_boundaries.clear();
-                accumulate(e, &mut acc_k, &mut acc_m, &mut acc_boundaries);
+                accumulate(entry, &mut acc_k, &mut acc_m, &mut acc_boundaries);
             }
         }
 
@@ -236,6 +234,7 @@ impl HelmholtzAssembler {
 
                 // Add boundary terms
                 if !self.boundary_values.is_empty() {
+                    #[allow(clippy::collapsible_if)]
                     for (tag, coeffs) in boundary_coeffs {
                         if let Some(b_vals) = self.boundary_values.get(tag) {
                             if b_vals[i] != 0.0 {

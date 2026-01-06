@@ -103,6 +103,7 @@ pub fn rectangular_mesh_quads(
 }
 
 /// Generate a box mesh with tetrahedral elements
+#[allow(clippy::too_many_arguments)]
 pub fn box_mesh_tetrahedra(
     x_min: f64,
     x_max: f64,
@@ -166,6 +167,7 @@ pub fn box_mesh_tetrahedra(
 }
 
 /// Generate a box mesh with hexahedral elements
+#[allow(clippy::too_many_arguments)]
 pub fn box_mesh_hexahedra(
     x_min: f64,
     x_max: f64,
