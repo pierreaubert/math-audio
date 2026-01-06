@@ -287,7 +287,7 @@ pub fn assemble_lumped_mass(mesh: &Mesh, degree: PolynomialDegree) -> Vec<f64> {
 }
 
 /// Assemble boundary mass matrix for a specific boundary marker
-/// 
+///
 /// Assembles M_gamma = ∫_Γ φ_i φ_j dΓ for boundaries with the given marker
 pub fn assemble_boundary_mass(mesh: &Mesh, _degree: PolynomialDegree, marker: i32) -> MassMatrix {
     let n_dofs = mesh.num_nodes();
@@ -299,7 +299,7 @@ pub fn assemble_boundary_mass(mesh: &Mesh, _degree: PolynomialDegree, marker: i3
         }
 
         let nodes = &boundary.nodes;
-        
+
         if nodes.len() == 3 {
             // Triangle face
             let p0 = &mesh.nodes[nodes[0]];
@@ -309,18 +309,18 @@ pub fn assemble_boundary_mass(mesh: &Mesh, _degree: PolynomialDegree, marker: i3
             // Compute area
             let v1 = [p1.x - p0.x, p1.y - p0.y, p1.z - p0.z];
             let v2 = [p2.x - p0.x, p2.y - p0.y, p2.z - p0.z];
-            
+
             // Cross product
             let cx = v1[1] * v2[2] - v1[2] * v2[1];
             let cy = v1[2] * v2[0] - v1[0] * v2[2];
             let cz = v1[0] * v2[1] - v1[1] * v2[0];
-            
-            let area = 0.5 * (cx*cx + cy*cy + cz*cz).sqrt();
-            
+
+            let area = 0.5 * (cx * cx + cy * cy + cz * cz).sqrt();
+
             // P1 triangle mass matrix
             // M_loc = (Area / 12) * [2 1 1; 1 2 1; 1 1 2]
             let factor = area / 12.0;
-            
+
             for i in 0..3 {
                 for j in 0..3 {
                     let val = if i == j { 2.0 * factor } else { factor };
@@ -331,16 +331,16 @@ pub fn assemble_boundary_mass(mesh: &Mesh, _degree: PolynomialDegree, marker: i3
             // Edge (2D mesh)
             let p0 = &mesh.nodes[nodes[0]];
             let p1 = &mesh.nodes[nodes[1]];
-            
+
             let dx = p1.x - p0.x;
             let dy = p1.y - p0.y;
             let dz = p1.z - p0.z;
-            let len = (dx*dx + dy*dy + dz*dz).sqrt();
-            
+            let len = (dx * dx + dy * dy + dz * dz).sqrt();
+
             // P1 edge mass matrix
             // M_loc = (Length / 6) * [2 1; 1 2]
             let factor = len / 6.0;
-            
+
             for i in 0..2 {
                 for j in 0..2 {
                     let val = if i == j { 2.0 * factor } else { factor };
@@ -353,16 +353,16 @@ pub fn assemble_boundary_mass(mesh: &Mesh, _degree: PolynomialDegree, marker: i3
             let p1 = &mesh.nodes[nodes[1]];
             let p2 = &mesh.nodes[nodes[2]];
             let p3 = &mesh.nodes[nodes[3]];
-            
+
             // Triangle 1: 0-1-2
             let v1 = [p1.x - p0.x, p1.y - p0.y, p1.z - p0.z];
             let v2 = [p2.x - p0.x, p2.y - p0.y, p2.z - p0.z];
             let cx1 = v1[1] * v2[2] - v1[2] * v2[1];
             let cy1 = v1[2] * v2[0] - v1[0] * v2[2];
             let cz1 = v1[0] * v2[1] - v1[1] * v2[0];
-            let area1 = 0.5 * (cx1*cx1 + cy1*cy1 + cz1*cz1).sqrt();
+            let area1 = 0.5 * (cx1 * cx1 + cy1 * cy1 + cz1 * cz1).sqrt();
             let factor1 = area1 / 12.0;
-            
+
             let t1 = [nodes[0], nodes[1], nodes[2]];
             for i in 0..3 {
                 for j in 0..3 {
@@ -370,16 +370,16 @@ pub fn assemble_boundary_mass(mesh: &Mesh, _degree: PolynomialDegree, marker: i3
                     matrix.add(t1[i], t1[j], val);
                 }
             }
-            
+
             // Triangle 2: 0-2-3
             let v3 = [p2.x - p0.x, p2.y - p0.y, p2.z - p0.z];
             let v4 = [p3.x - p0.x, p3.y - p0.y, p3.z - p0.z];
             let cx2 = v3[1] * v4[2] - v3[2] * v4[1];
             let cy2 = v3[2] * v4[0] - v3[0] * v4[2];
             let cz2 = v3[0] * v4[1] - v3[1] * v4[0];
-            let area2 = 0.5 * (cx2*cx2 + cy2*cy2 + cz2*cz2).sqrt();
+            let area2 = 0.5 * (cx2 * cx2 + cy2 * cy2 + cz2 * cz2).sqrt();
             let factor2 = area2 / 12.0;
-            
+
             let t2 = [nodes[0], nodes[2], nodes[3]];
             for i in 0..3 {
                 for j in 0..3 {
@@ -389,7 +389,7 @@ pub fn assemble_boundary_mass(mesh: &Mesh, _degree: PolynomialDegree, marker: i3
             }
         }
     }
-    
+
     matrix
 }
 
@@ -456,7 +456,7 @@ mod tests {
             total
         );
     }
-    
+
     #[test]
     fn test_boundary_mass() {
         let mesh = unit_square_triangles(2);
@@ -464,12 +464,12 @@ mod tests {
         // assemble_boundary_mass assumes some markers are set.
         // We need to set them first? mesh.detect_boundaries sets everything to 0.
         // So assembling marker 0 should get full perimeter.
-        
+
         let mut mesh = mesh;
         mesh.detect_boundaries();
-        
+
         let b_mass = assemble_boundary_mass(&mesh, PolynomialDegree::P1, 0);
-        
+
         // Sum of boundary mass should be perimeter length (4.0)
         let total: f64 = b_mass.values.iter().sum();
         assert!((total - 4.0).abs() < 1e-10, "Boundary mass sum: {}", total);

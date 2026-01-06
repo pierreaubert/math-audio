@@ -72,7 +72,8 @@ mod tests {
             .strategy(Strategy::AdaptiveBin)
             .mutation(Mutation::Adaptive { initial_f: 0.8 })
             .adaptive(adaptive_config)
-            .build();
+            .build()
+            .expect("popsize must be >= 4");
 
         let result = differential_evolution(&quadratic, &bounds, config)
             .expect("optimization should succeed");
@@ -113,7 +114,8 @@ mod tests {
             .popsize(40)
             .strategy(Strategy::AdaptiveExp)
             .adaptive(adaptive_config)
-            .build();
+            .build()
+            .expect("popsize must be >= 4");
 
         let result = differential_evolution(&quadratic, &bounds, config)
             .expect("optimization should succeed");

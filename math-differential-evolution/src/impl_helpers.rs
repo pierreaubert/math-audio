@@ -1,5 +1,5 @@
 use crate::{DEReport, DifferentialEvolution};
-use ndarray::{Array1, Array2};
+use ndarray::{Array1, Array2, Zip};
 
 // ------------------------------ Internal helpers ------------------------------
 
@@ -28,19 +28,18 @@ where
         // Linear penalties: lb <= A x <= ub
         if let Some(lp) = &self.config.linear_penalty {
             let ax = lp.a.dot(&x.view());
-            for i in 0..ax.len() {
-                let v = ax[i];
-                let lo = lp.lb[i];
-                let hi = lp.ub[i];
-                if v < lo {
-                    let d = lo - v;
-                    p += lp.weight * d * d;
-                }
-                if v > hi {
-                    let d = v - hi;
-                    p += lp.weight * d * d;
-                }
-            }
+            Zip::from(&ax)
+                .and(&lp.lb)
+                .and(&lp.ub)
+                .for_each(|&v, &lo, &hi| {
+                    if v < lo {
+                        let d = lo - v;
+                        p += lp.weight * d * d;
+                    } else if v > hi {
+                        let d = v - hi;
+                        p += lp.weight * d * d;
+                    }
+                });
         }
         p
     }
@@ -70,9 +69,59 @@ where
     }
 
     pub(crate) fn polish(&self, x0: &Array1<f64>) -> (Array1<f64>, f64, usize) {
-        // Simple polish: just return the input solution (polishing disabled)
-        // In a full implementation, this would use a local optimizer like Nelder-Mead
-        let f = self.energy(x0);
-        (x0.clone(), f, 1)
+        let polish_cfg = match &self.config.polish {
+            Some(cfg) if cfg.enabled => cfg,
+            _ => {
+                let f = self.energy(x0);
+                return (x0.clone(), f, 1);
+            }
+        };
+
+        let n = x0.len();
+        let mut x = x0.clone();
+        let mut best_f = self.energy(&x);
+        let mut nfev = 1;
+
+        let initial_step = 0.1;
+        let min_step = 1e-8;
+        let mut step = initial_step;
+
+        let max_eval = polish_cfg.maxeval.min(200 * n);
+
+        while nfev < max_eval && step > min_step {
+            let mut improved = false;
+
+            for i in 0..n {
+                if nfev >= max_eval {
+                    break;
+                }
+
+                let original = x[i];
+                let bounds_span = self.upper[i] - self.lower[i];
+                let dim_step = step * bounds_span.max(1.0);
+
+                for delta in [dim_step, -dim_step] {
+                    if nfev >= max_eval {
+                        break;
+                    }
+                    x[i] = (original + delta).clamp(self.lower[i], self.upper[i]);
+                    let f = self.energy(&x);
+                    nfev += 1;
+
+                    if f < best_f {
+                        best_f = f;
+                        improved = true;
+                        break;
+                    }
+                    x[i] = original;
+                }
+            }
+
+            if !improved {
+                step *= 0.5;
+            }
+        }
+
+        (x, best_f, nfev)
     }
 }

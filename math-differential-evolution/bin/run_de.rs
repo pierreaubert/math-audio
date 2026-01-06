@@ -309,7 +309,13 @@ fn main() {
         resolved_name, dimension, strategy
     );
 
-    let config = builder.build();
+    let config = match builder.build() {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            eprintln!("Error: invalid configuration: {}", e);
+            process::exit(1);
+        }
+    };
     let objective = |x: &Array1<f64>| (function)(x);
 
     let report = match differential_evolution(&objective, &bounds, config) {

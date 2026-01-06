@@ -32,7 +32,8 @@ fn main() {
         .strategy(strategy)
         .recombination(0.9)
         .crossover(Crossover::Exponential)
-        .build();
+        .build()
+        .expect("popsize must be >= 4");
 
     // Apply nonlinear constraints with penalties
     nlc.apply_to(&mut cfg, 1e3, 1e3);

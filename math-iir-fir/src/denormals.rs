@@ -16,10 +16,10 @@
 //! // Previous state restored
 //! ```
 
-#[cfg(target_arch = "x86_64")]
-use std::arch::x86_64::{_mm_getcsr, _mm_setcsr};
 #[cfg(target_arch = "x86")]
 use std::arch::x86::{_mm_getcsr, _mm_setcsr};
+#[cfg(target_arch = "x86_64")]
+use std::arch::x86_64::{_mm_getcsr, _mm_setcsr};
 
 // MXCSR bit masks - defined here for cross-platform compatibility
 // (not all platforms expose these constants in std::arch)

@@ -1,5 +1,5 @@
 use rand::Rng;
-use rand::seq::SliceRandom;
+use std::collections::HashSet;
 
 pub(crate) fn distinct_indices<R: Rng + ?Sized>(
     exclude: usize,
@@ -8,18 +8,12 @@ pub(crate) fn distinct_indices<R: Rng + ?Sized>(
     rng: &mut R,
 ) -> Vec<usize> {
     debug_assert!(count <= pool_size.saturating_sub(1));
-    // Generate a shuffled pool and take first `count` not equal to exclude
-    let mut idxs: Vec<usize> = (0..pool_size).collect();
-    idxs.shuffle(rng);
-    let mut out = Vec::with_capacity(count);
-    for idx in idxs.into_iter() {
-        if idx == exclude {
-            continue;
-        }
-        out.push(idx);
-        if out.len() == count {
-            break;
+    let mut selected: HashSet<usize> = HashSet::with_capacity(count);
+    while selected.len() < count {
+        let idx = rng.random_range(0..pool_size);
+        if idx != exclude {
+            selected.insert(idx);
         }
     }
-    out
+    selected.into_iter().collect()
 }

@@ -30,7 +30,7 @@ pub enum DEError {
     },
 
     /// Population size is too small (must be >= 4).
-    #[error("population size ({pop_size}) must be >= 4")]
+    #[error("population size ({pop_size}) must be >= 4 for DE algorithm")]
     PopulationTooSmall {
         /// The invalid population size
         pop_size: usize,

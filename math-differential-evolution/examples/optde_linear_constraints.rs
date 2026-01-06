@@ -31,7 +31,8 @@ fn main() {
         .recombination(0.9)
         .mutation(Mutation::Range { min: 0.4, max: 1.0 })
         .crossover(Crossover::Exponential)
-        .build();
+        .build()
+        .expect("popsize must be >= 4");
 
     // Apply linear constraints with a penalty weight
     lc.apply_to(&mut cfg, 1e3);

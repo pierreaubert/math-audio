@@ -357,7 +357,8 @@ mod tests {
             .seed(42)
             .maxiter(50) // Keep it short for testing
             .popsize(10)
-            .build();
+            .build()
+            .expect("popsize must be >= 4");
 
         let result = run_recorded_differential_evolution("quadratic", quadratic, &bounds, config);
 
