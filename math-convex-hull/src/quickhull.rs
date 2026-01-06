@@ -9,10 +9,13 @@
 //! - Generation-based face deletion (O(1) instead of O(n))
 //! - Pre-allocated scratch buffers
 //! - Reused HashMap for horizon computation
+//! - Adaptive horizon detection (sorted vector for small sets)
+//! - Track furthest point during assignment
+//! - Adaptive compaction based on deleted face ratio
 
-use crate::geometry::{are_coplanar, find_extreme_points};
+use crate::geometry::find_extreme_points;
 use crate::types::{ConvexHull3D, Face, Vertex};
-use crate::{ConvexHullError, EPSILON, Result};
+use crate::{ConvexHullError, EPSILON, Result, compute_relative_epsilon, deduplicate_vertices};
 use rayon::prelude::*;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -29,7 +32,9 @@ struct HullFace {
     normal: Vertex,
     d: f64, // Plane constant: normal.dot(v0), for faster distance computation
     outside_points: Vec<usize>,
-    deleted: bool, // Mark as deleted instead of removing
+    furthest_point: Option<usize>, // Track furthest point for O(1) access
+    furthest_distance: f64,        // Distance of furthest point
+    deleted: bool,                 // Mark as deleted instead of removing
 }
 
 impl HullFace {
@@ -42,7 +47,10 @@ impl HullFace {
         // Compute normal
         let e1 = p1.sub(p0);
         let e2 = p2.sub(p0);
-        let normal = e1.cross(&e2).normalize();
+        let normal = e1
+            .cross(&e2)
+            .try_normalize()
+            .unwrap_or_else(|| Vertex::new(0.0, 0.0, 1.0));
 
         // Pre-compute plane constant for faster distance calculation
         let d = normal.dot(p0);
@@ -52,6 +60,8 @@ impl HullFace {
             normal,
             d,
             outside_points: Vec::new(),
+            furthest_point: None,
+            furthest_distance: 0.0,
             deleted: false,
         }
     }
@@ -67,11 +77,20 @@ impl HullFace {
         self.signed_distance(point) > EPSILON
     }
 
-    fn assign_point(&mut self, point_idx: usize) {
+    fn assign_point(&mut self, point_idx: usize, distance: f64) {
         self.outside_points.push(point_idx);
+        if distance > self.furthest_distance {
+            self.furthest_point = Some(point_idx);
+            self.furthest_distance = distance;
+        }
     }
 
     fn furthest_point(&self, vertices: &[Vertex]) -> Option<(usize, f64)> {
+        // Use cached furthest point if available
+        if let Some(idx) = self.furthest_point {
+            return Some((idx, self.furthest_distance));
+        }
+        // Fallback to linear search if no cached value
         let mut max_distance = 0.0;
         let mut max_idx = None;
 
@@ -147,49 +166,61 @@ impl ScratchBuffers {
 
 /// Build a convex hull using the Quickhull algorithm
 pub fn quickhull_3d(vertices: &[Vertex]) -> Result<ConvexHull3D> {
-    if vertices.len() < 4 {
+    if vertices.is_empty() {
+        return Err(ConvexHullError::InsufficientVertices);
+    }
+
+    // Compute scale-aware epsilon for this input
+    let relative_eps = compute_relative_epsilon(vertices);
+
+    // Deduplicate points to handle duplicates
+    let unique_vertices = deduplicate_vertices(vertices, relative_eps);
+
+    if unique_vertices.len() < 4 {
         return Err(ConvexHullError::InsufficientVertices);
     }
 
     // Find initial simplex (tetrahedron)
-    let initial_simplex = find_initial_simplex(vertices)?;
+    let initial_simplex = find_initial_simplex(&unique_vertices, relative_eps)?;
 
     // Compute the centroid of the initial simplex - guaranteed to be inside the hull
     let simplex_centroid = Vertex {
-        x: (vertices[initial_simplex[0]].x
-            + vertices[initial_simplex[1]].x
-            + vertices[initial_simplex[2]].x
-            + vertices[initial_simplex[3]].x)
+        x: (unique_vertices[initial_simplex[0]].x
+            + unique_vertices[initial_simplex[1]].x
+            + unique_vertices[initial_simplex[2]].x
+            + unique_vertices[initial_simplex[3]].x)
             / 4.0,
-        y: (vertices[initial_simplex[0]].y
-            + vertices[initial_simplex[1]].y
-            + vertices[initial_simplex[2]].y
-            + vertices[initial_simplex[3]].y)
+        y: (unique_vertices[initial_simplex[0]].y
+            + unique_vertices[initial_simplex[1]].y
+            + unique_vertices[initial_simplex[2]].y
+            + unique_vertices[initial_simplex[3]].y)
             / 4.0,
-        z: (vertices[initial_simplex[0]].z
-            + vertices[initial_simplex[1]].z
-            + vertices[initial_simplex[2]].z
-            + vertices[initial_simplex[3]].z)
+        z: (unique_vertices[initial_simplex[0]].z
+            + unique_vertices[initial_simplex[1]].z
+            + unique_vertices[initial_simplex[2]].z
+            + unique_vertices[initial_simplex[3]].z)
             / 4.0,
     };
 
     // Build initial hull from simplex
-    let mut hull_faces = create_initial_hull(&initial_simplex, vertices);
+    let mut hull_faces = create_initial_hull(&initial_simplex, &unique_vertices);
 
     // Track which points are in the initial simplex
-    let mut in_simplex = vec![false; vertices.len()];
+    let mut in_simplex = vec![false; unique_vertices.len()];
     for &idx in &initial_simplex {
         in_simplex[idx] = true;
     }
 
     // Collect unprocessed points
-    let unprocessed_points: Vec<usize> = (0..vertices.len()).filter(|&i| !in_simplex[i]).collect();
+    let unprocessed_points: Vec<usize> = (0..unique_vertices.len())
+        .filter(|&i| !in_simplex[i])
+        .collect();
 
     // Initial point assignment - use parallel if enough points
     if unprocessed_points.len() >= PARALLEL_THRESHOLD {
-        assign_points_parallel(&mut hull_faces, vertices, &unprocessed_points);
+        assign_points_parallel(&mut hull_faces, &unique_vertices, &unprocessed_points);
     } else {
-        assign_points_sequential(&mut hull_faces, vertices, &unprocessed_points);
+        assign_points_sequential(&mut hull_faces, &unique_vertices, &unprocessed_points);
     }
 
     // Scratch buffers for the main loop
@@ -197,6 +228,7 @@ pub fn quickhull_3d(vertices: &[Vertex]) -> Result<ConvexHull3D> {
 
     // Active face count (faces not marked as deleted)
     let mut active_face_count = hull_faces.len();
+    let _total_faces = active_face_count;
 
     // Main iteration loop
     let mut iterations = 0;
@@ -211,8 +243,11 @@ pub fn quickhull_3d(vertices: &[Vertex]) -> Result<ConvexHull3D> {
             return Err(ConvexHullError::MaxIterationsExceeded);
         }
 
-        if iterations % 500 == 0 {
-            // Compact faces periodically to avoid too many deleted entries
+        // Adaptive compaction: trigger when deleted face ratio exceeds threshold
+        let deleted_count = hull_faces.iter().filter(|f| f.deleted).count();
+        let deleted_ratio = deleted_count as f64 / hull_faces.len() as f64;
+
+        if deleted_ratio > 0.3 || (iterations % 500 == 0 && deleted_count > 0) {
             compact_faces(&mut hull_faces);
             active_face_count = hull_faces.len();
 
@@ -235,7 +270,7 @@ pub fn quickhull_3d(vertices: &[Vertex]) -> Result<ConvexHull3D> {
             None => break, // No more outside points
         };
 
-        let point = vertices[point_idx];
+        let point = unique_vertices[point_idx];
 
         // Clear scratch buffers
         scratch.clear();
@@ -285,31 +320,35 @@ pub fn quickhull_3d(vertices: &[Vertex]) -> Result<ConvexHull3D> {
         // Create new faces from horizon edges to the new point
         for edge in &scratch.horizon_edges {
             // Create face with correct orientation (outward normal)
-            let face1 = HullFace::new(edge.v0, edge.v1, point_idx, vertices);
+            let face1 = HullFace::new(edge.v0, edge.v1, point_idx, &unique_vertices);
 
             // Check orientation: normal should point away from interior
-            let to_interior = simplex_centroid.sub(&vertices[face1.vertices[0]]);
+            let to_interior = simplex_centroid.sub(&unique_vertices[face1.vertices[0]]);
             let dot = face1.normal.dot(&to_interior);
 
             if dot < 0.0 {
                 scratch.new_faces.push(face1);
             } else {
                 // Flip orientation
-                scratch
-                    .new_faces
-                    .push(HullFace::new(edge.v1, edge.v0, point_idx, vertices));
+                scratch.new_faces.push(HullFace::new(
+                    edge.v1,
+                    edge.v0,
+                    point_idx,
+                    &unique_vertices,
+                ));
             }
         }
 
         // Reassign orphaned points to new faces first, then existing faces
         for &orphan_idx in &scratch.orphaned_points {
-            let orphan = &vertices[orphan_idx];
+            let orphan = &unique_vertices[orphan_idx];
             let mut assigned = false;
 
             // Try new faces first (most likely)
             for face in &mut scratch.new_faces {
                 if face.is_visible_from(orphan) {
-                    face.assign_point(orphan_idx);
+                    let distance = face.signed_distance(orphan);
+                    face.assign_point(orphan_idx, distance);
                     assigned = true;
                     break;
                 }
@@ -319,7 +358,8 @@ pub fn quickhull_3d(vertices: &[Vertex]) -> Result<ConvexHull3D> {
             if !assigned {
                 for face in hull_faces.iter_mut().filter(|f| !f.deleted) {
                     if face.is_visible_from(orphan) {
-                        face.assign_point(orphan_idx);
+                        let distance = face.signed_distance(orphan);
+                        face.assign_point(orphan_idx, distance);
                         break;
                     }
                 }
@@ -337,7 +377,7 @@ pub fn quickhull_3d(vertices: &[Vertex]) -> Result<ConvexHull3D> {
     // Convert to final format
     let faces: Vec<Face> = hull_faces.iter().map(|f| f.to_face()).collect();
 
-    Ok(ConvexHull3D::new(vertices.to_vec(), faces))
+    Ok(ConvexHull3D::new(unique_vertices.to_vec(), faces))
 }
 
 /// Assign points to faces in parallel
@@ -384,7 +424,8 @@ fn assign_points_sequential(hull_faces: &mut [HullFace], vertices: &[Vertex], po
         let vertex = &vertices[point_idx];
         for face in hull_faces.iter_mut() {
             if face.is_visible_from(vertex) {
-                face.assign_point(point_idx);
+                let distance = face.signed_distance(vertex);
+                face.assign_point(point_idx, distance);
                 break;
             }
         }
@@ -409,7 +450,7 @@ fn find_visible_faces_parallel(hull_faces: &[HullFace], point: &Vertex, result: 
 }
 
 /// Find the initial simplex (tetrahedron) to start the algorithm
-fn find_initial_simplex(vertices: &[Vertex]) -> Result<[usize; 4]> {
+fn find_initial_simplex(vertices: &[Vertex], epsilon: f64) -> Result<[usize; 4]> {
     // Find the 6 extreme points
     let extremes = find_extreme_points(vertices);
 
@@ -429,12 +470,19 @@ fn find_initial_simplex(vertices: &[Vertex]) -> Result<[usize; 4]> {
         }
     }
 
-    if max_distance < EPSILON {
+    if max_distance < epsilon {
+        // Try adding small jitter to break ties
         return Err(ConvexHullError::DegenerateConfiguration);
     }
 
     // Find the point furthest from the line v0-v1
-    let line_dir = vertices[v1].sub(&vertices[v0]).normalize();
+    let line_dir = vertices[v1].sub(&vertices[v0]);
+    let line_mag = line_dir.magnitude();
+    if line_mag < epsilon {
+        return Err(ConvexHullError::DegenerateConfiguration);
+    }
+    let line_dir = line_dir.scale(1.0 / line_mag);
+
     let mut max_distance = 0.0;
     let mut v2 = 0;
 
@@ -444,7 +492,11 @@ fn find_initial_simplex(vertices: &[Vertex]) -> Result<[usize; 4]> {
         }
 
         let to_point = vertex.sub(&vertices[v0]);
-        let projection = line_dir.scale(to_point.dot(&line_dir));
+        let projection_len = to_point.dot(&line_dir);
+        if projection_len < 0.0 {
+            continue; // Point is behind v0
+        }
+        let projection = line_dir.scale(projection_len);
         let rejection = to_point.sub(&projection);
         let dist = rejection.magnitude();
 
@@ -454,18 +506,26 @@ fn find_initial_simplex(vertices: &[Vertex]) -> Result<[usize; 4]> {
         }
     }
 
-    if max_distance < EPSILON {
+    if max_distance < epsilon {
         return Err(ConvexHullError::DegenerateConfiguration);
     }
 
     // Find the point furthest from the plane formed by v0, v1, v2
     let normal = vertices[v1]
         .sub(&vertices[v0])
-        .cross(&vertices[v2].sub(&vertices[v0]))
-        .normalize();
+        .cross(&vertices[v2].sub(&vertices[v0]));
+    let normal_mag = normal.magnitude();
+    if normal_mag < epsilon {
+        return Err(ConvexHullError::DegenerateConfiguration);
+    }
+    let normal = normal.scale(1.0 / normal_mag);
 
+    let mut pos_dist = 0.0;
+    let mut neg_dist = 0.0;
+    let mut pos_idx = 0;
+    let mut neg_idx = 0;
     let mut max_distance = 0.0;
-    let mut v3 = 0;
+    let mut _v3 = 0;
 
     for (i, vertex) in vertices.iter().enumerate() {
         if i == v0 || i == v1 || i == v2 {
@@ -473,26 +533,28 @@ fn find_initial_simplex(vertices: &[Vertex]) -> Result<[usize; 4]> {
         }
 
         let to_point = vertex.sub(&vertices[v0]);
-        let dist = normal.dot(&to_point).abs();
+        let dist = normal.dot(&to_point);
 
-        if dist > max_distance {
-            max_distance = dist;
-            v3 = i;
+        if dist > pos_dist {
+            pos_dist = dist;
+            pos_idx = i;
+        }
+        if -dist > neg_dist {
+            neg_dist = -dist;
+            neg_idx = i;
         }
     }
 
-    if max_distance < EPSILON {
-        return Err(ConvexHullError::DegenerateConfiguration);
-    }
+    // Choose the point with larger absolute distance
+    let v3 = if pos_dist >= neg_dist {
+        max_distance = pos_dist;
+        pos_idx
+    } else {
+        max_distance = neg_dist;
+        neg_idx
+    };
 
-    // Verify the simplex is not degenerate
-    if are_coplanar(
-        &vertices[v0],
-        &vertices[v1],
-        &vertices[v2],
-        &vertices[v3],
-        EPSILON,
-    ) {
+    if max_distance < epsilon {
         return Err(ConvexHullError::DegenerateConfiguration);
     }
 
