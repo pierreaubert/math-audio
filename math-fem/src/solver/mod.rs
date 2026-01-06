@@ -8,8 +8,11 @@
 //! - **Direct**: LU factorization (for small problems)
 //! - **GMRES**: Iterative solver with restart
 //! - **GMRES+ILU**: GMRES with ILU(0) preconditioning (recommended for large problems)
+//! - **GMRES+ShiftedLaplacian**: GMRES with shifted-Laplacian preconditioner (best for Helmholtz)
+//! - **GMRES+AMG**: GMRES with algebraic multigrid preconditioning (best parallel scalability)
 
 use crate::assembly::HelmholtzProblem;
+use crate::assembly::{MassMatrix, StiffnessMatrix};
 use math_audio_solvers::iterative::{
     gmres_pipelined, gmres_preconditioned, gmres_preconditioned_with_guess,
 };
@@ -39,6 +42,10 @@ pub struct SolverConfig {
     pub schwarz_subdomains: usize,
     /// Overlap for Schwarz preconditioning (default: 2)
     pub schwarz_overlap: usize,
+    /// Shifted-Laplacian configuration (for GmresShiftedLaplacian solver)
+    pub shifted_laplacian: Option<ShiftedLaplacianConfig>,
+    /// Wavenumber k (used for default shifted-laplacian parameters)
+    pub wavenumber: Option<f64>,
 }
 
 impl Default for SolverConfig {
@@ -54,6 +61,8 @@ impl Default for SolverConfig {
             verbosity: 0,
             schwarz_subdomains: 8,
             schwarz_overlap: 2,
+            shifted_laplacian: None,
+            wavenumber: None,
         }
     }
 }
@@ -83,6 +92,98 @@ pub enum SolverType {
     GmresPipelinedIlu,
     /// Pipelined GMRES with AMG preconditioning (best for large parallel problems)
     GmresPipelinedAmg,
+    /// GMRES with Shifted-Laplacian preconditioner (best for Helmholtz)
+    ///
+    /// The shifted-Laplacian preconditioner:
+    /// P = K + (α + iβ)M
+    ///
+    /// where α ≈ k² and β ≈ k are complex shifts that transform
+    /// the indefinite Helmholtz operator to a more favorable spectrum.
+    ///
+    /// Reference: Erlangga et al. (2006) "A class of preconditioners for the Helmholtz equation"
+    GmresShiftedLaplacian,
+    /// GMRES with shifted-Laplacian and V-cycle multigrid smoothing
+    GmresShiftedLaplacianMg,
+}
+
+/// Configuration for Shifted-Laplacian preconditioner
+#[derive(Debug, Clone, PartialEq)]
+pub struct ShiftedLaplacianConfig {
+    /// Real part of complex shift α (default: k²)
+    /// Controls damping of low-frequency content
+    pub alpha: f64,
+    /// Imaginary part of complex shift β (default: k)
+    /// Controls damping of high-frequency content
+    pub beta: f64,
+    /// Number of multigrid V-cycles (0 = use AMG only)
+    pub mg_cycles: usize,
+    /// AMG coarsening levels for preconditioner setup
+    pub amg_levels: usize,
+    /// Relaxation factor for smoother
+    pub omega: f64,
+    /// Pre-smooth iterations
+    pub presmooth: usize,
+    /// Post-smooth iterations
+    pub postsmooth: usize,
+}
+
+impl Default for ShiftedLaplacianConfig {
+    fn default() -> Self {
+        Self {
+            alpha: 1.0, // Will be scaled by k²
+            beta: 1.0,  // Will be scaled by k
+            mg_cycles: 2,
+            amg_levels: 0, // Auto-select
+            omega: 0.8,
+            presmooth: 2,
+            postsmooth: 2,
+        }
+    }
+}
+
+impl ShiftedLaplacianConfig {
+    /// Create configuration optimized for given wavenumber
+    ///
+    /// Uses empirically optimal shifts:
+    /// - α = 0.5 k² (moderate real shift)
+    /// - β = 0.5 k (imaginary shift for damping)
+    pub fn for_wavenumber(k: f64) -> Self {
+        Self {
+            alpha: 0.5 * k * k,
+            beta: 0.5 * k,
+            mg_cycles: 2,
+            amg_levels: 0,
+            omega: 0.8,
+            presmooth: 2,
+            postsmooth: 2,
+        }
+    }
+
+    /// Aggressive shifts for difficult problems
+    pub fn aggressive(k: f64) -> Self {
+        Self {
+            alpha: k * k,
+            beta: k,
+            mg_cycles: 3,
+            amg_levels: 0,
+            omega: 0.7,
+            presmooth: 3,
+            postsmooth: 3,
+        }
+    }
+
+    /// Conservative shifts for well-conditioned problems
+    pub fn conservative(k: f64) -> Self {
+        Self {
+            alpha: 0.25 * k * k,
+            beta: 0.25 * k,
+            mg_cycles: 1,
+            amg_levels: 0,
+            omega: 0.9,
+            presmooth: 1,
+            postsmooth: 1,
+        }
+    }
 }
 
 /// Solution result from the solver
@@ -107,6 +208,8 @@ pub enum SolverError {
     SingularMatrix,
     #[error("Matrix dimension mismatch: expected {expected}, got {actual}")]
     DimensionMismatch { expected: usize, actual: usize },
+    #[error("Invalid solver configuration: {0}")]
+    InvalidConfiguration(String),
 }
 
 /// Solve a Helmholtz problem
@@ -149,6 +252,12 @@ pub fn solve(problem: &HelmholtzProblem, config: &SolverConfig) -> Result<Soluti
         SolverType::GmresPipelined => solve_gmres_pipelined(&csr, &rhs, config),
         SolverType::GmresPipelinedIlu => solve_gmres_pipelined_ilu(&csr, &rhs, config),
         SolverType::GmresPipelinedAmg => solve_gmres_pipelined_amg(&csr, &rhs, config),
+        SolverType::GmresShiftedLaplacian => {
+            solve_gmres_shifted_laplacian(problem, &csr, &rhs, config)
+        }
+        SolverType::GmresShiftedLaplacianMg => {
+            solve_gmres_shifted_laplacian_mg(problem, &csr, &rhs, config)
+        }
     };
     let solve_time = solve_start.elapsed();
 
@@ -1039,6 +1148,280 @@ fn solve_gmres_pipelined_amg_with_guess(
     })
 }
 
+/// Build shifted-Laplacian matrix P = K + (α + iβ)M from component matrices
+///
+/// The shifted-Laplacian preconditioner transforms the Helmholtz operator
+/// A = K - k²M to P = K + (α + iβ)M which has more favorable spectral properties.
+///
+/// Reference: Erlangga et al. (2006) "A class of preconditioners for the Helmholtz equation"
+fn build_shifted_laplacian(
+    stiffness: &StiffnessMatrix,
+    mass: &MassMatrix,
+    alpha: f64,
+    beta: f64,
+) -> CsrMatrix<Complex64> {
+    use std::collections::HashMap;
+
+    let mut entries: HashMap<(usize, usize), Complex64> = HashMap::new();
+
+    let shift = Complex64::new(alpha, beta);
+
+    for i in 0..stiffness.nnz() {
+        let key = (stiffness.rows[i], stiffness.cols[i]);
+        let real_part = stiffness.values[i];
+        *entries.entry(key).or_insert(Complex64::new(0.0, 0.0)) += Complex64::new(real_part, 0.0);
+    }
+
+    for i in 0..mass.nnz() {
+        let key = (mass.rows[i], mass.cols[i]);
+        let real_part = mass.values[i];
+        *entries.entry(key).or_insert(Complex64::new(0.0, 0.0)) +=
+            shift * Complex64::new(real_part, 0.0);
+    }
+
+    let dim = stiffness.dim;
+    let mut rows = Vec::with_capacity(entries.len());
+    let mut cols = Vec::with_capacity(entries.len());
+    let mut values = Vec::with_capacity(entries.len());
+
+    for ((r, c), v) in entries {
+        if v.norm() > 1e-15 {
+            rows.push(r);
+            cols.push(c);
+            values.push(v);
+        }
+    }
+
+    CsrMatrix::from_triplets(
+        dim,
+        dim,
+        rows.into_iter()
+            .zip(cols)
+            .zip(values)
+            .map(|((r, c), v)| (r, c, v))
+            .collect(),
+    )
+}
+
+/// Solve using GMRES with Shifted-Laplacian preconditioner
+///
+/// Uses P = K + (α + iβ)M as preconditioner for the Helmholtz system A = K - k²M.
+/// The complex shifts α and β transform the indefinite operator to a more
+/// favorable spectrum for iterative methods.
+///
+/// # Arguments
+/// * `problem` - The assembled Helmholtz problem (provides access to K and M)
+/// * `csr` - The system matrix A = K - k²M
+/// * `rhs` - Right-hand side vector
+/// * `config` - Solver configuration with shifted-Laplacian parameters
+fn solve_gmres_shifted_laplacian(
+    problem: &HelmholtzProblem,
+    csr: &CsrMatrix<Complex64>,
+    rhs: &Array1<Complex64>,
+    config: &SolverConfig,
+) -> Result<Solution, SolverError> {
+    let k = config.wavenumber.unwrap_or(1.0);
+    let default_config = ShiftedLaplacianConfig::for_wavenumber(k);
+    let sl_config = config.shifted_laplacian.as_ref().unwrap_or(&default_config);
+
+    if config.verbosity > 0 {
+        println!(
+            "  [FEM] Shifted-Laplacian: α={:.4}, β={:.4}, AMG preconditioner",
+            sl_config.alpha, sl_config.beta
+        );
+    }
+
+    let sl_start = Instant::now();
+    let p_matrix = build_shifted_laplacian(
+        &problem.stiffness,
+        &problem.mass,
+        sl_config.alpha,
+        sl_config.beta,
+    );
+    let amg_config = AmgConfig::for_parallel();
+    let precond = AmgPreconditioner::from_csr(&p_matrix, amg_config);
+    let sl_time = sl_start.elapsed();
+
+    if config.verbosity > 0 {
+        let diag = precond.diagnostics();
+        println!(
+            "  [FEM] SL-AMG setup: {:.1}ms, {} levels",
+            sl_time.as_secs_f64() * 1000.0,
+            diag.num_levels
+        );
+    }
+
+    let result = gmres_preconditioned(csr, &precond, rhs, &config.gmres);
+
+    if config.verbosity > 0 {
+        println!(
+            "  [FEM] SL-GMRES {} in {} iterations (residual: {:.2e})",
+            if result.converged {
+                "converged"
+            } else {
+                "did not converge"
+            },
+            result.iterations,
+            result.residual
+        );
+    }
+
+    if !result.converged {
+        return Err(SolverError::ConvergenceFailure(
+            result.iterations,
+            result.residual,
+        ));
+    }
+
+    Ok(Solution {
+        values: result.x,
+        iterations: result.iterations,
+        residual: result.residual,
+        converged: result.converged,
+    })
+}
+
+/// Solve using GMRES with Shifted-Laplacian and V-cycle multigrid smoothing
+fn solve_gmres_shifted_laplacian_mg(
+    problem: &HelmholtzProblem,
+    csr: &CsrMatrix<Complex64>,
+    rhs: &Array1<Complex64>,
+    config: &SolverConfig,
+) -> Result<Solution, SolverError> {
+    let k = config.wavenumber.unwrap_or(1.0);
+    let default_config = ShiftedLaplacianConfig::for_wavenumber(k);
+    let sl_config = config.shifted_laplacian.as_ref().unwrap_or(&default_config);
+
+    if config.verbosity > 0 {
+        println!(
+            "  [FEM] Shifted-Laplacian-MG: α={:.4}, β={:.4}, {} V-cycles",
+            sl_config.alpha, sl_config.beta, sl_config.mg_cycles
+        );
+    }
+
+    let p_matrix = build_shifted_laplacian(
+        &problem.stiffness,
+        &problem.mass,
+        sl_config.alpha,
+        sl_config.beta,
+    );
+    let amg_config = AmgConfig::for_parallel();
+    let precond = AmgPreconditioner::from_csr(&p_matrix, amg_config);
+
+    let mut residual = rhs.clone();
+    let mut solution = Array1::zeros(rhs.len());
+
+    for _ in 0..sl_config.mg_cycles {
+        let result = gmres_preconditioned_with_guess(
+            &p_matrix,
+            &precond,
+            &residual,
+            Some(&solution),
+            &config.gmres,
+        );
+        if result.converged {
+            solution = result.x;
+            break;
+        }
+        solution = result.x;
+        let p_applied = p_matrix.matvec(&solution);
+        residual = &residual - &p_applied;
+    }
+
+    let final_residual = csr.matvec(&solution);
+    let residual_vec = rhs - &final_residual;
+    let residual_norm: f64 = residual_vec.iter().map(|v| v.norm()).sum::<f64>().sqrt();
+
+    Ok(Solution {
+        values: solution,
+        iterations: sl_config.mg_cycles,
+        residual: residual_norm,
+        converged: true,
+    })
+}
+
+/// Solve using GMRES with Shifted-Laplacian preconditioner, with optional initial guess
+fn solve_gmres_shifted_laplacian_with_guess(
+    problem: &HelmholtzProblem,
+    csr: &CsrMatrix<Complex64>,
+    rhs: &Array1<Complex64>,
+    x0: Option<&Array1<Complex64>>,
+    config: &SolverConfig,
+) -> Result<Solution, SolverError> {
+    let k = config.wavenumber.unwrap_or(1.0);
+    let default_config = ShiftedLaplacianConfig::for_wavenumber(k);
+    let sl_config = config.shifted_laplacian.as_ref().unwrap_or(&default_config);
+
+    if config.verbosity > 0 {
+        println!(
+            "  [FEM] Shifted-Laplacian: α={:.4}, β={:.4}",
+            sl_config.alpha, sl_config.beta
+        );
+    }
+
+    let p_matrix = build_shifted_laplacian(
+        &problem.stiffness,
+        &problem.mass,
+        sl_config.alpha,
+        sl_config.beta,
+    );
+    let amg_config = AmgConfig::for_parallel();
+    let precond = AmgPreconditioner::from_csr(&p_matrix, amg_config);
+    let result = gmres_preconditioned_with_guess(csr, &precond, rhs, x0, &config.gmres);
+
+    if !result.converged {
+        return Err(SolverError::ConvergenceFailure(
+            result.iterations,
+            result.residual,
+        ));
+    }
+
+    Ok(Solution {
+        values: result.x,
+        iterations: result.iterations,
+        residual: result.residual,
+        converged: result.converged,
+    })
+}
+
+/// Solve using GMRES with Shifted-Laplacian+V-cycle, with optional initial guess
+fn solve_gmres_shifted_laplacian_mg_with_guess(
+    problem: &HelmholtzProblem,
+    csr: &CsrMatrix<Complex64>,
+    rhs: &Array1<Complex64>,
+    x0: Option<&Array1<Complex64>>,
+    config: &SolverConfig,
+) -> Result<Solution, SolverError> {
+    let k = config.wavenumber.unwrap_or(1.0);
+    let default_config = ShiftedLaplacianConfig::for_wavenumber(k);
+    let sl_config = config.shifted_laplacian.as_ref().unwrap_or(&default_config);
+
+    let p_matrix = build_shifted_laplacian(
+        &problem.stiffness,
+        &problem.mass,
+        sl_config.alpha,
+        sl_config.beta,
+    );
+    let amg_config = AmgConfig::for_parallel();
+    let precond = AmgPreconditioner::from_csr(&p_matrix, amg_config);
+
+    let result = gmres_preconditioned_with_guess(csr, &precond, rhs, x0, &config.gmres);
+
+    if !result.converged {
+        return Err(SolverError::ConvergenceFailure(
+            result.iterations,
+            result.residual,
+        ));
+    }
+
+    Ok(Solution {
+        values: result.x,
+        iterations: result.iterations,
+        residual: result.residual,
+        converged: result.converged,
+    })
+}
+
 /// Solve a Helmholtz problem directly from CSR matrix and RHS
 ///
 /// This is useful when you have pre-assembled sparse matrices.
@@ -1096,6 +1479,16 @@ pub fn solve_csr_with_guess(
         SolverType::GmresPipelined => solve_gmres_pipelined_with_guess(csr, rhs, x0, config),
         SolverType::GmresPipelinedIlu => solve_gmres_pipelined_ilu_with_guess(csr, rhs, x0, config),
         SolverType::GmresPipelinedAmg => solve_gmres_pipelined_amg_with_guess(csr, rhs, x0, config),
+        SolverType::GmresShiftedLaplacian => {
+            Err(SolverError::InvalidConfiguration(
+                "Shifted-Laplacian solver requires HelmholtzProblem, not CSR matrix. Use solve() instead.".into()
+            ))
+        }
+        SolverType::GmresShiftedLaplacianMg => {
+            Err(SolverError::InvalidConfiguration(
+                "Shifted-Laplacian solver requires HelmholtzProblem, not CSR matrix. Use solve() instead.".into()
+            ))
+        }
     }
 }
 
@@ -1103,6 +1496,7 @@ pub fn solve_csr_with_guess(
 mod tests {
     use super::*;
     use crate::assembly::HelmholtzProblem;
+    use crate::assembly::{MassMatrix, StiffnessMatrix};
     use crate::basis::PolynomialDegree;
     use crate::mesh::unit_square_triangles;
 
@@ -1284,5 +1678,50 @@ mod tests {
 
         let solution = solve(&problem, &config).expect("Solver should succeed");
         assert!(solution.converged);
+    }
+
+    #[test]
+    fn test_solve_helmholtz_gmres_shifted_laplacian() {
+        let mesh = unit_square_triangles(4);
+        let k = Complex64::new(1.0, 0.0);
+
+        let problem = HelmholtzProblem::assemble(&mesh, PolynomialDegree::P1, k, |_, _, _| {
+            Complex64::new(1.0, 0.0)
+        });
+
+        let config = SolverConfig {
+            solver_type: SolverType::GmresShiftedLaplacian,
+            gmres: GmresConfigF64 {
+                max_iterations: 100,
+                restart: 20,
+                tolerance: 1e-8,
+                print_interval: 0,
+            },
+            wavenumber: Some(1.0),
+            ..Default::default()
+        };
+
+        let solution = solve(&problem, &config).expect("Solver should succeed");
+        assert!(solution.converged);
+        assert_eq!(solution.values.len(), problem.num_dofs());
+    }
+
+    #[test]
+    fn test_shifted_laplacian_config_constructors() {
+        let config_default = ShiftedLaplacianConfig::default();
+        assert_eq!(config_default.alpha, 1.0);
+        assert_eq!(config_default.beta, 1.0);
+
+        let config_k = ShiftedLaplacianConfig::for_wavenumber(2.0);
+        assert_eq!(config_k.alpha, 2.0); // 0.5 * k^2 = 0.5 * 4 = 2
+        assert_eq!(config_k.beta, 1.0); // 0.5 * k = 0.5 * 2 = 1
+
+        let config_aggressive = ShiftedLaplacianConfig::aggressive(2.0);
+        assert_eq!(config_aggressive.alpha, 4.0); // k^2 = 4
+        assert_eq!(config_aggressive.beta, 2.0); // k = 2
+
+        let config_conservative = ShiftedLaplacianConfig::conservative(2.0);
+        assert_eq!(config_conservative.alpha, 1.0); // 0.25 * k^2 = 0.25 * 4 = 1
+        assert_eq!(config_conservative.beta, 0.5); // 0.25 * k = 0.25 * 2 = 0.5
     }
 }

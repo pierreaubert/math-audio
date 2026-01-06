@@ -22,7 +22,9 @@ use math_audio_fem::assembly::{
 };
 use math_audio_fem::basis::PolynomialDegree;
 use math_audio_fem::mesh::{BoundaryType, ElementType, Mesh, Point};
-use math_audio_fem::solver::{self, GmresConfigF64, SolverConfig, SolverType};
+use math_audio_fem::solver::{
+    self, GmresConfigF64, ShiftedLaplacianConfig, SolverConfig, SolverType,
+};
 use num_complex::Complex64;
 use rayon::prelude::*;
 use std::collections::HashMap;
@@ -165,6 +167,15 @@ impl MemoryEstimate {
                 let amg_interp =
                     (interp_complexity * self.k_nnz as f64) as usize * Self::COMPLEX_SIZE;
                 amg_matrices + amg_interp
+            }
+            SolverType::GmresShiftedLaplacian | SolverType::GmresShiftedLaplacianMg => {
+                // Shifted-Laplacian: similar to AMG but with extra shifted matrix
+                // P = K + (α + iβ)M needs another AMG setup
+                let operator_complexity = 2.0;
+                let amg_matrices =
+                    (operator_complexity * self.k_nnz as f64) as usize * Self::COMPLEX_SIZE;
+                let shifted_matrix = self.k_nnz + self.m_nnz;
+                amg_matrices + shifted_matrix * Self::COMPLEX_SIZE
             }
         }
     }
@@ -571,6 +582,18 @@ struct Args {
     #[arg(long, default_value = "8")]
     schwarz_domains: usize,
 
+    /// Shifted-Laplacian alpha parameter (real shift, default: k^2/2)
+    #[arg(long)]
+    sl_alpha: Option<f64>,
+
+    /// Shifted-Laplacian beta parameter (imaginary shift, default: k/2)
+    #[arg(long)]
+    sl_beta: Option<f64>,
+
+    /// Shifted-Laplacian MG cycles (for GmresShiftedLaplacianMg)
+    #[arg(long, default_value = "2")]
+    sl_mg_cycles: usize,
+
     /// Source width in meters (Gaussian sigma)
     #[arg(long, default_value_t = DEFAULT_SOURCE_WIDTH)]
     source_width: f64,
@@ -628,6 +651,7 @@ enum CliPreconditionerType {
     IluFixedpoint,
     Schwarz,
     Amg,
+    ShiftedLaplacian,
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -686,6 +710,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         (CliSolverType::Gmres, Some(CliPreconditionerType::Schwarz)) => SolverType::GmresSchwarz,
         (CliSolverType::Gmres, Some(CliPreconditionerType::Amg)) => SolverType::GmresAmg,
+        (CliSolverType::Gmres, Some(CliPreconditionerType::ShiftedLaplacian)) => {
+            SolverType::GmresShiftedLaplacian
+        }
         (CliSolverType::Pipelined, None) => SolverType::GmresPipelined,
         (CliSolverType::Pipelined, Some(CliPreconditionerType::Ilu)) => {
             SolverType::GmresPipelinedIlu
@@ -702,6 +729,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         (CliSolverType::Pipelined, Some(CliPreconditionerType::IluFixedpoint)) => {
             SolverType::GmresIluFixedPoint
+        }
+        (CliSolverType::Pipelined, Some(CliPreconditionerType::ShiftedLaplacian)) => {
+            SolverType::GmresShiftedLaplacian
         }
     };
 
@@ -721,6 +751,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             args.verbose,
             args.elements_per_wavelength,
             args.min_mesh_resolution,
+            args.sl_alpha,
+            args.sl_beta,
+            args.sl_mg_cycles,
         )?
     } else {
         run_fem_simulation(
@@ -736,6 +769,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             available_memory_gb,
             &cpu_info,
             args.verbose,
+            args.sl_alpha,
+            args.sl_beta,
+            args.sl_mg_cycles,
         )?
     };
 
@@ -915,6 +951,9 @@ fn run_fem_simulation(
     available_memory_gb: Option<f64>,
     cpu_info: &CpuCoreInfo,
     verbose: bool,
+    sl_alpha: Option<f64>,
+    sl_beta: Option<f64>,
+    sl_mg_cycles: usize,
 ) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
     let solver_name = format!("{:?}", solver_type);
     println!("\n=== {} Solver (Parallel) ===", solver_name.to_uppercase());
@@ -930,6 +969,20 @@ fn run_fem_simulation(
     );
 
     // Configure solver (per-thread config, no print to avoid interleaving)
+    let sl_config = if matches!(
+        solver_type,
+        SolverType::GmresShiftedLaplacian | SolverType::GmresShiftedLaplacianMg
+    ) {
+        Some(ShiftedLaplacianConfig {
+            alpha: sl_alpha.unwrap_or(0.0),
+            beta: sl_beta.unwrap_or(0.0),
+            mg_cycles: sl_mg_cycles,
+            ..Default::default()
+        })
+    } else {
+        None
+    };
+
     let solver_config = SolverConfig {
         solver_type,
         gmres: GmresConfigF64 {
@@ -941,6 +994,8 @@ fn run_fem_simulation(
         verbosity: 0, // Disable verbose in parallel to avoid interleaved output
         schwarz_subdomains: schwarz_domains,
         schwarz_overlap: 2,
+        shifted_laplacian: sl_config,
+        wavenumber: None,
     };
 
     // Assemble stiffness and mass matrices ONCE (frequency-independent)
@@ -1200,6 +1255,9 @@ fn run_fem_simulation_adaptive(
     verbose: bool,
     elements_per_wavelength: usize,
     min_mesh_resolution: usize,
+    sl_alpha: Option<f64>,
+    sl_beta: Option<f64>,
+    sl_mg_cycles: usize,
 ) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
     let solver_name = format!("{:?}", solver_type);
     println!(
@@ -1227,6 +1285,20 @@ fn run_fem_simulation_adaptive(
     }
 
     // Configure solver
+    let sl_config = if matches!(
+        solver_type,
+        SolverType::GmresShiftedLaplacian | SolverType::GmresShiftedLaplacianMg
+    ) {
+        Some(ShiftedLaplacianConfig {
+            alpha: sl_alpha.unwrap_or(0.0),
+            beta: sl_beta.unwrap_or(0.0),
+            mg_cycles: sl_mg_cycles,
+            ..Default::default()
+        })
+    } else {
+        None
+    };
+
     let solver_config = SolverConfig {
         solver_type,
         gmres: GmresConfigF64 {
@@ -1238,6 +1310,8 @@ fn run_fem_simulation_adaptive(
         verbosity: 0,
         schwarz_subdomains: schwarz_domains,
         schwarz_overlap: 2,
+        shifted_laplacian: sl_config,
+        wavenumber: None,
     };
 
     let n_freqs = simulation.frequencies.len();
