@@ -36,12 +36,15 @@ use ndarray::{Array1, Array2};
 use num_complex::Complex64;
 use std::f64::consts::PI;
 
+use crate::core::assembly::slfmm::{SlfmmSystem, build_slfmm_system};
 use crate::core::assembly::tbem::build_tbem_system_with_beta;
 use crate::core::incident::IncidentField;
 use crate::core::mesh::generators::{generate_icosphere_mesh, generate_sphere_mesh};
 use crate::core::postprocess::pressure::{FieldPoint, compute_total_field};
 use crate::core::types::{BoundaryCondition, Element, Mesh, PhysicsParams};
 use math_audio_solvers::direct::lu_solve;
+use math_audio_solvers::iterative::{BiCgstabConfig, bicgstab};
+use math_audio_solvers::traits::LinearOperator;
 
 /// Solver method for the linear system
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -276,14 +279,16 @@ impl BemSolver {
             );
         }
 
-        // Step 1: Prepare elements with boundary conditions
         let elements = self.prepare_elements(problem);
 
-        // Step 2: Assemble system matrix and RHS
-        let (matrix, rhs) =
+        let assembly_result =
             self.assemble_system(&elements, &problem.mesh.nodes, &problem.physics)?;
 
-        // Step 3: Add incident field contribution to RHS
+        let rhs = match &assembly_result {
+            AssemblyResult::Dense(_, rhs) => rhs.clone(),
+            AssemblyResult::Slfmm(system) => system.rhs.clone(),
+        };
+
         let rhs = self.add_incident_field_rhs(
             rhs,
             &elements,
@@ -292,8 +297,10 @@ impl BemSolver {
             problem.use_burton_miller,
         );
 
-        // Step 4: Solve linear system
-        let surface_pressure = self.solve_linear_system(&matrix, &rhs)?;
+        let surface_pressure = match assembly_result {
+            AssemblyResult::Dense(matrix, _) => self.solve_dense_system(&matrix, &rhs)?,
+            AssemblyResult::Slfmm(system) => self.solve_fmm_system(system, &rhs)?,
+        };
 
         if self.verbose {
             log::info!(
@@ -353,20 +360,42 @@ impl BemSolver {
         elements: &[Element],
         nodes: &Array2<f64>,
         physics: &PhysicsParams,
-    ) -> Result<(Array2<Complex64>, Array1<Complex64>), BemError> {
+    ) -> Result<AssemblyResult, BemError> {
         match self.assembly_method {
             AssemblyMethod::Tbem => {
-                // Use scaled Burton-Miller β for better accuracy
                 let beta = physics.burton_miller_beta_scaled(self.beta_scale);
                 let system = build_tbem_system_with_beta(elements, nodes, physics, beta);
-                Ok((system.matrix, system.rhs))
+                Ok(AssemblyResult::Dense(system.matrix, system.rhs))
             }
-            AssemblyMethod::Slfmm | AssemblyMethod::Mlfmm => {
-                // FMM methods not yet integrated into high-level API
+            AssemblyMethod::Slfmm => {
+                #[cfg(any(feature = "native", feature = "wasm"))]
+                {
+                    use crate::core::types::Cluster;
+
+                    let num_elements = elements.len();
+                    let _elements_per_cluster = 16usize;
+
+                    let cluster = Cluster::new(Array1::from_vec(vec![0.0, 0.0, 0.0]));
+                    let mut clusters = vec![cluster];
+                    clusters[0].element_indices = (0..num_elements).collect();
+
+                    let n_theta = 6;
+                    let n_phi = 12;
+                    let n_terms = 5;
+
+                    let system = build_slfmm_system(
+                        elements, nodes, &clusters, physics, n_theta, n_phi, n_terms,
+                    );
+                    Ok(AssemblyResult::Slfmm(system))
+                }
+                #[cfg(not(any(feature = "native", feature = "wasm")))]
                 Err(BemError::NotImplemented(
-                    "FMM assembly not yet available in high-level API".to_string(),
+                    "SLFMM requires native or wasm feature".to_string(),
                 ))
             }
+            AssemblyMethod::Mlfmm => Err(BemError::NotImplemented(
+                "MLFMM not yet integrated in high-level API".to_string(),
+            )),
         }
     }
 
@@ -379,7 +408,6 @@ impl BemSolver {
         physics: &PhysicsParams,
         use_burton_miller: bool,
     ) -> Array1<Complex64> {
-        // Collect element centers and normals
         let n = elements.len();
         let mut centers = Array2::zeros((n, 3));
         let mut normals = Array2::zeros((n, 3));
@@ -391,7 +419,6 @@ impl BemSolver {
             }
         }
 
-        // Compute incident field RHS contribution with scaled β
         let incident_rhs = if use_burton_miller {
             let beta = physics.burton_miller_beta_scaled(self.beta_scale);
             incident_field.compute_rhs_with_beta(&centers, &normals, physics, beta)
@@ -399,28 +426,70 @@ impl BemSolver {
             incident_field.compute_rhs(&centers, &normals, physics, false)
         };
 
-        // Add to system RHS
         rhs = rhs + incident_rhs;
 
         rhs
     }
 
-    /// Solve the linear system
-    fn solve_linear_system(
+    /// Solve dense linear system
+    fn solve_dense_system(
         &self,
         matrix: &Array2<Complex64>,
         rhs: &Array1<Complex64>,
     ) -> Result<Array1<Complex64>, BemError> {
         match self.solver_method {
             SolverMethod::Direct => {
-                // Uses BLAS when native feature is enabled, pure Rust fallback otherwise
                 lu_solve(matrix, rhs).map_err(|e| BemError::SolverFailed(e.to_string()))
             }
             SolverMethod::Cgs | SolverMethod::BiCgStab => {
-                // Iterative solvers not yet integrated
-                Err(BemError::NotImplemented(
-                    "Iterative solvers not yet available in high-level API".to_string(),
-                ))
+                let config = BiCgstabConfig {
+                    max_iterations: self.max_iterations,
+                    tolerance: self.tolerance,
+                    print_interval: 0,
+                };
+
+                match bicgstab(&DenseMatrixOperator(matrix), rhs, &config) {
+                    sol if sol.converged => Ok(sol.x),
+                    sol => Err(BemError::SolverFailed(format!(
+                        "BiCGSTAB did not converge: residual = {}",
+                        sol.residual
+                    ))),
+                }
+            }
+        }
+    }
+
+    /// Solve FMM system using matrix-vector products
+    fn solve_fmm_system(
+        &self,
+        system: SlfmmSystem,
+        rhs: &Array1<Complex64>,
+    ) -> Result<Array1<Complex64>, BemError> {
+        match self.solver_method {
+            SolverMethod::Direct => {
+                if system.num_dofs <= 2000 {
+                    let matrix = system.extract_near_field_matrix();
+                    lu_solve(&matrix, rhs).map_err(|e| BemError::SolverFailed(e.to_string()))
+                } else {
+                    Err(BemError::NotImplemented(
+                        "Direct solver not available for large FMM problems".to_string(),
+                    ))
+                }
+            }
+            SolverMethod::Cgs | SolverMethod::BiCgStab => {
+                let config = BiCgstabConfig {
+                    max_iterations: self.max_iterations,
+                    tolerance: self.tolerance,
+                    print_interval: 0,
+                };
+
+                match bicgstab(&system, rhs, &config) {
+                    sol if sol.converged => Ok(sol.x),
+                    sol => Err(BemError::SolverFailed(format!(
+                        "BiCGSTAB did not converge: residual = {}",
+                        sol.residual
+                    ))),
+                }
             }
         }
     }
@@ -518,6 +587,44 @@ impl std::fmt::Display for BemError {
 }
 
 impl std::error::Error for BemError {}
+
+/// Result of system assembly (dense matrix or FMM system)
+enum AssemblyResult {
+    /// Dense matrix for TBEM
+    Dense(Array2<Complex64>, Array1<Complex64>),
+    /// SLFMM system for iterative solvers
+    Slfmm(SlfmmSystem),
+}
+
+impl AssemblyResult {
+    #[allow(dead_code)]
+    fn num_dofs(&self) -> usize {
+        match self {
+            AssemblyResult::Dense(m, _) => m.nrows(),
+            AssemblyResult::Slfmm(s) => s.num_dofs,
+        }
+    }
+}
+
+struct DenseMatrixOperator<'a>(&'a Array2<Complex64>);
+
+impl<'a> LinearOperator<Complex64> for DenseMatrixOperator<'a> {
+    fn num_rows(&self) -> usize {
+        self.0.nrows()
+    }
+
+    fn num_cols(&self) -> usize {
+        self.0.ncols()
+    }
+
+    fn apply(&self, x: &Array1<Complex64>) -> Array1<Complex64> {
+        self.0.dot(x)
+    }
+
+    fn apply_transpose(&self, x: &Array1<Complex64>) -> Array1<Complex64> {
+        self.0.t().dot(x)
+    }
+}
 
 #[cfg(test)]
 mod tests {
