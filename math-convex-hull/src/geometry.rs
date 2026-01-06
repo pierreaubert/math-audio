@@ -9,6 +9,7 @@ use crate::types::Vertex;
 // }
 
 /// Compute the volume of a tetrahedron formed by 4 points
+#[allow(dead_code)]
 pub fn tetrahedron_volume(p0: &Vertex, p1: &Vertex, p2: &Vertex, p3: &Vertex) -> f64 {
     let v1 = p1.sub(p0);
     let v2 = p2.sub(p0);
@@ -18,6 +19,7 @@ pub fn tetrahedron_volume(p0: &Vertex, p1: &Vertex, p2: &Vertex, p3: &Vertex) ->
 }
 
 /// Check if 4 points are coplanar
+#[allow(dead_code)]
 pub fn are_coplanar(p0: &Vertex, p1: &Vertex, p2: &Vertex, p3: &Vertex, epsilon: f64) -> bool {
     tetrahedron_volume(p0, p1, p2, p3) < epsilon
 }

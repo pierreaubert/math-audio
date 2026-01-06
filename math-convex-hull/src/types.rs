@@ -1,5 +1,6 @@
 //! Core data types for 3D convex hull computation
 
+use crate::EPSILON;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
@@ -79,10 +80,20 @@ impl Vertex {
     /// Normalize to unit length
     pub fn normalize(&self) -> Vertex {
         let mag = self.magnitude();
-        if mag > 1e-10 {
+        if mag > EPSILON {
             self.scale(1.0 / mag)
         } else {
             *self
+        }
+    }
+
+    /// Normalize to unit length, returning None for zero vector
+    pub fn try_normalize(&self) -> Option<Vertex> {
+        let mag = self.magnitude();
+        if mag > EPSILON {
+            Some(self.scale(1.0 / mag))
+        } else {
+            None
         }
     }
 

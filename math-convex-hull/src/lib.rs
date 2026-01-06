@@ -60,3 +60,41 @@ pub type Result<T> = std::result::Result<T, ConvexHullError>;
 /// - Determinant checks
 /// - Degeneracy detection
 pub(crate) const EPSILON: f64 = 1e-10;
+
+/// Compute a scale-aware relative epsilon based on vertex coordinates
+pub(crate) fn compute_relative_epsilon(vertices: &[Vertex]) -> f64 {
+    if vertices.is_empty() {
+        return EPSILON;
+    }
+    let max_coord = vertices.iter().fold(0.0f64, |max, v| {
+        max.max(v.x.abs()).max(v.y.abs()).max(v.z.abs())
+    });
+    // Use relative epsilon based on coordinate scale
+    // For coordinates around 1.0, this gives ~1e-10
+    // For coordinates around 1e8, this gives ~1e3
+    (max_coord * EPSILON).max(EPSILON)
+}
+
+/// Deduplicate vertices, keeping the first occurrence of each unique point
+pub(crate) fn deduplicate_vertices(vertices: &[Vertex], epsilon: f64) -> Vec<Vertex> {
+    let mut unique_points: Vec<Vertex> = Vec::with_capacity(vertices.len());
+    let eps_sq = epsilon * epsilon;
+
+    for point in vertices {
+        let mut is_duplicate = false;
+        for existing in &unique_points {
+            let dx = point.x - existing.x;
+            let dy = point.y - existing.y;
+            let dz = point.z - existing.z;
+            if dx * dx + dy * dy + dz * dz < eps_sq {
+                is_duplicate = true;
+                break;
+            }
+        }
+        if !is_duplicate {
+            unique_points.push(*point);
+        }
+    }
+
+    unique_points
+}
