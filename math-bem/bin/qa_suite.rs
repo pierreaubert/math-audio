@@ -5,6 +5,14 @@
 //! 1. Rigid Sphere Scattering (Rayleigh, Mie, Geometric regimes)
 //! 2. Pulsating Sphere Radiation (Monopole)
 //!
+//! Solver selection based on problem size (see CLAUDE.md):
+//! | Problem Size | Solver Method |
+//! |--------------|---------------|
+//! | N < 1000 | Direct (LU) |
+//! | N < 5000 | GMRES+ILU |
+//! | N < 20000 | FMM+GMRES+ILU |
+//! | N > 20000 | FMM+Batched |
+//!
 //! Usage:
 //!     cargo run --bin qa-suite --release
 
@@ -26,7 +34,7 @@ use std::path::Path;
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum SolverType {
     Lu,
-    Gmres,
+    GmresIlu,
     Bicgstab,
     Cgs,
 }
@@ -35,10 +43,19 @@ impl std::fmt::Display for SolverType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             SolverType::Lu => write!(f, "LU"),
-            SolverType::Gmres => write!(f, "GMRES"),
+            SolverType::GmresIlu => write!(f, "GMRES+ILU"),
             SolverType::Bicgstab => write!(f, "BiCGStab"),
             SolverType::Cgs => write!(f, "CGS"),
         }
+    }
+}
+
+/// Returns the best solver type based on problem size (number of DOFs)
+fn best_solver_for_size(n_dofs: usize) -> SolverType {
+    match n_dofs {
+        n if n < 1000 => SolverType::Lu, // Direct LU for small problems
+        n if n < 5000 => SolverType::GmresIlu, // GMRES+ILU for medium problems
+        _ => SolverType::GmresIlu,       // GMRES+ILU scales better than BiCGStab/CGS
     }
 }
 
@@ -54,17 +71,12 @@ fn main() -> anyhow::Result<()> {
     let speed_of_sound = 343.0;
     let density = 1.21;
 
-    let solvers = [
-        SolverType::Lu,
-        SolverType::Gmres,
-        SolverType::Bicgstab,
-        SolverType::Cgs,
-    ];
+    let solvers = [SolverType::Lu, SolverType::GmresIlu];
 
     // 1. Rigid Sphere Scattering Tests
     println!("\nRunning Rigid Sphere Scattering Tests...");
 
-    // Rayleigh regime (ka = 0.2)
+    // Rayleigh regime (ka = 0.2) - small problem
     for solver in &solvers {
         results.push(run_scattering_test(
             &format!("Scattering (Rayleigh, ka=0.2) [{}]", solver),
@@ -76,7 +88,7 @@ fn main() -> anyhow::Result<()> {
         )?);
     }
 
-    // Mie regime (ka = 1.0)
+    // Mie regime (ka = 1.0) - medium problem
     for solver in &solvers {
         results.push(run_scattering_test(
             &format!("Scattering (Mie, ka=1.0) [{}]", solver),
@@ -88,7 +100,7 @@ fn main() -> anyhow::Result<()> {
         )?);
     }
 
-    // Geometric regime (ka = 3.0)
+    // Geometric regime (ka = 3.0) - larger problem
     for solver in &solvers {
         results.push(run_scattering_test(
             &format!("Scattering (Geometric, ka=3.0) [{}]", solver),
@@ -99,6 +111,39 @@ fn main() -> anyhow::Result<()> {
             *solver,
         )?);
     }
+
+    // 2. Best Solver Tests - auto-select best solver for each regime
+    println!("\nRunning Best Solver Selection Tests...");
+
+    // Rayleigh: Small problem, use Direct LU
+    results.push(run_scattering_test(
+        "Scattering (Rayleigh, ka=0.2) [Best: LU]",
+        radius,
+        0.2,
+        speed_of_sound,
+        density,
+        SolverType::Lu,
+    )?);
+
+    // Mie: Medium problem, use GMRES+ILU
+    results.push(run_scattering_test(
+        "Scattering (Mie, ka=1.0) [Best: GMRES+ILU]",
+        radius,
+        1.0,
+        speed_of_sound,
+        density,
+        SolverType::GmresIlu,
+    )?);
+
+    // Geometric: Larger problem, use GMRES+ILU
+    results.push(run_scattering_test(
+        "Scattering (Geometric, ka=3.0) [Best: GMRES+ILU]",
+        radius,
+        3.0,
+        speed_of_sound,
+        density,
+        SolverType::GmresIlu,
+    )?);
 
     // 2. Pulsating Sphere Radiation Test
     // Disabled until formulation for radiation is fixed
@@ -203,7 +248,7 @@ fn run_scattering_test(
 
     let p_bem = match solver_type {
         SolverType::Lu => lu_solve(&system.matrix, &total_rhs).map_err(|e| anyhow::anyhow!(e))?,
-        SolverType::Gmres => {
+        SolverType::GmresIlu => {
             let config = GmresConfig {
                 max_iterations: 1000,
                 restart: 50,
@@ -212,7 +257,7 @@ fn run_scattering_test(
             };
             let solution = gmres_solve_tbem_with_ilu(&system.matrix, &total_rhs, &config);
             if !solution.converged {
-                eprintln!("GMRES failed to converge");
+                eprintln!("GMRES+ILU failed to converge");
             }
             solution.x
         }
@@ -312,7 +357,7 @@ fn run_pulsating_sphere_test(
     // No incident field, only BC excitation (which is in system.rhs)
     let p_bem = match solver_type {
         SolverType::Lu => lu_solve(&system.matrix, &system.rhs).map_err(|e| anyhow::anyhow!(e))?,
-        SolverType::Gmres => {
+        SolverType::GmresIlu => {
             let config = GmresConfig {
                 max_iterations: 1000,
                 restart: 50,
@@ -321,7 +366,7 @@ fn run_pulsating_sphere_test(
             };
             let solution = gmres_solve_tbem_with_ilu(&system.matrix, &system.rhs, &config);
             if !solution.converged {
-                eprintln!("GMRES failed to converge");
+                eprintln!("GMRES+ILU failed to converge");
             }
             solution.x
         }

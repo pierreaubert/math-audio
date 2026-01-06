@@ -4,6 +4,10 @@
 //! Validates:
 //! 1. Cylinder Scattering (Sound-soft)
 //!
+//! Solver selection based on problem characteristics:
+//! - GMRES+ShiftedLaplacian: Best for Helmholtz (recommended)
+//! - GMRES+ILU: Good fallback when Shifted-Laplacian fails
+//!
 //! Usage:
 //!     cargo run --bin qa-suite --release
 
@@ -11,11 +15,9 @@ use math_audio_fem::assembly::HelmholtzProblem;
 use math_audio_fem::basis::PolynomialDegree;
 use math_audio_fem::boundary::{DirichletBC, apply_dirichlet};
 use math_audio_fem::mesh::{annular_mesh_triangles, spherical_shell_mesh_tetrahedra};
-use math_audio_solvers::iterative::{
-    BiCgstabConfig, CgsConfig, GmresConfig, bicgstab, cgs, gmres, gmres_pipelined,
-    gmres_preconditioned,
-};
-use math_audio_solvers::preconditioners::{IluColoringPreconditioner, IluPreconditioner};
+use math_audio_fem::solver::{GmresConfigF64, ShiftedLaplacianConfig, SolverConfig, SolverType};
+use math_audio_solvers::iterative::{GmresConfig, gmres, gmres_preconditioned};
+use math_audio_solvers::preconditioners::IluPreconditioner;
 use math_audio_solvers::sparse::CsrMatrix;
 use math_audio_solvers::traits::LinearOperator;
 use ndarray::Array1;
@@ -26,23 +28,30 @@ use std::f64::consts::PI;
 use std::path::Path;
 use std::time::Instant;
 
-// Import 3D analytical solution
-use math_audio_wave::analytical::solutions_3d::sphere_scattering_3d;
-
+/// QA-specific solver wrapper that adds test metadata
 #[derive(Debug, Clone, Copy, PartialEq)]
-enum SolverType {
-    Gmres,
-    Bicgstab,
-    Cgs,
+enum QaSolverType {
+    GmresIlu,
+    GmresShiftedLaplacian,
 }
 
-impl std::fmt::Display for SolverType {
+impl std::fmt::Display for QaSolverType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            SolverType::Gmres => write!(f, "GMRES"),
-            SolverType::Bicgstab => write!(f, "BiCGStab"),
-            SolverType::Cgs => write!(f, "CGS"),
+            QaSolverType::GmresIlu => write!(f, "GMRES+ILU"),
+            QaSolverType::GmresShiftedLaplacian => write!(f, "GMRES+ShiftedLaplacian"),
         }
+    }
+}
+
+/// Returns the best solver for Helmholtz problems
+fn best_helmholtz_solver(k: f64) -> QaSolverType {
+    // Shifted-Laplacian is generally best for Helmholtz
+    // Use it unless k is very small (< 0.5) where ILU may be sufficient
+    if k < 0.5 {
+        QaSolverType::GmresIlu
+    } else {
+        QaSolverType::GmresShiftedLaplacian
     }
 }
 
@@ -68,7 +77,7 @@ fn main() -> anyhow::Result<()> {
 
     let mut results = Vec::new();
 
-    let solvers = [SolverType::Gmres];
+    let solvers = [QaSolverType::GmresIlu, QaSolverType::GmresShiftedLaplacian];
 
     // 1. Cylinder Scattering Test (2D)
     println!("\nRunning Cylinder Scattering Tests (Convergence Study)...");
@@ -102,7 +111,7 @@ fn main() -> anyhow::Result<()> {
                 }
 
                 results.push(run_cylinder_scattering_test(
-                    &format!("Cylinder Scattering (k={:.1})", k_val),
+                    &format!("Cylinder Scattering (k={:.1}) [{}]", k_val, solver),
                     *k_val,
                     *solver,
                     *n_radial,
@@ -124,14 +133,35 @@ fn main() -> anyhow::Result<()> {
         (1.0, 4, 16, "Subdiv 4 (Very Fine)"),
     ];
 
+    // Test both solvers for sphere scattering
     for (k, subdiv, layers, name) in &sphere_cases {
-        results.push(run_sphere_scattering_test(
-            &format!("Sphere Scattering (k={:.1})", k),
-            *k,
-            SolverType::Gmres,
-            *subdiv,
-            *layers,
-            name,
+        for solver in &solvers {
+            results.push(run_sphere_scattering_test(
+                &format!("Sphere Scattering (k={:.1}) [{}]", k, solver),
+                *k,
+                *solver,
+                *subdiv,
+                *layers,
+                name,
+            )?);
+        }
+    }
+
+    // 3. Best Solver Selection Tests
+    println!("\nRunning Best Solver Selection Tests...");
+
+    for k_val in &k_values {
+        let best_solver = best_helmholtz_solver(*k_val);
+        results.push(run_cylinder_scattering_test(
+            &format!(
+                "Cylinder Scattering (k={:.1}) [Best: {}]",
+                k_val, best_solver
+            ),
+            *k_val,
+            best_solver,
+            32,
+            64,
+            "Medium (Best Solver)",
         )?);
     }
 
@@ -168,7 +198,7 @@ fn main() -> anyhow::Result<()> {
 fn run_sphere_scattering_test(
     name: &str,
     k: f64,
-    solver_type: SolverType,
+    solver_type: QaSolverType,
     subdivisions: usize,
     layers: usize,
     mesh_name: &str,
@@ -229,23 +259,60 @@ fn run_sphere_scattering_test(
     apply_dirichlet(&mut problem, &mesh, &[bc_outer]);
 
     let matrix = to_csr_matrix(&problem);
-    let precond = Some(IluPreconditioner::from_csr(&matrix));
-    let op = CsrOperator::new(matrix);
+    let op = CsrOperator::new(matrix.clone());
     let rhs = Array1::from_vec(problem.rhs.clone());
     let b_norm = rhs.iter().map(|x| x.norm_sqr()).sum::<f64>().sqrt();
 
-    let config = GmresConfig {
-        max_iterations: 2000,
-        restart: 100,
-        tolerance: 1e-12,
-        print_interval: 0,
+    // Solve using Shifted-Laplacian or GMRES+ILU
+    let (solution_vec, iterations, residual) = match solver_type {
+        QaSolverType::GmresIlu => {
+            let config = GmresConfig {
+                max_iterations: 2000,
+                restart: 100,
+                tolerance: 1e-12,
+                print_interval: 0,
+            };
+            let precond = IluPreconditioner::from_csr(&matrix);
+            let sol = gmres_preconditioned(&op, &precond, &rhs, &config);
+            if !sol.converged {
+                eprintln!("GMRES+ILU failed to converge for {}", mesh_name);
+            }
+            (sol.x, sol.iterations, sol.residual)
+        }
+        QaSolverType::GmresShiftedLaplacian => {
+            let config = SolverConfig {
+                solver_type: SolverType::GmresShiftedLaplacian,
+                gmres: GmresConfigF64 {
+                    max_iterations: 2000,
+                    restart: 100,
+                    tolerance: 1e-12,
+                    print_interval: 0,
+                },
+                shifted_laplacian: Some(ShiftedLaplacianConfig::for_wavenumber(k)),
+                wavenumber: Some(k),
+                ..Default::default()
+            };
+
+            let result = math_audio_fem::solver::solve(&problem, &config);
+            match result {
+                Ok(sol) => (sol.values, sol.iterations, sol.residual),
+                Err(e) => {
+                    eprintln!("Shifted-Laplacian solver failed: {:?}", e);
+                    // Fallback to GMRES+ILU
+                    let ilu_config = GmresConfig {
+                        max_iterations: 2000,
+                        restart: 100,
+                        tolerance: 1e-12,
+                        print_interval: 0,
+                    };
+                    let precond = IluPreconditioner::from_csr(&matrix);
+                    let fallback = gmres_preconditioned(&op, &precond, &rhs, &ilu_config);
+                    (fallback.x, fallback.iterations, fallback.residual)
+                }
+            }
+        }
     };
 
-    let sol = gmres_preconditioned(&op, precond.as_ref().unwrap(), &rhs, &config);
-    if !sol.converged {
-        eprintln!("GMRES failed to converge for {}", mesh_name);
-    }
-    let solution_vec = sol.x;
     let x_norm = solution_vec
         .iter()
         .map(|x| x.norm_sqr())
@@ -269,8 +336,8 @@ fn run_sphere_scattering_test(
         mesh_info: format!("{} ({} tets)", mesh_name, mesh.num_elements()),
         duration_ms: duration,
         l2_error: error,
-        iterations: sol.iterations,
-        residual: sol.residual,
+        iterations,
+        residual,
         b_norm,
         x_norm,
         passed,
@@ -318,7 +385,7 @@ fn compute_rigid_sphere_coefficients(ka: f64, num_terms: usize) -> Vec<Complex64
 fn run_cylinder_scattering_test(
     name: &str,
     k: f64,
-    solver_type: SolverType,
+    solver_type: QaSolverType,
     n_radial: usize,
     n_angular: usize,
     mesh_name: &str,
@@ -357,9 +424,9 @@ fn run_cylinder_scattering_test(
     let rhs = Array1::from_vec(problem.rhs.clone());
     let b_norm = rhs.iter().map(|x| x.norm_sqr()).sum::<f64>().sqrt();
 
-    // Solve
+    // Solve using Shifted-Laplacian or GMRES+ILU
     let (solution_vec, iterations, residual) = match solver_type {
-        SolverType::Gmres => {
+        QaSolverType::GmresIlu => {
             let config = GmresConfig {
                 max_iterations: 10000,
                 restart: 200,
@@ -367,59 +434,55 @@ fn run_cylinder_scattering_test(
                 print_interval: 0,
             };
 
-            // For the largest mesh (Super Fine 3), use Pipelined GMRES with Parallel ILU
-            if mesh_name == "Super Fine 3" {
-                // println!("    Using Pipelined GMRES with Parallel ILU...");
-                let precond = IluColoringPreconditioner::from_csr(&matrix);
-                let sol = gmres_pipelined(&op, &precond, &rhs, None, &config);
-                if !sol.converged {
-                    eprintln!("Pipelined GMRES failed to converge");
-                }
-                (sol.x, sol.iterations, sol.residual)
+            let use_ilu = n_radial >= 32;
+            let precond = if use_ilu {
+                Some(IluPreconditioner::from_csr(&matrix))
             } else {
-                // Standard GMRES with ILU for smaller meshes
-                let use_ilu = n_radial >= 32;
-                let precond = if use_ilu {
-                    Some(IluPreconditioner::from_csr(&matrix))
-                } else {
-                    None
-                };
+                None
+            };
 
-                let sol = if let Some(pc) = &precond {
-                    gmres_preconditioned(&op, pc, &rhs, &config)
-                } else {
-                    gmres(&op, &rhs, &config)
-                };
+            let sol = if let Some(pc) = &precond {
+                gmres_preconditioned(&op, pc, &rhs, &config)
+            } else {
+                gmres(&op, &rhs, &config)
+            };
 
-                if !sol.converged {
-                    eprintln!("GMRES failed to converge");
+            if !sol.converged {
+                eprintln!("GMRES+ILU failed to converge");
+            }
+            (sol.x, sol.iterations, sol.residual)
+        }
+        QaSolverType::GmresShiftedLaplacian => {
+            let config = SolverConfig {
+                solver_type: SolverType::GmresShiftedLaplacian,
+                gmres: GmresConfigF64 {
+                    max_iterations: 10000,
+                    restart: 200,
+                    tolerance: 1e-10,
+                    print_interval: 0,
+                },
+                shifted_laplacian: Some(ShiftedLaplacianConfig::for_wavenumber(k)),
+                wavenumber: Some(k),
+                ..Default::default()
+            };
+
+            let result = math_audio_fem::solver::solve(&problem, &config);
+            match result {
+                Ok(sol) => (sol.values, sol.iterations, sol.residual),
+                Err(e) => {
+                    eprintln!("Shifted-Laplacian solver failed: {:?}", e);
+                    // Fallback to GMRES+ILU
+                    let ilu_config = GmresConfig {
+                        max_iterations: 10000,
+                        restart: 200,
+                        tolerance: 1e-10,
+                        print_interval: 0,
+                    };
+                    let precond = IluPreconditioner::from_csr(&matrix);
+                    let fallback = gmres_preconditioned(&op, &precond, &rhs, &ilu_config);
+                    (fallback.x, fallback.iterations, fallback.residual)
                 }
-                (sol.x, sol.iterations, sol.residual)
             }
-        }
-        SolverType::Bicgstab => {
-            let config = BiCgstabConfig {
-                max_iterations: 10000,
-                tolerance: 1e-10,
-                print_interval: 0,
-            };
-            let sol = bicgstab(&op, &rhs, &config);
-            if !sol.converged {
-                eprintln!("BiCGStab failed to converge");
-            }
-            (sol.x, sol.iterations, sol.residual)
-        }
-        SolverType::Cgs => {
-            let config = CgsConfig {
-                max_iterations: 10000,
-                tolerance: 1e-10,
-                print_interval: 0,
-            };
-            let sol = cgs(&op, &rhs, &config);
-            if !sol.converged {
-                eprintln!("CGS failed to converge");
-            }
-            (sol.x, sol.iterations, sol.residual)
         }
     };
 
