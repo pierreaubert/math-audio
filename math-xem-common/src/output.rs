@@ -1,6 +1,8 @@
 //! Output JSON formatting for room acoustics simulations
 
-use crate::config::{MetadataConfig, RoomConfig, RoomSimulation, VisualizationConfig, BoundaryConfig};
+use crate::config::{
+    BoundaryConfig, MetadataConfig, RoomConfig, RoomSimulation, VisualizationConfig,
+};
 use crate::geometry::RoomGeometry;
 use crate::types::{Point3D, RoomMesh, pressure_to_spl};
 use ndarray::{Array1, Array2};
@@ -306,16 +308,20 @@ pub fn print_config_summary(config: &RoomConfig) {
         "  Adaptive integration: {}",
         config.solver.adaptive_integration
     );
-    
+
     // Boundary summary
     println!("\nBoundaries:");
     let b = &config.boundaries;
     let format_bc = |s: &crate::config::SurfaceConfig| match s {
         crate::config::SurfaceConfig::Rigid => "Rigid".to_string(),
-        crate::config::SurfaceConfig::Absorption { coefficient } => format!("Abs α={:.2}", coefficient),
-        crate::config::SurfaceConfig::Impedance { real, imag } => format!("Z={:.1}+{:.1}i", real, imag),
+        crate::config::SurfaceConfig::Absorption { coefficient } => {
+            format!("Abs α={:.2}", coefficient)
+        }
+        crate::config::SurfaceConfig::Impedance { real, imag } => {
+            format!("Z={:.1}+{:.1}i", real, imag)
+        }
     };
-    
+
     println!("  Default walls: {}", format_bc(&b.walls));
     println!("  Floor:         {}", format_bc(&b.floor));
     println!("  Ceiling:       {}", format_bc(&b.ceiling));

@@ -57,7 +57,8 @@ mod tests {
             .strategy(Strategy::RandToBest1Exp)
             .mutation(Mutation::Factor(0.7))
             .recombination(0.9)
-            .build();
+            .build()
+            .expect("popsize must be >= 4");
 
         // Run the recorded optimization (requires AUTOEQ_DIR to be set)
         let result =

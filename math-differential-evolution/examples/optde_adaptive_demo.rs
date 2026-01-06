@@ -103,7 +103,8 @@ fn main() {
         .mutation(Mutation::Adaptive { initial_f: 0.8 })
         .adaptive(adaptive_config)
         .disp(true) // Enable progress display
-        .build();
+        .build()
+        .expect("popsize must be >= 4");
 
     println!("Running adaptive DE on Rosenbrock function with progress display...");
     let result = differential_evolution(&rosenbrock, &bounds, config).expect("optimization failed");
@@ -135,7 +136,8 @@ fn run_traditional_de(
         .strategy(Strategy::Best1Bin)
         .mutation(Mutation::Factor(0.8))
         .recombination(0.7)
-        .build();
+        .build()
+        .expect("popsize must be >= 4");
 
     differential_evolution(&func, bounds, config).expect("optimization failed")
 }
@@ -162,7 +164,8 @@ fn run_adaptive_de(
         .strategy(Strategy::AdaptiveBin)
         .mutation(Mutation::Adaptive { initial_f: 0.8 })
         .adaptive(adaptive_config)
-        .build();
+        .build()
+        .expect("popsize must be >= 4");
 
     differential_evolution(&func, bounds, config).expect("optimization failed")
 }

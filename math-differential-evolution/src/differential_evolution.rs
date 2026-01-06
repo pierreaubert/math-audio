@@ -26,10 +26,16 @@ use ndarray::Array1;
 /// ```rust
 /// use math_audio_differential_evolution::{differential_evolution, DEConfigBuilder};
 ///
+/// let config = DEConfigBuilder::new()
+///     .maxiter(50)
+///     .seed(42)
+///     .build()
+///     .expect("invalid config");
+///
 /// let result = differential_evolution(
 ///     &|x| x[0].powi(2) + x[1].powi(2),
 ///     &[(-5.0, 5.0), (-5.0, 5.0)],
-///     DEConfigBuilder::new().maxiter(50).seed(42).build(),
+///     config,
 /// ).expect("optimization failed");
 ///
 /// assert!(result.fun < 0.01);

@@ -18,24 +18,23 @@
 
 use clap::{Parser, ValueEnum};
 use math_audio_fem::assembly::{
-    HelmholtzAssembler, assemble_mass, assemble_stiffness,
-    assemble_boundary_mass,
+    HelmholtzAssembler, assemble_boundary_mass, assemble_mass, assemble_stiffness,
 };
 use math_audio_fem::basis::PolynomialDegree;
-use math_audio_fem::mesh::{ElementType, Mesh, Point, BoundaryType};
+use math_audio_fem::mesh::{BoundaryType, ElementType, Mesh, Point};
 use math_audio_fem::solver::{self, GmresConfigF64, SolverConfig, SolverType};
 use num_complex::Complex64;
 use rayon::prelude::*;
+use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
-use std::collections::HashMap;
 
 // Import common types from math-xem-common
 use math_audio_xem_common::{
-    Point3D, RoomConfig, RoomSimulation, Source, create_default_config, create_output_json,
-    pressure_to_spl, print_config_summary, SurfaceConfig,
+    Point3D, RoomConfig, RoomSimulation, Source, SurfaceConfig, create_default_config,
+    create_output_json, pressure_to_spl, print_config_summary,
 };
 
 /// Default source width in meters (Gaussian sigma)
@@ -484,7 +483,9 @@ fn group_frequencies_into_bands(
     // Compute required resolution for each frequency
     let resolutions: Vec<usize> = frequencies
         .iter()
-        .map(|&f| compute_mesh_resolution(f, speed_of_sound, elements_per_wavelength, min_resolution))
+        .map(|&f| {
+            compute_mesh_resolution(f, speed_of_sound, elements_per_wavelength, min_resolution)
+        })
         .collect();
 
     // Group frequencies by resolution (using power-of-2-ish bands to limit mesh count)
@@ -689,20 +690,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         (CliSolverType::Pipelined, Some(CliPreconditionerType::Ilu)) => {
             SolverType::GmresPipelinedIlu
         }
-        (CliSolverType::Pipelined, Some(CliPreconditionerType::Jacobi)) => {
-            SolverType::GmresJacobi 
-        }
+        (CliSolverType::Pipelined, Some(CliPreconditionerType::Jacobi)) => SolverType::GmresJacobi,
         (CliSolverType::Pipelined, Some(CliPreconditionerType::Schwarz)) => {
-            SolverType::GmresSchwarz 
+            SolverType::GmresSchwarz
         }
         (CliSolverType::Pipelined, Some(CliPreconditionerType::Amg)) => {
             SolverType::GmresPipelinedAmg
         }
         (CliSolverType::Pipelined, Some(CliPreconditionerType::IluColoring)) => {
-            SolverType::GmresIluColoring 
+            SolverType::GmresIluColoring
         }
         (CliSolverType::Pipelined, Some(CliPreconditionerType::IluFixedpoint)) => {
-            SolverType::GmresIluFixedPoint 
+            SolverType::GmresIluFixedPoint
         }
     };
 
@@ -821,41 +820,41 @@ fn create_room_mesh(simulation: &RoomSimulation, elements_per_meter: usize) -> M
 
     // Detect boundaries (finds all surface faces)
     mesh.detect_boundaries();
-    
+
     // Tag boundaries by position
     // Use epsilon for coordinate comparisons
     let eps = 1e-6;
-    
+
     // Floor: z = 0
     mesh.set_boundary_condition(BoundaryType::Neumann, MARKER_FLOOR, |pts| {
         pts.iter().all(|p| p.z.abs() < eps)
     });
-    
+
     // Ceiling: z = height
     mesh.set_boundary_condition(BoundaryType::Neumann, MARKER_CEILING, |pts| {
         pts.iter().all(|p| (p.z - height).abs() < eps)
     });
-    
+
     // Front: y = 0
     mesh.set_boundary_condition(BoundaryType::Neumann, MARKER_FRONT, |pts| {
         pts.iter().all(|p| p.y.abs() < eps)
     });
-    
+
     // Back: y = depth
     mesh.set_boundary_condition(BoundaryType::Neumann, MARKER_BACK, |pts| {
         pts.iter().all(|p| (p.y - depth).abs() < eps)
     });
-    
+
     // Left: x = 0
     mesh.set_boundary_condition(BoundaryType::Neumann, MARKER_LEFT, |pts| {
         pts.iter().all(|p| p.x.abs() < eps)
     });
-    
+
     // Right: x = width
     mesh.set_boundary_condition(BoundaryType::Neumann, MARKER_RIGHT, |pts| {
         pts.iter().all(|p| (p.x - width).abs() < eps)
     });
-    
+
     // For L-shaped or other rooms, remaining walls (marker 0) can be tagged as OTHER
     // We update anything still marked as 0
     mesh.set_boundary_condition(BoundaryType::Neumann, MARKER_OTHER, |_pts| {
@@ -950,14 +949,19 @@ fn run_fem_simulation(
     let matrix_start = Instant::now();
     let stiffness = assemble_stiffness(&mesh, PolynomialDegree::P1);
     let mass = assemble_mass(&mesh, PolynomialDegree::P1);
-    
+
     // Assemble boundary mass matrices for impedance BCs
     let markers = [
-        MARKER_FLOOR, MARKER_CEILING, MARKER_FRONT, MARKER_BACK, MARKER_LEFT, MARKER_RIGHT
+        MARKER_FLOOR,
+        MARKER_CEILING,
+        MARKER_FRONT,
+        MARKER_BACK,
+        MARKER_LEFT,
+        MARKER_RIGHT,
     ];
     let mut boundary_matrices = Vec::new();
     let mut boundary_nnz = 0;
-    
+
     for &marker in &markers {
         let b_mass = assemble_boundary_mass(&mesh, PolynomialDegree::P1, marker);
         if b_mass.nnz() > 0 {
@@ -965,10 +969,10 @@ fn run_fem_simulation(
             boundary_matrices.push((marker as usize, b_mass));
         }
     }
-    
+
     // Create efficient assembler
     let assembler = HelmholtzAssembler::from_matrices(&stiffness, &mass, &boundary_matrices);
-    
+
     let matrix_time = matrix_start.elapsed();
     println!(
         "  Matrix assembly: {:.1}ms (K: {} nnz, M: {} nnz, Boundaries: {} nnz)",
@@ -1156,8 +1160,7 @@ fn run_fem_simulation(
             .fold(0.0f64, |a, b| a.max(b));
         println!(
             "  Average iterations: {:.1}, Max residual: {:.2e}",
-            avg_iters,
-            max_residual
+            avg_iters, max_residual
         );
     }
 
@@ -1199,7 +1202,10 @@ fn run_fem_simulation_adaptive(
     min_mesh_resolution: usize,
 ) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
     let solver_name = format!("{:?}", solver_type);
-    println!("\n=== {} Solver (Adaptive Mesh) ===", solver_name.to_uppercase());
+    println!(
+        "\n=== {} Solver (Adaptive Mesh) ===",
+        solver_name.to_uppercase()
+    );
 
     // Group frequencies into bands
     let bands = group_frequencies_into_bands(
@@ -1253,7 +1259,10 @@ fn run_fem_simulation_adaptive(
             "\n--- Band {} of {}: {:.0}-{:.0} Hz ({} elem/m) ---",
             band_idx + 1,
             bands.len(),
-            band.frequencies.iter().cloned().fold(f64::INFINITY, f64::min),
+            band.frequencies
+                .iter()
+                .cloned()
+                .fold(f64::INFINITY, f64::min),
             band.max_freq,
             band.mesh_resolution
         );
@@ -1274,7 +1283,12 @@ fn run_fem_simulation_adaptive(
         let mass = assemble_mass(&mesh, PolynomialDegree::P1);
 
         let markers = [
-            MARKER_FLOOR, MARKER_CEILING, MARKER_FRONT, MARKER_BACK, MARKER_LEFT, MARKER_RIGHT
+            MARKER_FLOOR,
+            MARKER_CEILING,
+            MARKER_FRONT,
+            MARKER_BACK,
+            MARKER_LEFT,
+            MARKER_RIGHT,
         ];
         let mut boundary_matrices = Vec::new();
         for &marker in &markers {
@@ -1440,7 +1454,7 @@ fn compute_boundary_coefficients(
     let mut coeffs = HashMap::new();
     let k = simulation.wavenumber(frequency);
     let rho_c = 1.21 * simulation.speed_of_sound; // Approx air impedance
-    
+
     // Helper to get coefficient from config
     let get_coeff = |config: &SurfaceConfig| -> Complex64 {
         match config {
@@ -1453,34 +1467,46 @@ fn compute_boundary_coefficients(
                 let z = z_norm * rho_c;
                 // Robin alpha = i * k * rho * c / Z
                 Complex64::new(0.0, k * rho_c) / Complex64::new(z, 0.0)
-            },
+            }
             SurfaceConfig::Impedance { real, imag } => {
                 let z = Complex64::new(*real, *imag);
                 Complex64::new(0.0, k * rho_c) / z
             }
         }
     };
-    
+
     let b = &simulation.boundaries;
-    
+
     // Default walls
     let wall_coeff = get_coeff(&b.walls);
-    
+
     // Apply defaults then overrides
     // Floor
     coeffs.insert(MARKER_FLOOR as usize, get_coeff(&b.floor));
     // Ceiling
     coeffs.insert(MARKER_CEILING as usize, get_coeff(&b.ceiling));
-    
+
     // Walls with overrides
-    coeffs.insert(MARKER_FRONT as usize, b.front_wall.as_ref().map(get_coeff).unwrap_or(wall_coeff));
-    coeffs.insert(MARKER_BACK as usize, b.back_wall.as_ref().map(get_coeff).unwrap_or(wall_coeff));
-    coeffs.insert(MARKER_LEFT as usize, b.left_wall.as_ref().map(get_coeff).unwrap_or(wall_coeff));
-    coeffs.insert(MARKER_RIGHT as usize, b.right_wall.as_ref().map(get_coeff).unwrap_or(wall_coeff));
-    
+    coeffs.insert(
+        MARKER_FRONT as usize,
+        b.front_wall.as_ref().map(get_coeff).unwrap_or(wall_coeff),
+    );
+    coeffs.insert(
+        MARKER_BACK as usize,
+        b.back_wall.as_ref().map(get_coeff).unwrap_or(wall_coeff),
+    );
+    coeffs.insert(
+        MARKER_LEFT as usize,
+        b.left_wall.as_ref().map(get_coeff).unwrap_or(wall_coeff),
+    );
+    coeffs.insert(
+        MARKER_RIGHT as usize,
+        b.right_wall.as_ref().map(get_coeff).unwrap_or(wall_coeff),
+    );
+
     // Other walls (e.g. L-shape inner) use default wall coeff
     coeffs.insert(MARKER_OTHER as usize, wall_coeff);
-    
+
     coeffs
 }
 
@@ -1509,13 +1535,13 @@ fn solve_single_frequency(
 
     // Assemble RHS for this frequency (parallel over elements)
     let rhs = assemble_rhs_parallel(mesh, sources, frequency, source_width);
-    
+
     // Convert RHS to Array1
     let rhs_array = ndarray::Array1::from(rhs);
 
     // Solve the system
-    let solution = solver::solve_csr_with_guess(&csr, &rhs_array, None, solver_config)
-        .expect("Solver failed");
+    let solution =
+        solver::solve_csr_with_guess(&csr, &rhs_array, None, solver_config).expect("Solver failed");
 
     // Evaluate pressure at all listening positions
     let spl_values: Vec<f64> = listening_positions
@@ -1857,7 +1883,7 @@ fn assemble_rhs_parallel(
             let vertices = elem.vertices();
             let n_nodes = vertices.len();
 
-            let quad = for_mass(elem_type, 1); 
+            let quad = for_mass(elem_type, 1);
 
             let coords: Vec<[f64; 3]> = vertices
                 .iter()

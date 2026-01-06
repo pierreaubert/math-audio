@@ -23,7 +23,8 @@
 //! let config = DEConfigBuilder::new()
 //!     .maxiter(100)
 //!     .seed(42)
-//!     .build();
+//!     .build()
+//!     .expect("invalid config");
 //!
 //! let result = differential_evolution(
 //!     &|x| x.iter().map(|&xi| xi * xi).sum(),
@@ -44,7 +45,7 @@ use std::fmt;
 use std::str::FromStr;
 use std::sync::Arc;
 
-use ndarray::{Array1, Array2};
+use ndarray::{Array1, Array2, Zip};
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use std::time::Instant;
@@ -84,6 +85,9 @@ pub mod crossover_binomial;
 /// Exponential crossover implementation.
 pub mod crossover_exponential;
 
+/// Comprehensive tests for DE strategies and features.
+#[cfg(test)]
+mod de_tests;
 /// Main differential evolution algorithm implementation.
 pub mod differential_evolution;
 /// Registry of standard test functions for benchmarking.
@@ -334,7 +338,8 @@ impl NonlinearConstraintHelper {
         for i in 0..m {
             let l = lb[i];
             let u = ub[i];
-            if (u - l).abs() < 1e-18 {
+            let tol = 1e-12 * (l.abs() + u.abs()).max(1.0);
+            if (u - l).abs() <= tol {
                 let fi = f.clone();
                 cfg.penalty_eq.push((
                     Arc::new(move |x: &Array1<f64>| {
@@ -448,27 +453,22 @@ impl AdaptiveState {
 
     /// Sample adaptive F parameter using conservative normal distribution
     fn sample_f<R: Rng + ?Sized>(&self, rng: &mut R) -> f64 {
-        // Use simple normal distribution with smaller variance for stability
-        let u1: f64 = rng.random();
-        let u2: f64 = rng.random();
+        let u1: f64 = rng.random::<f64>().max(1e-15);
+        let u2: f64 = rng.random::<f64>();
 
-        // Box-Muller transform with smaller standard deviation
         let normal = (-2.0 * u1.ln()).sqrt() * (2.0 * std::f64::consts::PI * u2).cos();
-        let sample = self.f_m + 0.05 * normal; // Reduced variance from 0.1 to 0.05
+        let sample = self.f_m + 0.05 * normal;
 
-        // Clamp to conservative bounds
         sample.clamp(0.3, 1.0)
     }
 
     /// Sample adaptive CR parameter using conservative Gaussian distribution
     fn sample_cr<R: Rng + ?Sized>(&self, rng: &mut R) -> f64 {
-        // Use normal distribution with smaller variance for stability
-        let u1: f64 = rng.random();
-        let u2: f64 = rng.random();
+        let u1: f64 = rng.random::<f64>().max(1e-15);
+        let u2: f64 = rng.random::<f64>();
 
-        // Box-Muller transform with smaller standard deviation
         let normal = (-2.0 * u1.ln()).sqrt() * (2.0 * std::f64::consts::PI * u2).cos();
-        let sample = self.cr_m + 0.05 * normal; // Reduced variance from 0.1 to 0.05
+        let sample = self.cr_m + 0.05 * normal;
 
         sample.clamp(0.1, 0.9)
     }
@@ -643,6 +643,11 @@ impl DEConfigBuilder {
         self
     }
     /// Sets the population size multiplier.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `v < 4` since DE requires at least 4 individuals for
+    /// rand/1 and rand/2 mutation strategies.
     pub fn popsize(mut self, v: usize) -> Self {
         self.cfg.popsize = v;
         self
@@ -770,8 +775,17 @@ impl DEConfigBuilder {
         self
     }
     /// Builds and returns the configuration.
-    pub fn build(self) -> DEConfig {
-        self.cfg
+    ///
+    /// # Errors
+    ///
+    /// Returns `DEError::PopulationTooSmall` if `popsize < 4`.
+    pub fn build(self) -> error::Result<DEConfig> {
+        if self.cfg.popsize < 4 {
+            return Err(DEError::PopulationTooSmall {
+                pop_size: self.cfg.popsize,
+            });
+        }
+        Ok(self.cfg)
     }
 }
 
@@ -1048,19 +1062,18 @@ where
             }
             if let Some(ref lp) = linear_penalty {
                 let ax = lp.a.dot(&x.view());
-                for i in 0..ax.len() {
-                    let v = ax[i];
-                    let lo = lp.lb[i];
-                    let hi = lp.ub[i];
-                    if v < lo {
-                        let d = lo - v;
-                        p += lp.weight * d * d;
-                    }
-                    if v > hi {
-                        let d = v - hi;
-                        p += lp.weight * d * d;
-                    }
-                }
+                Zip::from(&ax)
+                    .and(&lp.lb)
+                    .and(&lp.ub)
+                    .for_each(|&v, &lo, &hi| {
+                        if v < lo {
+                            let d = lo - v;
+                            p += lp.weight * d * d;
+                        } else if v > hi {
+                            let d = v - hi;
+                            p += lp.weight * d * d;
+                        }
+                    });
             }
             base + p
         });
@@ -1336,11 +1349,12 @@ where
                         trial.clone()
                     };
 
-                    // Clip to bounds using ndarray
+                    // Clip to bounds using vectorized operation
                     let mut trial_clipped = wls_trial;
-                    for j in 0..trial_clipped.len() {
-                        trial_clipped[j] = trial_clipped[j].clamp(self.lower[j], self.upper[j]);
-                    }
+                    Zip::from(&mut trial_clipped)
+                        .and(&self.lower)
+                        .and(&self.upper)
+                        .for_each(|x, lo, hi| *x = x.clamp(*lo, *hi));
 
                     // Apply integrality if provided
                     if let Some(mask) = &self.config.integrality {

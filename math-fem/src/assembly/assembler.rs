@@ -42,9 +42,9 @@ impl HelmholtzAssembler {
 
     /// Create assembler from existing stiffness, mass, and boundary matrices
     pub fn from_matrices(
-        stiffness: &StiffnessMatrix, 
+        stiffness: &StiffnessMatrix,
         mass: &MassMatrix,
-        boundaries: &[(usize, MassMatrix)]
+        boundaries: &[(usize, MassMatrix)],
     ) -> Self {
         assert_eq!(stiffness.dim, mass.dim);
         let num_rows = stiffness.dim;
@@ -60,9 +60,9 @@ impl HelmholtzAssembler {
         }
 
         // Estimate total capacity
-        let total_nnz = stiffness.nnz() + mass.nnz() 
-            + boundaries.iter().map(|(_, m)| m.nnz()).sum::<usize>();
-            
+        let total_nnz =
+            stiffness.nnz() + mass.nnz() + boundaries.iter().map(|(_, m)| m.nnz()).sum::<usize>();
+
         let mut entries = Vec::with_capacity(total_nnz);
 
         // Stiffness (Source -1)
@@ -84,7 +84,7 @@ impl HelmholtzAssembler {
                 value: mass.values[i],
             });
         }
-        
+
         // Boundaries (Source = tag)
         for (tag, matrix) in boundaries {
             for i in 0..matrix.nnz() {
@@ -112,7 +112,7 @@ impl HelmholtzAssembler {
         let mut k_values = Vec::with_capacity(entries.len());
         let mut m_values = Vec::with_capacity(entries.len());
         let mut boundary_values_map: HashMap<usize, Vec<f64>> = HashMap::new();
-        
+
         // Initialize boundary value vectors
         for (tag, _) in boundaries {
             boundary_values_map.insert(*tag, Vec::with_capacity(entries.len()));
@@ -131,34 +131,35 @@ impl HelmholtzAssembler {
 
         let mut last_r = entries[0].row;
         let mut last_c = entries[0].col;
-        
+
         // Accumulators
         let mut acc_k = 0.0;
         let mut acc_m = 0.0;
         let mut acc_boundaries: HashMap<usize, f64> = HashMap::new();
-        
+
         // Helper to accumulate
-        let accumulate = |entry: &Entry, k: &mut f64, m: &mut f64, b_map: &mut HashMap<usize, f64>| {
-            match entry.source_idx {
+        let accumulate =
+            |entry: &Entry, k: &mut f64, m: &mut f64, b_map: &mut HashMap<usize, f64>| match entry
+                .source_idx
+            {
                 -1 => *k += entry.value,
                 -2 => *m += entry.value,
                 tag => {
                     let t = tag as usize;
                     *b_map.entry(t).or_insert(0.0) += entry.value;
                 }
-            }
-        };
-        
+            };
+
         accumulate(&entries[0], &mut acc_k, &mut acc_m, &mut acc_boundaries);
-        
+
         // Fix row pointers for empty initial rows
         for r in 0..last_r {
-             row_ptrs[r+1] = 0;
+            row_ptrs[r + 1] = 0;
         }
 
         for i in 1..entries.len() {
             let e = &entries[i];
-            
+
             if e.row == last_r && e.col == last_c {
                 // Same position, accumulate
                 accumulate(e, &mut acc_k, &mut acc_m, &mut acc_boundaries);
@@ -170,7 +171,7 @@ impl HelmholtzAssembler {
                     vec.push(acc_boundaries.get(tag).copied().unwrap_or(0.0));
                 }
                 col_indices.push(last_c);
-                
+
                 // Update row pointers
                 if e.row != last_r {
                     row_ptrs[last_r + 1] = k_values.len();
@@ -178,7 +179,7 @@ impl HelmholtzAssembler {
                         row_ptrs[r + 1] = k_values.len();
                     }
                 }
-                
+
                 // Start new accumulation
                 last_r = e.row;
                 last_c = e.col;
@@ -188,7 +189,7 @@ impl HelmholtzAssembler {
                 accumulate(e, &mut acc_k, &mut acc_m, &mut acc_boundaries);
             }
         }
-        
+
         // Push final entry
         k_values.push(acc_k);
         m_values.push(acc_m);
@@ -196,7 +197,7 @@ impl HelmholtzAssembler {
             vec.push(acc_boundaries.get(tag).copied().unwrap_or(0.0));
         }
         col_indices.push(last_c);
-        
+
         // Finish row pointers
         row_ptrs[last_r + 1] = k_values.len();
         for r in (last_r + 1)..num_rows {
@@ -215,34 +216,37 @@ impl HelmholtzAssembler {
 
     /// Assemble Helmholtz matrix A = K - k²M + Σ c_i M_boundary_i
     pub fn assemble(
-        &self, 
-        wavenumber: Complex64, 
-        boundary_coeffs: &HashMap<usize, Complex64>
+        &self,
+        wavenumber: Complex64,
+        boundary_coeffs: &HashMap<usize, Complex64>,
     ) -> CsrMatrix<Complex64> {
         let k_sq = wavenumber * wavenumber;
-        
+
         // We use parallel iterator if we have enough elements
         // Since we have multiple vectors to zip, standard zip might be tedious.
         // We will index into vectors directly in parallel.
-        
+
         let nnz = self.k_values.len();
-        
-        let values: Vec<Complex64> = (0..nnz).into_par_iter().map(|i| {
-            let mut val = Complex64::new(self.k_values[i], 0.0) 
-                        - k_sq * Complex64::new(self.m_values[i], 0.0);
-            
-            // Add boundary terms
-            if !self.boundary_values.is_empty() {
-                for (tag, coeffs) in boundary_coeffs {
-                    if let Some(b_vals) = self.boundary_values.get(tag) {
-                        if b_vals[i] != 0.0 {
-                            val += coeffs * Complex64::new(b_vals[i], 0.0);
+
+        let values: Vec<Complex64> = (0..nnz)
+            .into_par_iter()
+            .map(|i| {
+                let mut val = Complex64::new(self.k_values[i], 0.0)
+                    - k_sq * Complex64::new(self.m_values[i], 0.0);
+
+                // Add boundary terms
+                if !self.boundary_values.is_empty() {
+                    for (tag, coeffs) in boundary_coeffs {
+                        if let Some(b_vals) = self.boundary_values.get(tag) {
+                            if b_vals[i] != 0.0 {
+                                val += coeffs * Complex64::new(b_vals[i], 0.0);
+                            }
                         }
                     }
                 }
-            }
-            val
-        }).collect();
+                val
+            })
+            .collect();
 
         CsrMatrix::from_raw_parts(
             self.num_rows,
@@ -252,17 +256,17 @@ impl HelmholtzAssembler {
             values,
         )
     }
-    
+
     /// Estimate memory usage in bytes
     pub fn memory_usage(&self) -> usize {
         let usize_size = std::mem::size_of::<usize>();
         let f64_size = std::mem::size_of::<f64>();
-        
-        let mut mem = self.row_ptrs.len() * usize_size +
-                      self.col_indices.len() * usize_size +
-                      self.k_values.len() * f64_size +
-                      self.m_values.len() * f64_size;
-                      
+
+        let mut mem = self.row_ptrs.len() * usize_size
+            + self.col_indices.len() * usize_size
+            + self.k_values.len() * f64_size
+            + self.m_values.len() * f64_size;
+
         for v in self.boundary_values.values() {
             mem += v.len() * f64_size;
         }
@@ -279,43 +283,43 @@ mod tests {
     fn test_assembler_simple() {
         let mesh = unit_square_triangles(2);
         let assembler = HelmholtzAssembler::new(&mesh, PolynomialDegree::P1);
-        
+
         let k = Complex64::new(1.0, 0.0);
         let coeffs = HashMap::new();
         let matrix = assembler.assemble(k, &coeffs);
-        
+
         assert_eq!(matrix.num_rows, mesh.num_nodes());
         assert!(matrix.nnz() > 0);
     }
-    
+
     #[test]
     fn test_assembler_with_boundary() {
         use crate::assembly::mass::assemble_boundary_mass;
-        
+
         let mut mesh = unit_square_triangles(2);
         mesh.detect_boundaries(); // sets marker 0 for all boundaries
-        
+
         let stiffness = assemble_stiffness(&mesh, PolynomialDegree::P1);
         let mass = assemble_mass(&mesh, PolynomialDegree::P1);
         let b_mass = assemble_boundary_mass(&mesh, PolynomialDegree::P1, 0);
-        
+
         let boundaries = vec![(0, b_mass)];
         let assembler = HelmholtzAssembler::from_matrices(&stiffness, &mass, &boundaries);
-        
+
         let k = Complex64::new(1.0, 0.0);
         let mut coeffs = HashMap::new();
         coeffs.insert(0, Complex64::new(0.5, 0.0)); // Add 0.5 * BoundaryMass
-        
+
         let matrix = assembler.assemble(k, &coeffs);
-        
+
         // Check if values are different from base K-M
         let assembler_base = HelmholtzAssembler::from_matrices(&stiffness, &mass, &[]);
         let matrix_base = assembler_base.assemble(k, &HashMap::new());
-        
+
         // Sum of values should differ
         let sum: Complex64 = matrix.values.iter().sum();
         let sum_base: Complex64 = matrix_base.values.iter().sum();
-        
+
         assert!((sum - sum_base).norm() > 1e-10);
     }
 }

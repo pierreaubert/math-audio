@@ -1737,17 +1737,33 @@ fn generate_all_benchmarks() -> HashMap<String, Box<dyn Fn() -> BenchmarkResult>
             config.name.clone(),
             Box::new(move || {
                 if let Some(function) = FUNCTION_REGISTRY.get(&config_clone.function_name) {
+                    let config = match DEConfigBuilder::new()
+                        .seed(config_clone.seed)
+                        .maxiter(config_clone.maxiter)
+                        .popsize(config_clone.popsize)
+                        .strategy(config_clone.strategy)
+                        .recombination(config_clone.recombination)
+                        .build()
+                    {
+                        Ok(cfg) => cfg,
+                        Err(e) => {
+                            return BenchmarkResult {
+                                name: config_clone.name.clone(),
+                                success: false,
+                                fun_value: f64::INFINITY,
+                                fun_tolerance: config_clone.fun_tolerance,
+                                position_errors: vec![f64::INFINITY],
+                                position_tolerance: config_clone.position_tolerance,
+                                duration: Duration::from_secs(0),
+                                error_message: Some(format!("Config error: {}", e)),
+                            };
+                        }
+                    };
                     run_benchmark(
                         &config_clone.name,
                         function,
                         config_clone.bounds.clone(),
-                        DEConfigBuilder::new()
-                            .seed(config_clone.seed)
-                            .maxiter(config_clone.maxiter)
-                            .popsize(config_clone.popsize)
-                            .strategy(config_clone.strategy)
-                            .recombination(config_clone.recombination)
-                            .build(),
+                        config,
                         config_clone.fun_tolerance,
                         config_clone.expected_optimum.clone(),
                         config_clone.position_tolerance,
