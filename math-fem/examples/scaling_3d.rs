@@ -1,163 +1,142 @@
-//! 3D Helmholtz solver scaling analysis
-//!
-//! Prints a detailed table showing how the solver scales with mesh size
-//! and thread count.
-//!
-//! Run with different thread counts:
-//!   RAYON_NUM_THREADS=1 cargo run -p math-fem --example scaling_3d --release
-//!   RAYON_NUM_THREADS=2 cargo run -p math-fem --example scaling_3d --release
-//!   RAYON_NUM_THREADS=4 cargo run -p math-fem --example scaling_3d --release
-//!   RAYON_NUM_THREADS=8 cargo run -p math-fem --example scaling_3d --release
-
+use clap::{Parser, ValueEnum};
 use math_audio_fem::assembly::HelmholtzProblem;
 use math_audio_fem::basis::PolynomialDegree;
 use math_audio_fem::boundary::{DirichletBC, apply_dirichlet};
 use math_audio_fem::mesh::unit_cube_tetrahedra;
-use math_audio_solvers::{CsrMatrix, GmresConfig, gmres};
-use ndarray::Array1;
+use math_audio_fem::solver::{SolverConfig, SolverType, solve};
 use num_complex::Complex64;
 use std::f64::consts::PI;
 use std::time::Instant;
 
-/// Convert HelmholtzMatrix to CsrMatrix for solver
-fn to_csr_matrix(problem: &HelmholtzProblem) -> CsrMatrix<Complex64> {
-    let compressed = problem.matrix.to_compressed();
-    let n = compressed.dim;
+#[derive(Parser, Debug)]
+#[command(name = "scaling_3d")]
+#[command(about = "3D Helmholtz Solver Scaling Analysis")]
+struct Args {
+    /// Mesh size (n) to test
+    #[arg(short, long, default_value = "40")]
+    n: usize,
 
-    let triplets: Vec<(usize, usize, Complex64)> = (0..compressed.nnz())
-        .map(|i| (compressed.rows[i], compressed.cols[i], compressed.values[i]))
-        .collect();
+    /// Thread counts to test (comma-separated, e.g., "1,2,4,8,14")
+    #[arg(short, long, default_value = "1,2,4,8,14")]
+    threads: String,
 
-    CsrMatrix::from_triplets(n, n, triplets)
+    /// Solver type to use
+    #[arg(short, long, value_enum, default_value = "pipelined-amg")]
+    solver: CliSolverType,
+
+    /// Wavenumber k
+    #[arg(short, long, default_value = "1.0")]
+    k: f64,
+
+    /// Max iterations for iterative solver
+    #[arg(long, default_value = "2000")]
+    max_iters: usize,
+
+    /// Tolerance for iterative solver
+    #[arg(long, default_value = "1e-8")]
+    tolerance: f64,
 }
 
-fn main() {
-    println!();
-    println!("=== 3D Helmholtz Solver Scaling Analysis ===");
-    println!();
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum CliSolverType {
+    Direct,
+    Gmres,
+    GmresIlu,
+    GmresAmg,
+    Pipelined,
+    PipelinedIlu,
+    PipelinedAmg,
+    Jacobi,
+}
 
-    #[cfg(feature = "parallel")]
-    {
-        let num_threads = rayon::current_num_threads();
-        println!("Parallelism: ENABLED ({} threads)", num_threads);
+impl From<CliSolverType> for SolverType {
+    fn from(cli: CliSolverType) -> Self {
+        match cli {
+            CliSolverType::Direct => SolverType::Direct,
+            CliSolverType::Gmres => SolverType::Gmres,
+            CliSolverType::GmresIlu => SolverType::GmresIlu,
+            CliSolverType::GmresAmg => SolverType::GmresAmg,
+            CliSolverType::Pipelined => SolverType::GmresPipelined,
+            CliSolverType::PipelinedIlu => SolverType::GmresPipelinedIlu,
+            CliSolverType::PipelinedAmg => SolverType::GmresPipelinedAmg,
+            CliSolverType::Jacobi => SolverType::GmresJacobi,
+        }
     }
+}
 
-    #[cfg(not(feature = "parallel"))]
-    {
-        println!("Parallelism: DISABLED (single-threaded)");
-    }
-
-    println!();
-    println!("Problem: -∆u - k²u = f in [0,1]³ with Dirichlet BCs");
-    println!("MMS solution: u = sin(πx) sin(πy) sin(πz)");
-    println!("Wavenumber: k = 1.0");
-    println!();
-
-    let k = Complex64::new(1.0, 0.0);
-
-    // MMS: u = sin(πx) * sin(πy) * sin(πz)
-    // Laplacian: ∆u = -3π²u
-    // f = -∆u - k²u = (3π² - k²)u
-    let coef = 3.0 * PI * PI - 1.0;
+fn run_benchmark(n: usize, threads: usize, args: &Args) {
+    let k_val = Complex64::new(args.k, 0.0);
+    let coef = 3.0 * PI * PI - args.k * args.k;
     let source = move |x: f64, y: f64, z: f64| {
         Complex64::new(coef * (PI * x).sin() * (PI * y).sin() * (PI * z).sin(), 0.0)
     };
-
     let exact_u = |x: f64, y: f64, z: f64| {
         Complex64::new((PI * x).sin() * (PI * y).sin() * (PI * z).sin(), 0.0)
     };
 
-    let config = GmresConfig {
-        max_iterations: 1000,
-        restart: 50,
-        tolerance: 1e-8,
-        print_interval: 0,
-    };
+    let mut solver_config = SolverConfig::default();
+    solver_config.solver_type = args.solver.into();
+    solver_config.gmres.max_iterations = args.max_iters;
+    solver_config.gmres.tolerance = args.tolerance;
 
-    // Header
-    println!(
-        "{:>4} {:>8} {:>10} {:>10} {:>10} {:>10} {:>10} {:>10} {:>12}",
-        "n",
-        "DOFs",
-        "Elements",
-        "Mesh(ms)",
-        "Asm(ms)",
-        "BC(ms)",
-        "Solve(ms)",
-        "Total(ms)",
-        "Status"
-    );
-    println!("{}", "-".repeat(100));
+    // Force thread count
+    let pool = rayon::ThreadPoolBuilder::new().num_threads(threads).build().unwrap();
 
-    // Run tests with increasing mesh sizes
-    for n in [14, 20, 30, 40] {
-        // 1. Mesh generation
-        let start_mesh = Instant::now();
+    pool.install(|| {
+        let start_total = Instant::now();
+        
         let mesh = unit_cube_tetrahedra(n);
-        let mesh_time = start_mesh.elapsed();
+        let mesh_time = start_total.elapsed();
 
-        let num_dofs = mesh.num_nodes();
-        let num_elements = mesh.num_elements();
-
-        // 2. Assembly
         let start_asm = Instant::now();
-        let mut problem = HelmholtzProblem::assemble(&mesh, PolynomialDegree::P1, k, source);
+        let mut problem = HelmholtzProblem::assemble(&mesh, PolynomialDegree::P1, k_val, source);
         let asm_time = start_asm.elapsed();
 
-        // 3. Boundary conditions
         let start_bc = Instant::now();
         let bcs: Vec<DirichletBC> = (1..=6).map(|tag| DirichletBC::new(tag, exact_u)).collect();
         apply_dirichlet(&mut problem, &mesh, &bcs);
         let bc_time = start_bc.elapsed();
 
-        // 4. Convert to CSR and solve
-        let matrix = to_csr_matrix(&problem);
-        let rhs = Array1::from_vec(problem.rhs.clone());
-
         let start_solve = Instant::now();
-        let solution = gmres(&matrix, &rhs, &config);
+        let solution = solve(&problem, &solver_config).expect("Solver failed");
         let solve_time = start_solve.elapsed();
 
-        let total_time = mesh_time + asm_time + bc_time + solve_time;
-
-        // Status
-        let status = if solution.converged {
-            format!("{} iters", solution.iterations)
-        } else {
-            "FAILED".to_string()
-        };
+        let total_time = start_total.elapsed();
 
         println!(
-            "{:>4} {:>8} {:>10} {:>10.2} {:>10.2} {:>10.2} {:>10.2} {:>10.2} {:>12}",
-            n,
-            num_dofs,
-            num_elements,
+            "{:>8} {:>10} {:>10.2} {:>10.2} {:>10.2} {:>10.2} {:>10.2}  {} iters",
+            threads,
+            problem.num_dofs(),
             mesh_time.as_secs_f64() * 1000.0,
             asm_time.as_secs_f64() * 1000.0,
             bc_time.as_secs_f64() * 1000.0,
             solve_time.as_secs_f64() * 1000.0,
             total_time.as_secs_f64() * 1000.0,
-            status
+            solution.iterations
         );
+    });
+}
+
+fn main() {
+    let args = Args::parse();
+
+    println!("\n=== 3D Helmholtz Solver Thread Scaling (n={}) ===\n", args.n);
+    println!("Solver: {:?}", args.solver);
+    println!("k: {}", args.k);
+    println!();
+    
+    println!(
+        "{:>8} {:>10} {:>10} {:>10} {:>10} {:>10} {:>10}  {}",
+        "Threads", "DOFs", "Mesh(ms)", "Asm(ms)", "BC(ms)", "Solve(ms)", "Total(ms)", "Status"
+    );
+    println!("{}", "-".repeat(90));
+
+    let thread_counts: Vec<usize> = args.threads
+        .split(',')
+        .filter_map(|s: &str| s.trim().parse().ok())
+        .collect();
+
+    for threads in thread_counts {
+        run_benchmark(args.n, threads, &args);
     }
-
-    println!();
-    println!("Notes:");
-    println!("  - DOFs = (n+1)³ nodes");
-    println!("  - Elements = 6n³ tetrahedra");
-    println!("  - Mesh: structured tetrahedral mesh generation");
-    println!("  - Asm: Helmholtz matrix assembly (stiffness + mass)");
-    println!("  - BC: Dirichlet boundary condition application");
-    println!("  - Solve: GMRES iterative solver");
-    println!();
-
-    // Thread scaling summary
-    println!("=== Thread Scaling Summary ===");
-    println!();
-    println!("Run with different thread counts to measure parallel speedup:");
-    println!("  RAYON_NUM_THREADS=1 cargo run -p math-fem --example scaling_3d --release");
-    println!("  RAYON_NUM_THREADS=2 cargo run -p math-fem --example scaling_3d --release");
-    println!("  RAYON_NUM_THREADS=4 cargo run -p math-fem --example scaling_3d --release");
-    println!("  RAYON_NUM_THREADS=8 cargo run -p math-fem --example scaling_3d --release");
-    println!();
 }
