@@ -92,10 +92,17 @@ fn run_benchmark(n: usize, threads: usize, args: &Args) {
 
     // Force thread count
     let pool = rayon::ThreadPoolBuilder::new().num_threads(threads).build().unwrap();
+<<<<<<< HEAD
 
     pool.install(|| {
         let start_total = Instant::now();
 
+=======
+
+    pool.install(|| {
+        let start_total = Instant::now();
+        
+>>>>>>> f22c5cd (added parameters to see what it does best on various machines)
         let mesh = unit_cube_tetrahedra(n);
         let mesh_time = start_total.elapsed();
 
@@ -126,6 +133,7 @@ fn run_benchmark(n: usize, threads: usize, args: &Args) {
             solution.iterations
         );
     });
+<<<<<<< HEAD
 }
 
 fn main() {
@@ -136,6 +144,32 @@ fn main() {
     println!("k: {}", args.k);
     println!();
 
+    println!(
+        "{:>8} {:>10} {:>10} {:>10} {:>10} {:>10} {:>10}  {}",
+        "Threads", "DOFs", "Mesh(ms)", "Asm(ms)", "BC(ms)", "Solve(ms)", "Total(ms)", "Status"
+    );
+    println!("{}", "-".repeat(90));
+
+    let thread_counts: Vec<usize> = args.threads
+        .split(',')
+        .filter_map(|s: &str| s.trim().parse().ok())
+        .collect();
+
+    for threads in thread_counts {
+        run_benchmark(args.n, threads, &args);
+    }
+=======
+>>>>>>> f22c5cd (added parameters to see what it does best on various machines)
+}
+
+fn main() {
+    let args = Args::parse();
+
+    println!("\n=== 3D Helmholtz Solver Thread Scaling (n={}) ===\n", args.n);
+    println!("Solver: {:?}", args.solver);
+    println!("k: {}", args.k);
+    println!();
+    
     println!(
         "{:>8} {:>10} {:>10} {:>10} {:>10} {:>10} {:>10}  {}",
         "Threads", "DOFs", "Mesh(ms)", "Asm(ms)", "BC(ms)", "Solve(ms)", "Total(ms)", "Status"
