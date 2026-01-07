@@ -151,27 +151,3 @@ fn main() {
         run_benchmark(args.n, threads, &args);
     }
 }
-
-fn main() {
-    let args = Args::parse();
-
-    println!("\n=== 3D Helmholtz Solver Thread Scaling (n={}) ===\n", args.n);
-    println!("Solver: {:?}", args.solver);
-    println!("k: {}", args.k);
-    println!();
-
-    println!(
-        "{:>8} {:>10} {:>10} {:>10} {:>10} {:>10} {:>10}  {}",
-        "Threads", "DOFs", "Mesh(ms)", "Asm(ms)", "BC(ms)", "Solve(ms)", "Total(ms)", "Status"
-    );
-    println!("{}", "-".repeat(90));
-
-    let thread_counts: Vec<usize> = args.threads
-        .split(',')
-        .filter_map(|s: &str| s.trim().parse().ok())
-        .collect();
-
-    for threads in thread_counts {
-        run_benchmark(args.n, threads, &args);
-    }
-}
