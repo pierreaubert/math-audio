@@ -678,8 +678,10 @@ fn solve_gmres_amg(
     }
 
     let amg_start = Instant::now();
-    // Use PMIS coarsening and Jacobi smoothing for best parallel performance
-    let amg_config = AmgConfig::for_parallel();
+    // Use PMIS coarsening and L1-Jacobi smoothing for better Helmholtz robustness
+    let mut amg_config = AmgConfig::for_parallel();
+    amg_config.smoother = math_audio_solvers::AmgSmoother::L1Jacobi;
+    
     let precond = AmgPreconditioner::from_csr(csr, amg_config);
     let amg_time = amg_start.elapsed();
 
@@ -1238,7 +1240,11 @@ fn solve_gmres_shifted_laplacian(
         sl_config.alpha,
         sl_config.beta,
     );
-    let amg_config = AmgConfig::for_parallel();
+    // Use more robust AMG settings for Shifted Laplacian
+    let mut amg_config = AmgConfig::for_parallel();
+    amg_config.smoother = math_audio_solvers::AmgSmoother::L1Jacobi; // More robust than standard Jacobi
+    amg_config.strong_threshold = 0.5; // Denser matrix requires higher threshold
+    
     let precond = AmgPreconditioner::from_csr(&p_matrix, amg_config);
     let sl_time = sl_start.elapsed();
 
