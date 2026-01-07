@@ -90,7 +90,7 @@ fn main() {
     println!("{}", "-".repeat(100));
 
     // Run tests with increasing mesh sizes
-    for n in [4, 6, 8, 10, 12, 14] {
+    for n in [14, 20, 30, 40] {
         // 1. Mesh generation
         let start_mesh = Instant::now();
         let mesh = unit_cube_tetrahedra(n);
