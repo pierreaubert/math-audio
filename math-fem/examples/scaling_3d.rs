@@ -3,7 +3,7 @@ use math_audio_fem::assembly::HelmholtzProblem;
 use math_audio_fem::basis::PolynomialDegree;
 use math_audio_fem::boundary::{DirichletBC, apply_dirichlet};
 use math_audio_fem::mesh::unit_cube_tetrahedra;
-use math_audio_fem::solver::{SolverConfig, SolverType, solve};
+use math_audio_fem::solver::{ShiftedLaplacianConfig, SolverConfig, SolverType, solve};
 use num_complex::Complex64;
 use std::f64::consts::PI;
 use std::time::Instant;
@@ -47,6 +47,8 @@ enum CliSolverType {
     PipelinedIlu,
     PipelinedAmg,
     Jacobi,
+    Schwarz,
+    ShiftedLaplacian,
 }
 
 impl From<CliSolverType> for SolverType {
@@ -60,6 +62,8 @@ impl From<CliSolverType> for SolverType {
             CliSolverType::PipelinedIlu => SolverType::GmresPipelinedIlu,
             CliSolverType::PipelinedAmg => SolverType::GmresPipelinedAmg,
             CliSolverType::Jacobi => SolverType::GmresJacobi,
+            CliSolverType::Schwarz => SolverType::GmresSchwarz,
+            CliSolverType::ShiftedLaplacian => SolverType::GmresShiftedLaplacian,
         }
     }
 }
@@ -78,6 +82,12 @@ fn run_benchmark(n: usize, threads: usize, args: &Args) {
     solver_config.solver_type = args.solver.into();
     solver_config.gmres.max_iterations = args.max_iters;
     solver_config.gmres.tolerance = args.tolerance;
+    solver_config.wavenumber = Some(args.k);
+
+    // Configure shifted-Laplacian if that solver is selected
+    if matches!(args.solver, CliSolverType::ShiftedLaplacian) {
+        solver_config.shifted_laplacian = Some(ShiftedLaplacianConfig::for_wavenumber(args.k));
+    }
 
     // Force thread count
     let pool = rayon::ThreadPoolBuilder::new().num_threads(threads).build().unwrap();

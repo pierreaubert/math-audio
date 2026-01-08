@@ -845,7 +845,9 @@ fn solve_gmres_pipelined_amg(
     }
 
     let amg_start = Instant::now();
-    let amg_config = AmgConfig::for_parallel();
+    // Use PMIS coarsening and L1-Jacobi smoothing for better Helmholtz robustness
+    let mut amg_config = AmgConfig::for_parallel();
+    amg_config.smoother = math_audio_solvers::AmgSmoother::L1Jacobi;
     let precond = AmgPreconditioner::from_csr(csr, amg_config);
     let amg_time = amg_start.elapsed();
 
