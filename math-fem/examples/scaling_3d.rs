@@ -101,8 +101,12 @@ fn run_benchmark(n: usize, threads: usize, args: &Args) {
 
     pool.install(|| {
         let start_total = Instant::now();
+<<<<<<< HEAD
         
 >>>>>>> f22c5cd (added parameters to see what it does best on various machines)
+=======
+
+>>>>>>> f03b4e3 (added parameters to see what it does best on various machines)
         let mesh = unit_cube_tetrahedra(n);
         let mesh_time = start_total.elapsed();
 
@@ -169,7 +173,7 @@ fn main() {
     println!("Solver: {:?}", args.solver);
     println!("k: {}", args.k);
     println!();
-    
+
     println!(
         "{:>8} {:>10} {:>10} {:>10} {:>10} {:>10} {:>10}  {}",
         "Threads", "DOFs", "Mesh(ms)", "Asm(ms)", "BC(ms)", "Solve(ms)", "Total(ms)", "Status"
