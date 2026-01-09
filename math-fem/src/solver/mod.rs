@@ -1506,7 +1506,6 @@ pub fn solve_csr_with_guess(
 mod tests {
     use super::*;
     use crate::assembly::HelmholtzProblem;
-    use crate::assembly::{MassMatrix, StiffnessMatrix};
     use crate::basis::PolynomialDegree;
     use crate::mesh::unit_square_triangles;
 

@@ -524,7 +524,6 @@ fn find_initial_simplex(vertices: &[Vertex], epsilon: f64) -> Result<[usize; 4]>
     let mut neg_dist = 0.0;
     let mut pos_idx = 0;
     let mut neg_idx = 0;
-    let mut max_distance = 0.0;
     let mut _v3 = 0;
 
     for (i, vertex) in vertices.iter().enumerate() {
