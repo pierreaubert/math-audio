@@ -7,7 +7,7 @@
 
 use ndarray::Array1;
 use num_complex::{Complex32, Complex64};
-use num_traits::{Float, NumAssign, One, Zero};
+use num_traits::{Float, NumAssign, One, Zero, FromPrimitive, ToPrimitive};
 use std::fmt::Debug;
 use std::ops::Neg;
 
