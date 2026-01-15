@@ -17,12 +17,10 @@ thiserror = { workspace = true }
 directories = { workspace = true }
 plotly = { workspace = true }
 math-test-functions = { workspace = true }
-nlopt = { workspace = true, optional = true }
 plotly_static = { workspace = true, optional = true }
 
 [features]
-default = ["nlopt"]
-nlopt = ["dep:nlopt"]
+default = []
 plotly_static = ["dep:plotly_static"]
 
 [dev-dependencies]

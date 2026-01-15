@@ -64,12 +64,6 @@ chrono = { workspace = true }
 # CLI (optional, native only)
 clap = { workspace = true, optional = true }
 
-# feature dependant
-criterion = { workspace = true, optional = true }
-num_cpus = { workspace = true, optional = true }
-memory-stats = { workspace = true, optional = true }
-sysinfo = { workspace = true, optional = true }
-
 [target.'cfg(target_os = "macos")'.dependencies]
 ndarray-linalg = { workspace = true, optional = true, features = ["openblas-system"] }
 
@@ -77,7 +71,6 @@ ndarray-linalg = { workspace = true, optional = true, features = ["openblas-syst
 ndarray-linalg = { workspace = true, optional = true, features = ["openblas-system"] }
 
 [dev-dependencies]
-criterion = { workspace = true, features = ["html_reports"] }
 directories = { workspace = true }
 
 [features]
@@ -90,9 +83,6 @@ native = [
     "ndarray/rayon",
     "ndarray-linalg",
     "dep:env_logger",
-    "dep:memory-stats",
-    "dep:sysinfo",
-    "dep:num_cpus",
 ]
 
 # CLI requires native features
@@ -101,9 +91,6 @@ cli = ["native", "dep:clap"]
 # Parallel assembly - works with both native and wasm via rayon
 # Note: Previously required "native", but rayon works in WASM via wasm-bindgen-rayon
 parallel = []
-
-# Benchmarking
-benchmarks = ["dep:criterion"]
 
 # Memory optimization features
 memory-optimized = []

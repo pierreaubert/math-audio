@@ -14,7 +14,7 @@
 //!   RAYON_NUM_THREADS=1 cargo bench -p math-fem --bench helmholtz_3d_scaling -- --verbose
 //!   RAYON_NUM_THREADS=4 cargo bench -p math-fem --bench helmholtz_3d_scaling -- --verbose
 
-use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use math_audio_fem::assembly::HelmholtzProblem;
 use math_audio_fem::basis::PolynomialDegree;
 use math_audio_fem::boundary::{DirichletBC, apply_dirichlet};
@@ -23,6 +23,7 @@ use math_audio_solvers::{CsrMatrix, GmresConfig, gmres};
 use ndarray::Array1;
 use num_complex::Complex64;
 use std::f64::consts::PI;
+use std::hint::black_box;
 use std::time::Duration;
 
 /// Convert HelmholtzMatrix to CsrMatrix for solver

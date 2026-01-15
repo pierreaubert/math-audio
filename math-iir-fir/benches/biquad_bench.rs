@@ -1,5 +1,6 @@
-use criterion::{Criterion, black_box, criterion_group, criterion_main};
+use criterion::{Criterion, criterion_group, criterion_main};
 use math_audio_iir_fir::{Biquad, BiquadFilterType, Fir, WindowType};
+use std::hint::black_box;
 
 fn bench_biquad_process(c: &mut Criterion) {
     let mut biquad = Biquad::new(BiquadFilterType::Lowpass, 1000.0, 48000.0, 0.707, 0.0);
