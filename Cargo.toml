@@ -1,14 +1,14 @@
 [workspace]
 members = [
-    "math-bem",
-    "math-fem",
-    "math-iir-fir",
-    "math-solvers",
-    "math-test-functions",
-    "math-convex-hull",
-    "math-differential-evolution",
-    "math-wave",
-    "math-xem-common",
+    "crates/math-bem",
+    "crates/math-fem",
+    "crates/math-iir-fir",
+    "crates/math-solvers",
+    "crates/math-test-functions",
+    "crates/math-convex-hull",
+    "crates/math-differential-evolution",
+    "crates/math-wave",
+    "crates/math-xem-common",
 ]
 resolver = "3"
 
@@ -54,10 +54,10 @@ num-traits = "0.2"
 rayon = "1.11"
 nlopt = "0.8.1"
 spec_math = "0.1.6"
-math-test-functions = { path = "math-test-functions", version = "0.3", default-features = false }
-math-solvers = { path = "math-solvers", version = "0.3", default-features = false }
-math-wave = { path = "math-wave", version = "0.3" }
-math-xem-common = { path = "math-xem-common", version = "0.3" }
+math-test-functions = { path = "crates/math-test-functions", version = "0.3", default-features = false }
+math-solvers = { path = "crates/math-solvers", version = "0.3", default-features = false }
+math-wave = { path = "crates/math-wave", version = "0.3" }
+math-xem-common = { path = "crates/math-xem-common", version = "0.3" }
 
 # Plotting and visualization
 plotly = { version = "0.13.5" }
