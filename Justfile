@@ -12,7 +12,7 @@ default:
 
 test:
 	cargo check --workspace --all-targets
-	cargo test --workspace --lib
+	cargo test --workspace --lib --release
 
 ntest:
 	cargo nextest run --release --no-fail-fast --workspace --lib
@@ -33,9 +33,11 @@ fmt:
 alias build := prod
 
 prod: prod-workspace
-	cargo build --release --bin plot_functions
-	cargo build --release --bin plot-autoeq-de
-	cargo build --release --bin run-autoeq-de
+	cargo build --release --bin plot-functions -p math-test-functions --features plotly
+	cargo build --release --bin plot-de -p math-optimisation --features plotly
+	cargo build --release --bin run-de -p math-optimisation
+	cargo build --release --bin wav2csv -p math-dsp
+	cargo build --release --bin simd-fuzzer -p math-dsp
 
 prod-workspace:
 	cargo build --release --workspace
@@ -44,8 +46,11 @@ prod-workspace:
 # BENCH
 # ----------------------------------------------------------------------
 
-bench:
-	cargo run --release --bin benchmark-convergence
+bench: bench-math
+
+bench-math:
+	cargo run --release --bin benchmark-convergence -p math-optimisation
+	cargo run --release --bin biquad-bench -p math-iir-fir
 
 # ----------------------------------------------------------------------
 # CLEAN
@@ -80,21 +85,27 @@ update-pre-commit:
 # EXAMPLES
 # ----------------------------------------------------------------------
 
-examples : examples-iir examples-de examples-testfunctions
+examples: examples-math
 
-examples-iir :
-	cargo run --release --example format_demo
-	cargo run --release --example readme_example
+examples-math: examples-iir examples-optimisation examples-testfunctions
 
-examples-de :
-	cargo run --release --example optde_basic
-	cargo run --release --example optde_adaptive_demo
-	cargo run --release --example optde_linear_constraints
-	cargo run --release --example optde_nonlinear_constraints
-	cargo run --release --example optde_parallel
+examples-iir:
+	cargo run --release --example format_demo -p math-iir-fir
+	cargo run --release --example format_rme_room_demo -p math-iir-fir
+	cargo run --release --example readme_example -p math-iir-fir
+	cargo run --release --example fir_example -p math-iir-fir
+	cargo run --release --example peq_loudness_compensation -p math-iir-fir
+
+examples-optimisation:
+	cargo run --release --example optde_basic -p math-optimisation
+	cargo run --release --example optde_adaptive_demo -p math-optimisation
+	cargo run --release --example optde_linear_constraints -p math-optimisation
+	cargo run --release --example optde_nonlinear_constraints -p math-optimisation
+	cargo run --release --example optde_parallel -p math-optimisation
 
 examples-testfunctions:
-	cargo run --release --example test_hartman_4d
+	cargo run --release --example test_hartman-4d -p math-test-functions
+	cargo run --release --example test_new-sfu-functions -p math-test-functions
 
 # ----------------------------------------------------------------------
 # Install rustup
@@ -181,28 +192,25 @@ install-ubuntu-arm64: install-ubuntu-common install-ubuntu-arm64-driver
 # publish
 # ----------------------------------------------------------------------
 
-publish:
-	cd math-test-functions && cargo publish
-	cd math-differential-evolution && cargo publish
-	cd math-iir-fir && cargo publish
-	cd math-solvers && cargo publish
-	cd math-wave && cargo publish
-	cd math-convex-hull && cargo publish
-	cd math-xem-common && cargo publish
-	cd math-bem && cargo publish
-	cd math-fem && cargo publish
+publish: publish-math
+
+publish-math:
+	cd crates/math-test-functions && cargo publish
+	cd crates/math-optimisation && cargo publish
+	cd crates/math-iir-fir && cargo publish
+	cd crates/math-dsp && cargo publish
+	cd crates/math-rir && cargo publish
+	cd crates/math-delaunay && cargo publish
+	cd crates/math-convex-hull && cargo publish
 
 # ----------------------------------------------------------------------
-# publish
+# QA
 # ----------------------------------------------------------------------
 
-qa: qa-fem qa-bem
+qa: qa-math
 
-qa-fem:
-	cargo run --release --bin qa-suite -p math-fem --features="cli native parallel"
-
-qa-bem:
-	cargo run --release --bin qa-suite -p math-bem --features="native cli parallel"
+qa-math:
+	cargo run --release --bin simd-fuzzer -p math-dsp
 
 # ----------------------------------------------------------------------
 # POST
@@ -212,4 +220,3 @@ post-install:
 	$HOME/.cargo/bin/rustup default stable
 	$HOME/.cargo/bin/cargo install just
 	$HOME/.cargo/bin/cargo check
-
