@@ -1,6 +1,6 @@
-# CLAUDE.md
+# AGENTS.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+This file provides guidance to coding agents working with code in this repository.
 
 ## Project Overview
 
@@ -58,44 +58,101 @@ math-optimisation → math-test-functions
 
 ### DSP Architecture (math-dsp/src/)
 
-- `analysis/`: Signal analysis (group delay, THD, coherence, etc.)
+- `analysis/`: Signal analysis (frequency response, RT60, C50/C80, THD, group delay, microphone compensation, CSV I/O)
 - `audio_features/`: Chroma, loudness, spectral features, tempo, ZCR
-- `binaural_loudness/`: BS.1770 loudness metering
-- `dynamics/`: Compressor/limiter/gate core
-- `ebur128/`: EBU R128 loudness measurement
-- `esprit/`: Frequency estimation
+- `binaural_loudness/`: BS.1770 binaural loudness metering with surround downmix presets
+- `binaural_matrix/`: Transfer-matrix inversion, deconvolution, regularized inverse solutions
+- `dynamics_core/`: Compressor/limiter/gate core (ADAA, envelope, detector, lookahead, auto-makeup, channel linking)
+- `ebur128/`: EBU R128 / ITU-R BS.1770-4 loudness measurement
+- `esprit/`: Sinusoidal frequency estimation
+- `fast_math/`: Fast math approximations
 - `fdn/`: Feedback delay networks
+- `fdw/`: Frequency-dependent windowing for impulse responses
+- `instantaneous_frequency/`: Instantaneous frequency extraction
+- `psychoacoustics/`: Psychoacoustic utilities
+- `replaygain/`: ReplayGain analysis
+- `response/`: IIR/FIR complex frequency-response helpers
+- `rtpghi/`: Real-Time Phase Gradient Heap Integration
+- `signals/`: Signal generators (tones, sweeps, noise)
 - `simd/`: SIMD utilities
-- `signals/`: Signal generators
 - `stft/`: Short-time Fourier transform
+- `tonal_transient/`: Tonal/transient separation
+- `waveform/`: Waveform visualization data
 
 ### IIR/FIR Architecture (math-iir-fir/src/)
 
 - `iir/`: Biquad, PEQ, biquad banks, Kautz, warped biquad
 - `fir/`: FIR filters and banks
+- `fir_design/`: FIR design from frequency response, Kirkeby correction, pre-ringing suppression
 - `filtfilt/`: Zero-phase forward/reverse filtering
 - `fir_crossover/`, `lr4_crossover/`, `lr8_crossover/`: Crossovers
-- `svf/`: State-variable filter
+- `phase_smooth/`: Phase unwrapping and smoothing via group delay
+- `svf/`: State-variable filter (Zavalishin TPT zero-delay feedback)
 
 ### Optimisation Architecture (math-optimisation/src/)
 
-- `differential_evolution_mod/`: Differential Evolution variants
-- `levenberg_marquardt/`: LM solver
-- `cobyla_native/`: COBYLA constraint optimiser
+Solvers:
+
+- `differential_evolution_mod/`: Differential Evolution variants and core DE loop
+- `differential_evolution.rs`: Public DE facade
+- `levenberg_marquardt/`: LM nonlinear least-squares solver
+- `cobyla_native/`: Pure-Rust COBYLA constraint optimiser
+- `cobyla.rs`: Public COBYLA facade
 - `isres/`: ISRES evolutionary strategy
 - `cmaes/`: CMA-ES
-- `nsga/`: NSGA-II multi-objective optimisation
-- `bayesian/`: Bayesian optimisation
+- `nsga/`: NSGA-II/III multi-objective optimisation
+- `bayesian/`: Gaussian-process Bayesian optimisation
+
+DE machinery:
+
+- `mutation/`, `mutant_*`: Mutation strategies (rand, best, current-to-best, current-to-pbest, etc.)
+- `crossover_binomial/`, `crossover_exponential/`: Crossover operators
+- `init_latin_hypercube/`, `init_random/`, `init_sobol/`: Initialization strategies
+- `lshade/`: L-SHADE adaptive population reduction
+- `external_archive/`: L-SHADE archive
+- `adaptive_config/`, `adaptive_state/`: SHADE-style adaptive F/CR control
+- `parallel_eval/`: Parallel population evaluation
+- `linear_constraint_helper/`, `nonlinear_constraint_helper/`: Constraint helpers
+- `recorder/`, `run_recorded/`: Optimization recording and replay
+- `continuous_area/`: Continuous-prior / area-based loss integration
+
+### RIR Architecture (math-rir/src/)
+
+- `lib/analyze.rs`, `lib/misc.rs`: RIR analysis entry points
+- `config.rs`: SSIR configuration
+- `detection.rs`: Direct sound and reflection detection
+- `segmentation.rs`: SSIR event building
+- `mixing_time.rs`: Echo density and mixing time estimation
+- `metrics.rs`: ISO 3382 metrics (EDT, T20, T30, C50, C80, D50, Ts)
+- `bands.rs`: Octave and third-octave band filtering
+- `types.rs`: `RirSegment`, `SsirResult`
+
+### Computational Geometry Architecture
+
+- `math-delaunay/src/`: `delaunay.rs` (triangulation), `voronoi.rs` (Voronoi cells)
+- `math-convex-hull/src/`: `quickhull.rs` (3D hull), `geometry.rs`, `types.rs`, `export.rs`, `testdata.rs`
+
+## Binaries and Examples
+
+| Target | Command |
+|---|---|
+| `plot-functions` | `cargo build --release --bin plot-functions -p math-test-functions --features plotly` |
+| `plot-de` | `cargo build --release --bin plot-de -p math-optimisation --features plotly` |
+| `run-de` | `cargo build --release --bin run-de -p math-optimisation` |
+| `wav2csv` | `cargo build --release --bin wav2csv -p math-dsp` |
+| `simd-fuzzer` | `cargo build --release --bin simd-fuzzer -p math-dsp` |
+
+Run example suites with `just examples` (IIR/FIR, optimisation, test functions).
 
 ## Feature Flags
 
 Important features to know when building:
 
-- `parallel`: Explicit rayon parallelization
-- `cli`: CLI dependencies (clap, etc.)
-- `plotly`: Plotting support for binaries
+- `plotly`: Plotting support for the `plot-functions` and `plot-de` binaries
 - `plotly_static`: Static PNG export (requires chromedriver)
-- `wasm`: WebAssembly support (requires nightly for parallel)
+
+Note: `rayon` parallelism and `clap` CLI parsing are used directly where needed;
+there are no workspace `parallel`, `cli`, or `wasm` feature flags at this time.
 
 ## Rust Edition and Toolchain
 

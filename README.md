@@ -1,89 +1,60 @@
-
 <!-- markdownlint-disable-file MD013 -->
 
-# DEVELOPEMENT IS HAPPENING [HERE](https://github.com/pierreaubert/sotf) PLEASE JUMP THERE
+# Math-Audio: a toolkit for audio applications
 
-# Math-Audio: a toolkit for audio application
+Math-Audio is a Rust workspace of numerical computing libraries for audio
+processing and acoustic analysis: DSP utilities, IIR/FIR filters, optimisation
+algorithms, test functions, computational geometry, and room-acoustics analysis.
 
 ## Install
 
-### Cargo
-
-Install [rustup](https://rustup.rs/) first.
-
-If you already have cargo / rustup, you can jump to:
+Install [rustup](https://rustup.rs/) first, then:
 
 ```shell
 cargo install just
 just
 ```
 
-Select the correct install just command for your platform:
+## Build and test
+
 ```shell
-just install-...
+just build   # release build
+just dev     # debug build
+just test    # cargo check + cargo test --lib --release
+just ntest   # nextest, parallel and no-fail-fast
+just fmt     # format all code
 ```
 
-You can build or test with a simple:
+Run the QA suite:
+
 ```shell
-just build
-just test
 just qa
 ```
 
-and you are set up.
-
 ## Toolkit
 
-### math-testfunctions
+| Crate | Purpose | Status |
+|---|---|---|
+| [`math-test-functions`](crates/math-test-functions/README.md) | 56+ benchmark functions for optimisation algorithms | stable |
+| [`math-optimisation`](crates/math-optimisation/README.md) | Non-linear optimisation: DE, L-SHADE, CMA-ES, NSGA-II/III, COBYLA, ISRES, Levenberg-Marquardt, Bayesian | stable |
+| [`math-iir-fir`](crates/math-iir-fir/README.md) | IIR/FIR/SVF filters, biquads, PEQ, crossovers, filtfilt, EqualizerAPO/RME/etc. export | stable |
+| [`math-dsp`](crates/math-dsp/README.md) | DSP utilities: signal generation, FFT analysis, loudness (EBU R128, binaural), dynamics, STFT, RTPGHI, ESPRIT | stable |
+| [`math-rir`](crates/math-rir/README.md) | Room Impulse Response analysis: SSIR segmentation, ISO 3382 metrics | stable |
+| [`math-delaunay`](crates/math-delaunay/README.md) | 2D Delaunay triangulation and Voronoi diagrams | stable |
+| [`math-convex-hull`](crates/math-convex-hull/README.md) | 3D convex hull (Quickhull) | stable |
 
-A [set of functions](math-test-functions/README.md) for testing non linear optimisation algorithms used in the next crate.
+### Key dependency flow
 
-### math-differential-evolution
+```text
+math-dsp → math-iir-fir
+math-rir → math-iir-fir
+math-optimisation → math-test-functions
+```
 
-A implementation of [differential evolution algorithm](math-differential-evolution/README.md) (forked from Scipy) with an interface to NLopt and MetaHeuristics two libraries that also provide various optimisation algorithms. DE support linear and non-linear constraints and implement other features like JADE or adaptative behaviour.
+## Repository
 
-Status: good for speaker equalisation. Not tested enough for other use cases.
+<https://github.com/pierreaubert/math-audio>
 
-### math-iir-fir
+## License
 
-An IIR and FIR filter implementation in rust. Does what you expect. Compatible with Equalizer APO. It can generate various output formats.
-
-Status: stable and working well.
-
-### math-solvers
-
-A set of classical solvers with preconditionners that use LAPACK, BLAS and rayon for parallelisation. Support sparse matrices.
-Also can work in WASM which is convenient for web demos.
-
-Status: correct and relatively fast but not optimised to death. WASM needs rust nightly to run in parallel.
-
-### math-wave
-
-A set of functions to compute known analytical solutions of the wave equation.
-
-Status: correct.
-
-### math-xem-common
-
-Implement BEM and FEM for the Helmotz and wave equations. Support multigrid for both systems. XEM holds the common code.
-
-Status: unknown, results match analytical results on simple mesh. Needs more testing especially for the advance features.
-
-### math-convexhull3d
-
-This crate computes a convex hull in 3d.
-
-Status: good quality aka no known bug.
-
-### math-bem
-
-This crate implements a BEM (Boundary Element Method) solver, see [BEM README](math-bem/README.md)
-
-Status: ok-ish
-
-### math-fem
-
-This crate implements a FEM (Finite Element Method) solver, see [FEM README](math-fem/README.md)
-
-Status: ok-ish
-
+ISC
