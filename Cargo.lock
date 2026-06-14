@@ -1675,6 +1675,7 @@ version = "0.3.2"
 dependencies = [
  "directories",
  "log",
+ "proptest",
  "rand",
  "rayon",
  "serde",
@@ -1686,6 +1687,7 @@ name = "math-delaunay"
 version = "0.5.3"
 dependencies = [
  "delaunator",
+ "proptest",
 ]
 
 [[package]]
@@ -1739,6 +1741,7 @@ dependencies = [
  "oxiblas-ndarray",
  "plotly",
  "plotly_static",
+ "proptest",
  "rand",
  "rayon",
  "thiserror 2.0.17",
@@ -1749,6 +1752,7 @@ name = "math-rir"
 version = "0.5.6"
 dependencies = [
  "math-iir-fir",
+ "proptest",
  "rayon",
 ]
 
@@ -1761,6 +1765,7 @@ dependencies = [
  "ndarray",
  "plotly",
  "plotly_static",
+ "proptest",
 ]
 
 [[package]]

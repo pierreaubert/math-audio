@@ -18,3 +18,4 @@ math-iir-fir = { workspace = true }
 rayon = { workspace = true }
 
 [dev-dependencies]
+proptest = { workspace = true }

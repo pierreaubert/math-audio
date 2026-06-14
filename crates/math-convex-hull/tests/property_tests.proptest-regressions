@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 5a5ba749314a3345716ff885e6cb0afcf5578ce15049c72b76b4fe15a12ba5ca # shrinks to points = [Vertex { x: 0.0, y: 0.0, z: 0.0 }, Vertex { x: 0.0, y: 0.0, z: -6.416125033595142 }, Vertex { x: 7.947284107328343, y: -6.597091643929994, z: 6.282270688730481 }, Vertex { x: -9.173844069510906, y: 8.92626659152838, z: 4.092417104603822 }, Vertex { x: 7.0077708489927675, y: 7.510594549671429, z: -7.092354436828951 }]

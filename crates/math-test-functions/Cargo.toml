@@ -32,3 +32,6 @@ path = "src/lib.rs"
 name = "plot-functions"
 path = "bin/plot_functions.rs"
 required-features = ["plotly"]
+
+[dev-dependencies]
+proptest = { workspace = true }

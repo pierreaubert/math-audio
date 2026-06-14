@@ -13,3 +13,4 @@ repository.workspace = true
 delaunator = { workspace = true }
 
 [dev-dependencies]
+proptest = { workspace = true }

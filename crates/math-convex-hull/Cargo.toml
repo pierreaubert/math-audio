@@ -16,4 +16,5 @@ log = "0.4"
 
 [dev-dependencies]
 directories = { workspace = true }
+proptest = { workspace = true }
 
