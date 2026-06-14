@@ -9,7 +9,7 @@
 //     scaling of the IR.
 //   - ISO 3382 metrics are finite for finite synthetic IRs.
 
-use math_rir::{SsirConfig, analyze_rir, analyze_iso3382};
+use math_rir::{SsirConfig, analyze_iso3382, analyze_rir};
 use proptest::prelude::*;
 
 const SAMPLE_RATE: f64 = 48_000.0;
@@ -26,14 +26,13 @@ fn synthetic_rir(rt60_s: f64, noise_amp: f64, direct_amp: f32) -> Vec<f32> {
     ir[0] = direct_amp;
 
     // Energy decays by 60 dB over rt60_s; amplitude envelope is the square root.
-    for i in 1..n {
+    for (i, sample) in ir.iter_mut().enumerate().take(n).skip(1) {
         let t = i as f64 / SAMPLE_RATE;
         let amplitude = 10.0_f64.powf(-3.0 * t / rt60_s);
         // Deterministic pseudo-random noise in [-0.5, 0.5].
-        let u = ((i.wrapping_mul(1103515245).wrapping_add(12345)) & 0x7fff) as f64
-            / 32768.0;
+        let u = ((i.wrapping_mul(1103515245).wrapping_add(12345)) & 0x7fff) as f64 / 32768.0;
         let noise = noise_amp * (u - 0.5);
-        ir[i] = (amplitude + noise) as f32;
+        *sample = (amplitude + noise) as f32;
     }
     ir
 }
@@ -65,7 +64,7 @@ proptest! {
         );
         for seg in &result.segments {
             prop_assert!(
-                seg.len() > 0,
+                !seg.is_empty(),
                 "SSIR returned an empty segment"
             );
             prop_assert!(

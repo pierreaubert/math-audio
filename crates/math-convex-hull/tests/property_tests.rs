@@ -138,72 +138,45 @@ proptest! {
             );
         }
 
-        // Faces may use different vertex indices after deduplication, but the
-        // geometric faces (as unordered sets of vertex coordinates) must match.
-        let mut faces_a: Vec<[Vertex; 3]> = hull_a
-            .faces()
-            .iter()
-            .map(|f| {
-                [
-                    hull_a.vertices()[f.v0],
-                    hull_a.vertices()[f.v1],
-                    hull_a.vertices()[f.v2],
-                ]
-            })
-            .collect();
-        let mut faces_b: Vec<[Vertex; 3]> = hull_b
-            .faces()
-            .iter()
-            .map(|f| {
-                [
-                    hull_b.vertices()[f.v0],
-                    hull_b.vertices()[f.v1],
-                    hull_b.vertices()[f.v2],
-                ]
-            })
-            .collect();
+        // The triangulation of non-simplicial faces may differ, so we compare
+        // the geometric hull: vertex set, volume and surface area.
+        prop_assert!(
+            approx_eq(hull_a.volume(), hull_b.volume(), 1e-9),
+            "duplicate points changed hull volume: {} vs {}",
+            hull_a.volume(),
+            hull_b.volume()
+        );
+        prop_assert!(
+            approx_eq(hull_a.surface_area(), hull_b.surface_area(), 1e-9),
+            "duplicate points changed hull surface area: {} vs {}",
+            hull_a.surface_area(),
+            hull_b.surface_area()
+        );
 
-        for face in &mut faces_a {
-            face.sort_by(|a, b| {
-                a.x.partial_cmp(&b.x)
-                    .unwrap()
-                    .then(a.y.partial_cmp(&b.y).unwrap())
-                    .then(a.z.partial_cmp(&b.z).unwrap())
-            });
-        }
-        for face in &mut faces_b {
-            face.sort_by(|a, b| {
-                a.x.partial_cmp(&b.x)
-                    .unwrap()
-                    .then(a.y.partial_cmp(&b.y).unwrap())
-                    .then(a.z.partial_cmp(&b.z).unwrap())
-            });
-        }
-        faces_a.sort_by(|a, b| {
-            a[0].x.partial_cmp(&b[0].x)
+        let mut verts_a: Vec<_> = hull_a.vertices().to_vec();
+        let mut verts_b: Vec<_> = hull_b.vertices().to_vec();
+        verts_a.sort_by(|a, b| {
+            a.x.partial_cmp(&b.x)
                 .unwrap()
-                .then(a[0].y.partial_cmp(&b[0].y).unwrap())
-                .then(a[0].z.partial_cmp(&b[0].z).unwrap())
+                .then(a.y.partial_cmp(&b.y).unwrap())
+                .then(a.z.partial_cmp(&b.z).unwrap())
         });
-        faces_b.sort_by(|a, b| {
-            a[0].x.partial_cmp(&b[0].x)
+        verts_b.sort_by(|a, b| {
+            a.x.partial_cmp(&b.x)
                 .unwrap()
-                .then(a[0].y.partial_cmp(&b[0].y).unwrap())
-                .then(a[0].z.partial_cmp(&b[0].z).unwrap())
+                .then(a.y.partial_cmp(&b.y).unwrap())
+                .then(a.z.partial_cmp(&b.z).unwrap())
         });
-
-        prop_assert_eq!(faces_a.len(), faces_b.len(), "face count changed");
-        for (fa, fb) in faces_a.iter().zip(faces_b.iter()) {
-            for i in 0..3 {
-                prop_assert!(
-                    approx_eq(fa[i].x, fb[i].x, eps)
-                        && approx_eq(fa[i].y, fb[i].y, eps)
-                        && approx_eq(fa[i].z, fb[i].z, eps),
-                    "geometric face changed after adding duplicates: {:?} vs {:?}",
-                    fa,
-                    fb
-                );
-            }
+        prop_assert_eq!(verts_a.len(), verts_b.len(), "vertex count changed");
+        for (va, vb) in verts_a.iter().zip(verts_b.iter()) {
+            prop_assert!(
+                approx_eq(va.x, vb.x, eps)
+                    && approx_eq(va.y, vb.y, eps)
+                    && approx_eq(va.z, vb.z, eps),
+                "hull vertex set changed after adding duplicates: {:?} vs {:?}",
+                va,
+                vb
+            );
         }
     }
 }

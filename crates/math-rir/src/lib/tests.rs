@@ -403,9 +403,9 @@ fn test_analyze_srir_mismatched_channel_lengths() {
     let z = vec![0.0f32; 4800];
 
     let config = SsirConfig::new(48000.0);
-    let result = analyze_srir(&[&w, &x, &y, &z], &config);
-    // Should fall back to mono analysis
-    assert!(result.num_events() >= 0); // may be 0 since silent
+    let _result = analyze_srir(&[&w, &x, &y, &z], &config);
+    // Should fall back to mono analysis; num_events() is non-negative by
+    // construction and may be 0 for a silent IR.
 }
 
 #[test]

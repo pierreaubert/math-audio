@@ -73,10 +73,13 @@ proptest! {
     /// RECENTERING: translating the minimizer by an offset and applying the
     /// opposite translation to the argument leaves the optimum value unchanged.
     ///
-    /// EXCEPTION: the raw Rosenbrock function is not translation-invariant
-    /// under arbitrary shifts (the (1 - x_i) and (x_{i+1} - x_i^2) terms are
-    /// coupled to the origin/all-ones point). The recentering identity still
-    /// holds by construction and is included for completeness.
+    /// EXCEPTIONS: none of the raw functions above is translation-invariant
+    /// under an arbitrary input shift (they are anchored at the origin or at
+    /// the all-ones point). Rosenbrock is the clearest exception because its
+    /// (1 - x_i) and (x_{i+1} - x_i^2) terms are coupled to the all-ones
+    /// minimum. The recentering identity tested here holds by construction for
+    /// any function and documents that the optimum value is preserved when the
+    /// landscape is shifted as a whole.
     #[test]
     fn global_minimum_value_preserved_under_recentering(
         offset in -2.0f64..2.0f64,

@@ -282,12 +282,12 @@ fn test_zero_maxiter_returns_immediately() {
 
 #[test]
 fn test_single_parameter() {
-    let residual = |x: &Array1<f64>| array![x[0] - 3.14];
+    let residual = |x: &Array1<f64>| array![x[0] - std::f64::consts::PI];
     let bounds = vec![(-10.0, 10.0)];
     let config = LMConfigBuilder::new().x0(array![0.0]).maxiter(50).build();
     let report = levenberg_marquardt(&residual, &bounds, config).unwrap();
     assert!(report.success);
-    assert!((report.x[0] - 3.14).abs() < 1e-6);
+    assert!((report.x[0] - std::f64::consts::PI).abs() < 1e-6);
 }
 
 #[test]

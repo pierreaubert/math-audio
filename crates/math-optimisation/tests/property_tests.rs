@@ -7,7 +7,7 @@
 //     point when minimizing a simple 2D sphere.
 //   - Differential Evolution with a fixed seed is deterministic across runs.
 
-use math_audio_optimisation::cobyla::{cobyla, CobylaConfig, CobylaRhoBegin};
+use math_audio_optimisation::cobyla::{CobylaConfig, CobylaRhoBegin, cobyla};
 use math_audio_optimisation::parallel_eval::ParallelConfig;
 use math_audio_optimisation::{CmaEsConfig, DEConfigBuilder, cma_es, differential_evolution};
 use ndarray::Array1;
