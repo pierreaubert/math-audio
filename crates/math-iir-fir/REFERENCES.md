@@ -383,17 +383,9 @@ Generalization of FIR (Laguerre, Kautz) basis filters: an orthonormal expansion 
 
 ## Pre-ringing suppression
 
-Used by `fir_design.rs::PreRingingConfig` and `suppress_pre_ringing`. The patent describes the envelope-constrained pre-ringing limiter applied after Kirkeby inverse design.
+Used by `fir_design.rs::PreRingingConfig` and `suppress_pre_ringing`.
 
 ```bibtex
-@misc{brannmark2009preringing,
-  author       = {Br{\"a}nnmark, Lars-Johan and Sternad, Mikael},
-  title        = {{Method and apparatus for designing low-pre-ringing inverse filters}},
-  howpublished = {European Patent EP2104374B1},
-  year         = {2009},
-  note         = {Pre-ringing envelope constraint for room-correction inverse filters}
-}
-
 @article{brannmark2008compensation,
   author  = {Br{\"a}nnmark, Lars-Johan and Ahlen, Anders},
   title   = {Compensation of Loudspeaker-Room Responses in a Robust {MIMO} Control Framework},

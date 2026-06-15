@@ -93,7 +93,7 @@ pub(super) fn scalar_compute_covariance(
 }
 
 pub(super) fn scalar_flush_denormals(samples: &mut [f32]) {
-    const DENORM_THRESHOLD: f32 = 1e-30;
+    const DENORM_THRESHOLD: f32 = f32::MIN_POSITIVE;
     for sample in samples.iter_mut() {
         if sample.abs() < DENORM_THRESHOLD {
             *sample = 0.0;
