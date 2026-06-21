@@ -2,13 +2,59 @@
 
 /// Least-squares linear fit `y = slope·x + intercept`. Returns
 /// `(slope, intercept, r²)`. `None` if `n < 2` or `Var(x) = 0`.
-pub(super) fn linear_fit<X, Y>(xs: X, ys: Y) -> Option<(f64, f64, f64)>
-where
-    X: IntoIterator<Item = f64>,
-    Y: IntoIterator<Item = f64>,
-{
-    let xs: Vec<f64> = xs.into_iter().collect();
-    let ys: Vec<f64> = ys.into_iter().collect();
+#[cfg(test)]
+pub(super) fn linear_fit(xs: &[f64], ys: &[f64]) -> Option<(f64, f64, f64)> {
+    linear_fit_impl(xs, ys)
+}
+
+/// Linear fit where `x` is `(i_start + i) * dt` — avoids allocating the `x` vector.
+pub(super) fn linear_fit_indexed(
+    ys: &[f64],
+    i_start: usize,
+    dt: f64,
+) -> Option<(f64, f64, f64)> {
+    let n = ys.len();
+    if n < 2 {
+        return None;
+    }
+    let n_f = n as f64;
+    let sx: f64 = (0..n).map(|i| (i_start + i) as f64 * dt).sum();
+    let sxx: f64 = (0..n).map(|i| {
+        let x = (i_start + i) as f64 * dt;
+        x * x
+    }).sum();
+    let sy: f64 = ys.iter().sum();
+    let sxy: f64 = ys.iter().enumerate().map(|(i, &y)| (i_start + i) as f64 * dt * y).sum();
+    let syy: f64 = ys.iter().map(|&y| y * y).sum();
+
+    let denom = n_f * sxx - sx * sx;
+    if denom.abs() < f64::EPSILON {
+        return None;
+    }
+    let slope = (n_f * sxy - sx * sy) / denom;
+    let intercept = (sy - slope * sx) / n_f;
+
+    let ss_tot = syy - sy * sy / n_f;
+    let ss_res: f64 = ys
+        .iter()
+        .enumerate()
+        .map(|(i, &y)| {
+            let x = (i_start + i) as f64 * dt;
+            let pred = slope * x + intercept;
+            let r = y - pred;
+            r * r
+        })
+        .sum();
+    let r2 = if ss_tot.abs() < f64::EPSILON {
+        1.0
+    } else {
+        (1.0 - ss_res / ss_tot).clamp(0.0, 1.0)
+    };
+    Some((slope, intercept, r2))
+}
+
+#[cfg(test)]
+fn linear_fit_impl(xs: &[f64], ys: &[f64]) -> Option<(f64, f64, f64)> {
     let n = xs.len();
     if n < 2 || ys.len() != n {
         return None;

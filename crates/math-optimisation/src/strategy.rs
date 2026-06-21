@@ -2,6 +2,8 @@
 
 use std::str::FromStr;
 
+use crate::types::Crossover;
+
 /// Differential Evolution mutation/crossover strategy.
 ///
 /// The strategy name follows the pattern `{mutation}{n}{crossover}` where:
@@ -42,6 +44,31 @@ pub enum Strategy {
     LShadeBin,
     /// L-SHADE with exponential crossover: current-to-pbest/1 + linear pop reduction + archive
     LShadeExp,
+}
+
+impl Strategy {
+    /// Returns the crossover type implied by the strategy name.
+    #[must_use]
+    pub fn crossover(self) -> Crossover {
+        match self {
+            Strategy::Best1Bin
+            | Strategy::Rand1Bin
+            | Strategy::Rand2Bin
+            | Strategy::CurrentToBest1Bin
+            | Strategy::Best2Bin
+            | Strategy::RandToBest1Bin
+            | Strategy::AdaptiveBin
+            | Strategy::LShadeBin => Crossover::Binomial,
+            Strategy::Best1Exp
+            | Strategy::Rand1Exp
+            | Strategy::Rand2Exp
+            | Strategy::CurrentToBest1Exp
+            | Strategy::Best2Exp
+            | Strategy::RandToBest1Exp
+            | Strategy::AdaptiveExp
+            | Strategy::LShadeExp => Crossover::Exponential,
+        }
+    }
 }
 
 impl FromStr for Strategy {

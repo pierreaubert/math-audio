@@ -25,6 +25,34 @@ pub(super) fn compute_welch_spectrum_internal(
     fft_size: usize,
     overlap: f32,
 ) -> SpectrumResult {
+    let hann_window = crate::stft::generate_hann_window_symmetric(fft_size);
+    let fft = plan_fft_forward(fft_size);
+    let mut windowed = vec![0.0_f32; fft_size];
+    let mut buffer = vec![Complex::new(0.0, 0.0); fft_size];
+    compute_welch_spectrum_with_buffers(
+        signal,
+        sample_rate,
+        fft_size,
+        overlap,
+        &hann_window,
+        &fft,
+        &mut windowed,
+        &mut buffer,
+    )
+}
+
+/// Compute spectrum using Welch's method with caller-provided buffers.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn compute_welch_spectrum_with_buffers(
+    signal: &[f32],
+    sample_rate: u32,
+    fft_size: usize,
+    overlap: f32,
+    hann_window: &[f32],
+    fft: &std::sync::Arc<dyn rustfft::Fft<f32>>,
+    windowed: &mut [f32],
+    buffer: &mut [Complex<f32>],
+) -> SpectrumResult {
     if signal.is_empty() {
         return Err("Signal is empty".to_string());
     }
@@ -43,16 +71,8 @@ pub(super) fn compute_welch_spectrum_internal(
     let mut phase_real_sum = vec![0.0_f32; num_bins];
     let mut phase_imag_sum = vec![0.0_f32; num_bins];
 
-    // Precompute symmetric Hann window (N-1 divisor for spectral analysis)
-    let hann_window = crate::stft::generate_hann_window_symmetric(fft_size);
-
     let window_power: f32 = hann_window.iter().map(|&w| w * w).sum();
     let scale_factor = 2.0 / window_power;
-
-    let fft = plan_fft_forward(fft_size);
-
-    let mut windowed = vec![0.0_f32; fft_size];
-    let mut buffer = vec![Complex::new(0.0, 0.0); fft_size];
 
     for window_idx in 0..num_windows {
         let start = window_idx * hop_size;
@@ -71,7 +91,7 @@ pub(super) fn compute_welch_spectrum_internal(
             buffer[i] = Complex::new(val, 0.0);
         }
 
-        fft.process(&mut buffer);
+        fft.process(buffer);
 
         for i in 0..num_bins {
             let mag = buffer[i].norm() * scale_factor.sqrt();

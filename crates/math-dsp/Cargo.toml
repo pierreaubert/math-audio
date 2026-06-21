@@ -49,3 +49,12 @@ rayon = { workspace = true }
 approx = { workspace = true }
 serde_json = { workspace = true }
 proptest = { workspace = true }
+criterion = { workspace = true }
+
+[[bench]]
+name = "welch_spectrum"
+harness = false
+
+[[bench]]
+name = "audio_features"
+harness = false

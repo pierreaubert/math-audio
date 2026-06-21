@@ -661,23 +661,29 @@ impl<T: FilterFloat> Biquad<T> {
     /// Vectorized version to compute the SPL response for a vector of frequencies.
     /// This is the fast equivalent of the `np_log_result` Python method.
     pub fn np_log_result(&self, freq: &Array1<T>) -> Array1<T> {
+        let mut out = Array1::zeros(freq.len());
+        self.np_log_result_into(freq, &mut out);
+        out
+    }
+
+    /// Vectorized SPL response written into a pre-allocated output buffer.
+    ///
+    /// Reuses `out` to avoid allocating a new `Array1<T>` for every biquad in
+    /// a PEQ response chain.
+    pub fn np_log_result_into(&self, freq: &Array1<T>, out: &mut Array1<T>) {
+        debug_assert_eq!(freq.len(), out.len());
         let coeff = T::PI() / self.srate;
-        let phi = (freq * coeff).mapv(|x: T| x.sin()).mapv(|x: T| x.powi(2));
-        let phi2 = &phi * &phi;
-
-        // ndarray ScalarOperand only supports `array op scalar`, not `scalar op array`.
-        // Use array-on-the-left form: `&phi * scalar + scalar`.
-        let r_up = &phi * self.r_up1 + &phi2 * self.r_up2 + self.r_up0;
-        let r_dw = &phi * self.r_dw1 + &phi2 * self.r_dw2 + self.r_dw0;
-        let r = r_up / r_dw;
-
-        // Clip to a minimum value to avoid log(0), then calculate dB
         let min_val: T = lit(1.0e-20);
+        let scale: T = lit(20.0);
 
-        r.mapv(|val: T| val.max(min_val))
-            .mapv(|x: T| x.sqrt())
-            .mapv(|x: T| x.log10())
-            * lit::<T>(20.0)
+        for i in 0..freq.len() {
+            let phi = (freq[i] * coeff).sin().powi(2);
+            let phi2 = phi * phi;
+            let r_up = phi * self.r_up1 + phi2 * self.r_up2 + self.r_up0;
+            let r_dw = phi * self.r_dw1 + phi2 * self.r_dw2 + self.r_dw0;
+            let r = (r_up / r_dw).max(min_val);
+            out[i] = scale * r.sqrt().log10();
+        }
     }
 
     /// Returns the normalized filter coefficients (a1, a2, b0, b1, b2).

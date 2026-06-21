@@ -1,11 +1,13 @@
-use ndarray::Array1;
+use ndarray::{Array1, DataMut, Ix1};
 
-pub(crate) fn apply_integrality(
-    x: &mut Array1<f64>,
+pub(crate) fn apply_integrality<S>(
+    x: &mut ndarray::ArrayBase<S, Ix1>,
     mask: &[bool],
     lower: &Array1<f64>,
     upper: &Array1<f64>,
-) {
+) where
+    S: DataMut<Elem = f64>,
+{
     for i in 0..x.len() {
         if i < mask.len() && mask[i] {
             x[i] = x[i].round();

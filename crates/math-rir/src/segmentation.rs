@@ -328,7 +328,7 @@ mod tests {
         ramp[95] = 0.05;
         ramp[99] = 1.0;
         let onset = find_onset(&ramp, 99, 10);
-        assert!(onset <= 99 && onset >= 90);
+        assert!((90..=99).contains(&onset));
     }
 
     #[test]

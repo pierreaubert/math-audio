@@ -35,7 +35,7 @@ fn exponential_decay_rir(sample_rate: f64, t60_s: f64, duration_s: f64) -> Vec<f
 fn linear_fit_perfect_line() {
     let xs = [0.0, 1.0, 2.0, 3.0, 4.0];
     let ys = [0.0, -2.0, -4.0, -6.0, -8.0];
-    let (slope, intercept, r2) = linear_fit(xs, ys).unwrap();
+    let (slope, intercept, r2) = linear_fit(&xs, &ys).unwrap();
     assert!((slope - -2.0).abs() < 1e-12);
     assert!(intercept.abs() < 1e-12);
     assert!((r2 - 1.0).abs() < 1e-12);
@@ -176,8 +176,8 @@ fn test_estimate_noise_cutoff_finds_decay() {
 
 #[test]
 fn test_linear_fit_mismatched_and_constant_x() {
-    assert!(linear_fit([0.0, 1.0], [0.0]).is_none());
-    assert!(linear_fit([1.0, 1.0], [0.0, 1.0]).is_none());
+    assert!(linear_fit(&[0.0, 1.0], &[0.0]).is_none());
+    assert!(linear_fit(&[1.0, 1.0], &[0.0, 1.0]).is_none());
 }
 
 #[test]

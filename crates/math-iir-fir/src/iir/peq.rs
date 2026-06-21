@@ -11,6 +11,7 @@ use base64::{Engine as _, engine::general_purpose};
 use byteorder::{BigEndian, WriteBytesExt};
 use ndarray::Array1;
 use std::f64::consts::PI;
+use std::sync::OnceLock;
 
 mod biquad;
 mod consts;
@@ -63,9 +64,11 @@ pub fn peq_equal(left: &Peq, right: &Peq) -> bool {
 /// * Array of SPL values in dB for each frequency
 pub fn peq_spl(freq: &Array1<f64>, peq: &Peq) -> Array1<f64> {
     let mut current_filter = Array1::zeros(freq.len());
+    let mut scratch = Array1::zeros(freq.len());
 
     for (weight, iir) in peq {
-        current_filter += &(iir.np_log_result(freq) * *weight);
+        iir.np_log_result_into(freq, &mut scratch);
+        current_filter += &(&scratch * *weight);
     }
 
     current_filter
@@ -98,18 +101,10 @@ pub fn peq_loudness_gain(peq: &Peq, weighting: &str) -> f64 {
         return 0.0;
     }
 
-    // Generate logarithmic frequency array from 20Hz to 20kHz with 500 points
-    // More points than preamp_gain for better loudness integration
-    let n_points = 500;
-    let freq = Array1::logspace(
-        10.0,
-        (2.0f64 * 10.0).log10(),
-        (2.0f64 * 10000.0).log10(),
-        n_points,
-    );
+    let freq = loudness_freq_grid();
 
     // Get PEQ frequency response in dB
-    let peq_response_db = peq_spl(&freq, peq);
+    let peq_response_db = peq_spl(freq, peq);
 
     // Apply perceptual weighting
     let weighted_change: f64 = freq
@@ -136,7 +131,7 @@ pub fn peq_loudness_gain(peq: &Peq, weighting: &str) -> f64 {
         .sum();
 
     // Average weighted energy change across frequency
-    let avg_energy_change = weighted_change / n_points as f64;
+    let avg_energy_change = weighted_change / freq.len() as f64;
 
     // Convert back to dB (half because we squared for energy)
     // Negative because we want to compensate (reduce if PEQ increases loudness)
@@ -156,15 +151,34 @@ pub fn peq_loudness_gain(peq: &Peq, weighting: &str) -> f64 {
 ///
 /// # Returns
 /// * Preamp gain in dB (negative value to prevent clipping)
+fn preamp_freq_grid() -> &'static Array1<f64> {
+    static GRID: OnceLock<Array1<f64>> = OnceLock::new();
+    GRID.get_or_init(|| {
+        Array1::logspace(
+            10.0,
+            (2.0f64 * 10.0).log10(),
+            (2.0f64 * 10000.0).log10(),
+            200,
+        )
+    })
+}
+
+fn loudness_freq_grid() -> &'static Array1<f64> {
+    static GRID: OnceLock<Array1<f64>> = OnceLock::new();
+    GRID.get_or_init(|| {
+        Array1::logspace(
+            10.0,
+            (2.0f64 * 10.0).log10(),
+            (2.0f64 * 10000.0).log10(),
+            500,
+        )
+    })
+}
+
+/// Compute preamp gain for a PEQ: well adapted to computers
 pub fn peq_preamp_gain(peq: &Peq) -> f64 {
-    // Generate logarithmic frequency array from 20Hz to 20kHz with 200 points
-    let freq = Array1::logspace(
-        10.0,
-        (2.0f64 * 10.0).log10(),
-        (2.0f64 * 10000.0).log10(),
-        200,
-    );
-    let spl = peq_spl(&freq, peq);
+    let freq = preamp_freq_grid();
+    let spl = peq_spl(freq, peq);
 
     // Find maximum positive gain and return its negative
     let overall = spl
@@ -188,20 +202,14 @@ pub fn peq_preamp_gain_max(peq: &Peq) -> f64 {
         return 0.0;
     }
 
-    // Generate logarithmic frequency array from 20Hz to 20kHz with 200 points
-    let freq = Array1::logspace(
-        10.0,
-        (2.0f64 * 10.0).log10(),
-        (2.0f64 * 10000.0).log10(),
-        200,
-    );
-    let spl = peq_spl(&freq, peq);
+    let freq = preamp_freq_grid();
+    let spl = peq_spl(freq, peq);
 
     // Find maximum individual filter contribution
     let mut individual: f64 = 0.0;
     for (_, iir) in peq {
         let single_peq = vec![(1.0, iir.clone())];
-        let single_spl = peq_spl(&freq, &single_peq);
+        let single_spl = peq_spl(freq, &single_peq);
         let single_max = single_spl.iter().cloned().fold(0.0f64, |acc, x| acc.max(x));
         individual = individual.max(single_max);
     }

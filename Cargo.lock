@@ -1748,6 +1748,7 @@ checksum = "953f07c43838f8e6f9758cab68bf5bed85465e7587ebe0b823f1bcd81978ad3a"
 name = "math-convex-hull"
 version = "0.3.2"
 dependencies = [
+ "criterion",
  "directories",
  "log",
  "proptest",
@@ -1761,6 +1762,7 @@ dependencies = [
 name = "math-delaunay"
 version = "0.5.3"
 dependencies = [
+ "criterion",
  "delaunator",
  "proptest",
 ]
@@ -1771,6 +1773,7 @@ version = "0.5.21"
 dependencies = [
  "approx",
  "clap",
+ "criterion",
  "hound",
  "log",
  "math-iir-fir",
@@ -1809,6 +1812,7 @@ name = "math-optimisation"
 version = "0.5.10"
 dependencies = [
  "clap",
+ "criterion",
  "directories",
  "math-test-functions",
  "nalgebra",
@@ -1826,6 +1830,7 @@ dependencies = [
 name = "math-rir"
 version = "0.5.6"
 dependencies = [
+ "criterion",
  "math-iir-fir",
  "proptest",
  "rayon",
@@ -1836,6 +1841,7 @@ name = "math-test-functions"
 version = "0.5.2"
 dependencies = [
  "clap",
+ "criterion",
  "directories",
  "ndarray",
  "plotly",

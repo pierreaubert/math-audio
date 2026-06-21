@@ -1,9 +1,10 @@
-use ndarray::Array1;
+use ndarray::{Array1, DataMut, Ix1};
 use rand::Rng;
 use std::f64::consts::PI;
 
 /// Wrapper Local Search (WLS) strategy for local refinement
 /// Uses Cauchy distribution to perturb selected dimensions
+#[allow(dead_code)]
 pub(crate) fn apply_wls<R: Rng + ?Sized>(
     x: &Array1<f64>,
     lower: &Array1<f64>,
@@ -12,6 +13,21 @@ pub(crate) fn apply_wls<R: Rng + ?Sized>(
     rng: &mut R,
 ) -> Array1<f64> {
     let mut result = x.clone();
+    apply_wls_in_place(&mut result, lower, upper, scale, rng);
+    result
+}
+
+/// In-place variant of [`apply_wls`].
+pub(crate) fn apply_wls_in_place<R, S>(
+    x: &mut ndarray::ArrayBase<S, Ix1>,
+    lower: &Array1<f64>,
+    upper: &Array1<f64>,
+    scale: f64,
+    rng: &mut R,
+) where
+    R: Rng + ?Sized,
+    S: DataMut<Elem = f64>,
+{
     let n_dims = x.len();
 
     // Generate random wrapper mask - selects which dimensions to perturb
@@ -28,10 +44,8 @@ pub(crate) fn apply_wls<R: Rng + ?Sized>(
         let perturbation = (PI * (u - 0.5)).tan() * scale;
         let new_val = x[dim] + perturbation;
         // Clip to bounds
-        result[dim] = new_val.max(lower[dim]).min(upper[dim]);
+        x[dim] = new_val.max(lower[dim]).min(upper[dim]);
     }
-
-    result
 }
 
 #[cfg(test)]

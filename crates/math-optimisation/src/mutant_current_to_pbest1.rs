@@ -7,7 +7,7 @@
 use ndarray::{Array1, Array2, Zip};
 use rand::Rng;
 
-use crate::distinct_indices::distinct_indices;
+use crate::distinct_indices::{distinct_indices, distinct_indices_with_excludes};
 use crate::external_archive::ExternalArchive;
 
 /// Current-to-pbest/1 mutation with optional archive
@@ -18,7 +18,9 @@ use crate::external_archive::ExternalArchive;
 /// - x_pbest is randomly selected from top p% of population
 /// - x_r1 is a random individual from population
 /// - x_r2 can be from population OR from external archive
-pub(crate) fn mutant_current_to_pbest1<R: Rng + ?Sized>(
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn mutant_current_to_pbest1_into<R: Rng + ?Sized>(
+    out: &mut Array1<f64>,
     i: usize,
     pop: &Array2<f64>,
     sorted_indices: &[usize],
@@ -26,7 +28,7 @@ pub(crate) fn mutant_current_to_pbest1<R: Rng + ?Sized>(
     archive: Option<&ExternalArchive>,
     f: f64,
     rng: &mut R,
-) -> Array1<f64> {
+) {
     let npop = pop.nrows();
 
     let pbest_idx = if p_best_size >= npop {
@@ -37,44 +39,46 @@ pub(crate) fn mutant_current_to_pbest1<R: Rng + ?Sized>(
 
     let r1 = distinct_indices(i, 1, npop, rng)[0];
 
-    let r2 = if let Some(arch) = archive {
+    // Choose r2 from the archive with 50% probability, otherwise from the
+    // population, excluding i and r1.
+    let r2_pop_idx = if let Some(arch) = archive {
         if !arch.is_empty() && rng.random::<f64>() < 0.5 {
             if let Some(sol) = arch.random_select(rng) {
-                sol.clone()
-            } else {
-                let available: Vec<usize> =
-                    (0..npop).filter(|&idx| idx != i && idx != r1).collect();
-                if available.is_empty() {
-                    pop.row(r1).to_owned()
-                } else {
-                    pop.row(available[rng.random_range(0..available.len())])
-                        .to_owned()
-                }
+                Zip::from(&mut *out)
+                    .and(pop.row(i))
+                    .and(pop.row(pbest_idx))
+                    .and(pop.row(r1))
+                    .and(sol.view())
+                    .for_each(|o, &curr, &pbest, &x1, &x2| {
+                        *o = curr + f * (pbest - curr) + f * (x1 - x2);
+                    });
+                return;
             }
+            None
         } else {
-            let available: Vec<usize> = (0..npop).filter(|&idx| idx != i && idx != r1).collect();
-            if available.is_empty() {
-                pop.row(r1).to_owned()
-            } else {
-                pop.row(available[rng.random_range(0..available.len())])
-                    .to_owned()
-            }
+            None
         }
     } else {
-        let available: Vec<usize> = (0..npop).filter(|&idx| idx != i && idx != r1).collect();
-        if available.is_empty() {
-            pop.row(r1).to_owned()
-        } else {
-            pop.row(available[rng.random_range(0..available.len())])
-                .to_owned()
-        }
+        None
     };
 
-    Zip::from(pop.row(i))
+    let r2_idx = r2_pop_idx.unwrap_or_else(|| {
+        let available = distinct_indices_with_excludes(&[i, r1], 1, npop, rng);
+        if available.is_empty() {
+            r1
+        } else {
+            available[0]
+        }
+    });
+
+    Zip::from(&mut *out)
+        .and(pop.row(i))
         .and(pop.row(pbest_idx))
         .and(pop.row(r1))
-        .and(r2.view())
-        .map_collect(|&curr, &pbest, &x1, &x2| curr + f * (pbest - curr) + f * (x1 - x2))
+        .and(pop.row(r2_idx))
+        .for_each(|o, &curr, &pbest, &x1, &x2| {
+            *o = curr + f * (pbest - curr) + f * (x1 - x2);
+        });
 }
 
 /// Compute p_best_size from p parameter (0 < p <= 1)
@@ -103,7 +107,17 @@ mod tests {
         let sorted_indices = vec![3, 2, 1, 0];
 
         let mut rng = rand::rng();
-        let mutant = mutant_current_to_pbest1(0, &pop, &sorted_indices, 2, None, 0.5, &mut rng);
+        let mut mutant = Array1::zeros(pop.ncols());
+        mutant_current_to_pbest1_into(
+            &mut mutant,
+            0,
+            &pop,
+            &sorted_indices,
+            2,
+            None,
+            0.5,
+            &mut rng,
+        );
 
         assert_eq!(mutant.len(), 2);
     }

@@ -18,6 +18,7 @@ thread_local! {
 }
 
 mod analyze;
+pub mod analyzer;
 mod apply;
 mod compute;
 mod estimate;
@@ -34,6 +35,7 @@ mod wav_analysis_config;
 mod write;
 
 pub use analyze::*;
+pub use analyzer::*;
 pub use compute::*;
 pub use estimate::*;
 pub use microphone_compensation::*;

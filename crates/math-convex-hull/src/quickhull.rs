@@ -377,7 +377,7 @@ pub fn quickhull_3d(vertices: &[Vertex]) -> Result<ConvexHull3D> {
     // Convert to final format
     let faces: Vec<Face> = hull_faces.iter().map(|f| f.to_face()).collect();
 
-    Ok(ConvexHull3D::new(unique_vertices.to_vec(), faces))
+    Ok(ConvexHull3D::new(unique_vertices, faces))
 }
 
 /// Assign points to faces in parallel

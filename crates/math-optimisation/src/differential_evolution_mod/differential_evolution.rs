@@ -79,20 +79,22 @@ where
     /// Run the optimization and return a report
     pub fn solve(&mut self) -> DEReport {
         use super::super::apply_integrality::apply_integrality;
-        use super::super::apply_wls::apply_wls;
-        use super::super::crossover_binomial::binomial_crossover;
-        use super::super::crossover_exponential::exponential_crossover;
+        use super::super::apply_wls::apply_wls_in_place;
+        use super::super::crossover_binomial::binomial_crossover_into;
+        use super::super::crossover_exponential::exponential_crossover_into;
         use super::super::init_latin_hypercube::init_latin_hypercube;
         use super::super::init_random::init_random;
-        use super::super::mutant_adaptive::mutant_adaptive;
-        use super::super::mutant_best1::mutant_best1;
-        use super::super::mutant_best2::mutant_best2;
-        use super::super::mutant_current_to_best1::mutant_current_to_best1;
-
-        use super::super::mutant_rand_to_best1::mutant_rand_to_best1;
-        use super::super::mutant_rand1::mutant_rand1;
-        use super::super::mutant_rand2::mutant_rand2;
-        use super::super::parallel_eval::evaluate_trials_parallel;
+        use super::super::mutant_adaptive::mutant_adaptive_into;
+        use super::super::mutant_best1::mutant_best1_into;
+        use super::super::mutant_best2::mutant_best2_into;
+        use super::super::mutant_current_to_best1::mutant_current_to_best1_into;
+        use super::super::mutant_current_to_pbest1::mutant_current_to_pbest1_into;
+        use super::super::mutant_rand_to_best1::mutant_rand_to_best1_into;
+        use super::super::mutant_rand1::mutant_rand1_into;
+        use super::super::mutant_rand2::mutant_rand2_into;
+        use super::super::parallel_eval::evaluate_rows_parallel;
+        use rayon::prelude::*;
+        use std::cell::RefCell;
         use std::sync::Arc;
 
         let n = self.lower.len();
@@ -395,234 +397,184 @@ where
                 Vec::new() // Not needed for other strategies
             };
 
-            // Generate all trials first, then evaluate in parallel
+            // Generate all trials into a reusable matrix, then evaluate in parallel
             let t_build0 = Instant::now();
 
-            // Parallelize trial generation using rayon
-            use rayon::prelude::*;
-            let (trials, trial_params): (Vec<_>, Vec<_>) = (0..npop)
-                .into_par_iter()
-                .map(|i| {
-                    // Create thread-local RNG from base seed + iteration + individual index
-                    let mut local_rng: StdRng = if let Some(base_seed) = self.config.seed {
-                        StdRng::seed_from_u64(
-                            base_seed
-                                .wrapping_add((iter as u64) << 32)
-                                .wrapping_add(i as u64),
-                        )
-                    } else {
-                        // Use thread_rng for unseeded runs
-                        let mut thread_rng = rand::rng();
-                        StdRng::from_rng(&mut thread_rng)
-                    };
+            // Reusable trial matrix and per-trial parameter storage.
+            let mut trials_buf: Array2<f64> = Array2::zeros((npop, n));
+            use std::sync::atomic::{AtomicU64, Ordering};
+            let trial_f: Vec<AtomicU64> = (0..npop).map(|_| AtomicU64::new(0)).collect();
+            let trial_cr: Vec<AtomicU64> = (0..npop).map(|_| AtomicU64::new(0)).collect();
 
-                    // Sample mutation factor and crossover rate (adaptive or fixed)
-                    let (f, cr) = if let Some(ref adaptive) = adaptive_state {
-                        // Use adaptive parameter sampling
-                        let adaptive_f = adaptive.sample_f(&mut local_rng);
-                        let adaptive_cr = adaptive.sample_cr(&mut local_rng);
-                        (adaptive_f, adaptive_cr)
-                    } else {
-                        // Use fixed or dithered parameters
-                        (
-                            self.config.mutation.sample(&mut local_rng),
-                            self.config.recombination,
-                        )
-                    };
+            // One scratch vector per rayon thread for the mutant vector.
+            thread_local! {
+                static MUTANT_SCRATCH: RefCell<Array1<f64>> = RefCell::new(Array1::zeros(0));
+            }
 
-                    // Generate mutant and apply crossover based on strategy
-                    let (mutant, cross) = match self.config.strategy {
-                        Strategy::Best1Bin => (
-                            mutant_best1(i, &pop, best_idx, f, &mut local_rng),
-                            Crossover::Binomial,
-                        ),
-                        Strategy::Best1Exp => (
-                            mutant_best1(i, &pop, best_idx, f, &mut local_rng),
-                            Crossover::Exponential,
-                        ),
-                        Strategy::Rand1Bin => (
-                            mutant_rand1(i, &pop, f, &mut local_rng),
-                            Crossover::Binomial,
-                        ),
-                        Strategy::Rand1Exp => (
-                            mutant_rand1(i, &pop, f, &mut local_rng),
-                            Crossover::Exponential,
-                        ),
-                        Strategy::Rand2Bin => (
-                            mutant_rand2(i, &pop, f, &mut local_rng),
-                            Crossover::Binomial,
-                        ),
-                        Strategy::Rand2Exp => (
-                            mutant_rand2(i, &pop, f, &mut local_rng),
-                            Crossover::Exponential,
-                        ),
-                        Strategy::CurrentToBest1Bin => (
-                            mutant_current_to_best1(i, &pop, best_idx, f, &mut local_rng),
-                            Crossover::Binomial,
-                        ),
-                        Strategy::CurrentToBest1Exp => (
-                            mutant_current_to_best1(i, &pop, best_idx, f, &mut local_rng),
-                            Crossover::Exponential,
-                        ),
-                        Strategy::Best2Bin => (
-                            mutant_best2(i, &pop, best_idx, f, &mut local_rng),
-                            Crossover::Binomial,
-                        ),
-                        Strategy::Best2Exp => (
-                            mutant_best2(i, &pop, best_idx, f, &mut local_rng),
-                            Crossover::Exponential,
-                        ),
-                        Strategy::RandToBest1Bin => (
-                            mutant_rand_to_best1(i, &pop, best_idx, f, &mut local_rng),
-                            Crossover::Binomial,
-                        ),
-                        Strategy::RandToBest1Exp => (
-                            mutant_rand_to_best1(i, &pop, best_idx, f, &mut local_rng),
-                            Crossover::Exponential,
-                        ),
-                        Strategy::AdaptiveBin => {
+            // Write directly into the pre-allocated trial matrix using a raw address.
+            // Rows are disjoint, so this is safe despite the parallel write access.
+            let trials_addr = trials_buf.as_mut_ptr() as usize;
+            (0..npop).into_par_iter().for_each(|i| {
+                let trials_ptr = trials_addr as *mut f64;
+                // Create thread-local RNG from base seed + iteration + individual index
+                let mut local_rng: StdRng = if let Some(base_seed) = self.config.seed {
+                    StdRng::seed_from_u64(
+                        base_seed
+                            .wrapping_add((iter as u64) << 32)
+                            .wrapping_add(i as u64),
+                    )
+                } else {
+                    // Use thread_rng for unseeded runs
+                    let mut thread_rng = rand::rng();
+                    StdRng::from_rng(&mut thread_rng)
+                };
+
+                // Sample mutation factor and crossover rate (adaptive or fixed)
+                let (f, cr) = if let Some(ref adaptive) = adaptive_state {
+                    // Use adaptive parameter sampling
+                    let adaptive_f = adaptive.sample_f(&mut local_rng);
+                    let adaptive_cr = adaptive.sample_cr(&mut local_rng);
+                    (adaptive_f, adaptive_cr)
+                } else {
+                    // Use fixed or dithered parameters
+                    (
+                        self.config.mutation.sample(&mut local_rng),
+                        self.config.recombination,
+                    )
+                };
+
+                let trial_ptr = unsafe { trials_ptr.add(i * n) };
+                let mut trial_row =
+                    unsafe { ndarray::ArrayViewMut1::from_shape_ptr((n,), trial_ptr) };
+
+                MUTANT_SCRATCH.with(|ms| {
+                    let mut scratch = ms.borrow_mut();
+                    if scratch.len() != n {
+                        *scratch = Array1::zeros(n);
+                    }
+
+                    // Generate mutant in place based on strategy
+                    match self.config.strategy {
+                        Strategy::Best1Bin | Strategy::Best1Exp => {
+                            mutant_best1_into(&mut scratch, i, &pop, best_idx, f, &mut local_rng);
+                        }
+                        Strategy::Rand1Bin | Strategy::Rand1Exp => {
+                            mutant_rand1_into(&mut scratch, i, &pop, f, &mut local_rng);
+                        }
+                        Strategy::Rand2Bin | Strategy::Rand2Exp => {
+                            mutant_rand2_into(&mut scratch, i, &pop, f, &mut local_rng);
+                        }
+                        Strategy::CurrentToBest1Bin | Strategy::CurrentToBest1Exp => {
+                            mutant_current_to_best1_into(
+                                &mut scratch, i, &pop, best_idx, f, &mut local_rng,
+                            );
+                        }
+                        Strategy::Best2Bin | Strategy::Best2Exp => {
+                            mutant_best2_into(&mut scratch, i, &pop, best_idx, f, &mut local_rng);
+                        }
+                        Strategy::RandToBest1Bin | Strategy::RandToBest1Exp => {
+                            mutant_rand_to_best1_into(
+                                &mut scratch, i, &pop, best_idx, f, &mut local_rng,
+                            );
+                        }
+                        Strategy::AdaptiveBin | Strategy::AdaptiveExp => {
                             if let Some(ref adaptive) = adaptive_state {
-                                (
-                                    mutant_adaptive(
-                                        i,
-                                        &pop,
-                                        &sorted_indices,
-                                        adaptive.current_w,
-                                        f,
-                                        &mut local_rng,
-                                    ),
-                                    Crossover::Binomial,
-                                )
+                                mutant_adaptive_into(
+                                    &mut scratch,
+                                    i,
+                                    &pop,
+                                    &sorted_indices,
+                                    adaptive.current_w,
+                                    f,
+                                    &mut local_rng,
+                                );
                             } else {
-                                // Fallback to rand1 if adaptive state not available
-                                (
-                                    mutant_rand1(i, &pop, f, &mut local_rng),
-                                    Crossover::Binomial,
-                                )
+                                mutant_rand1_into(&mut scratch, i, &pop, f, &mut local_rng);
                             }
                         }
-                        Strategy::AdaptiveExp => {
-                            if let Some(ref adaptive) = adaptive_state {
-                                (
-                                    mutant_adaptive(
-                                        i,
-                                        &pop,
-                                        &sorted_indices,
-                                        adaptive.current_w,
-                                        f,
-                                        &mut local_rng,
-                                    ),
-                                    Crossover::Exponential,
-                                )
-                            } else {
-                                // Fallback to rand1 if adaptive state not available
-                                (
-                                    mutant_rand1(i, &pop, f, &mut local_rng),
-                                    Crossover::Exponential,
-                                )
-                            }
-                        }
-                        Strategy::LShadeBin => {
+                        Strategy::LShadeBin | Strategy::LShadeExp => {
                             let pbest_size =
                                 super::super::mutant_current_to_pbest1::compute_pbest_size(
                                     self.config.lshade.p,
                                     pop.nrows(),
                                 );
                             let archive_ref = external_archive.as_ref().and_then(|a| a.read().ok());
-                            (
-                                super::super::mutant_current_to_pbest1::mutant_current_to_pbest1(
-                                    i,
-                                    &pop,
-                                    &sorted_indices,
-                                    pbest_size,
-                                    archive_ref.as_deref(),
-                                    f,
-                                    &mut local_rng,
-                                ),
-                                Crossover::Binomial,
-                            )
-                        }
-                        Strategy::LShadeExp => {
-                            let pbest_size =
-                                super::super::mutant_current_to_pbest1::compute_pbest_size(
-                                    self.config.lshade.p,
-                                    pop.nrows(),
-                                );
-                            let archive_ref = external_archive.as_ref().and_then(|a| a.read().ok());
-                            (
-                                super::super::mutant_current_to_pbest1::mutant_current_to_pbest1(
-                                    i,
-                                    &pop,
-                                    &sorted_indices,
-                                    pbest_size,
-                                    archive_ref.as_deref(),
-                                    f,
-                                    &mut local_rng,
-                                ),
-                                Crossover::Exponential,
-                            )
+                            mutant_current_to_pbest1_into(
+                                &mut scratch,
+                                i,
+                                &pop,
+                                &sorted_indices,
+                                pbest_size,
+                                archive_ref.as_deref(),
+                                f,
+                                &mut local_rng,
+                            );
                         }
                     };
 
-                    // If strategy didn't dictate crossover, fallback to config
-                    let crossover = cross;
-                    let trial = match crossover {
-                        Crossover::Binomial => {
-                            binomial_crossover(&pop.row(i).to_owned(), &mutant, cr, &mut local_rng)
-                        }
-                        Crossover::Exponential => exponential_crossover(
-                            &pop.row(i).to_owned(),
-                            &mutant,
+                    // Crossover from target row into the trial row.
+                    let target_row_view = pop.row(i);
+                    let target_slice = target_row_view.as_slice().expect("contiguous row");
+                    let mutant_slice = scratch.as_slice().expect("contiguous");
+                    let trial_slice = trial_row.as_slice_mut().expect("contiguous row");
+                    match self.config.strategy.crossover() {
+                        Crossover::Binomial => binomial_crossover_into(
+                            trial_slice,
+                            target_slice,
+                            mutant_slice,
                             cr,
                             &mut local_rng,
                         ),
-                    };
-
-                    // Apply WLS if enabled
-                    let wls_trial = if self.config.adaptive.wls_enabled
-                        && local_rng.random::<f64>() < self.config.adaptive.wls_prob
-                    {
-                        apply_wls(
-                            &trial,
-                            &self.lower,
-                            &self.upper,
-                            self.config.adaptive.wls_scale,
+                        Crossover::Exponential => exponential_crossover_into(
+                            trial_slice,
+                            target_slice,
+                            mutant_slice,
+                            cr,
                             &mut local_rng,
-                        )
-                    } else {
-                        trial.clone()
-                    };
-
-                    // Clip to bounds using vectorized operation
-                    let mut trial_clipped = wls_trial;
-                    Zip::from(&mut trial_clipped)
-                        .and(&self.lower)
-                        .and(&self.upper)
-                        .for_each(|x, lo, hi| *x = x.clamp(*lo, *hi));
-
-                    // Apply integrality if provided
-                    if let Some(mask) = &self.config.integrality {
-                        apply_integrality(&mut trial_clipped, mask, &self.lower, &self.upper);
+                        ),
                     }
+                });
 
-                    // Return trial and parameters
-                    (trial_clipped, (f, cr))
-                })
-                .unzip();
+                // Apply WLS if enabled, in place on the trial row.
+                if self.config.adaptive.wls_enabled
+                    && local_rng.random::<f64>() < self.config.adaptive.wls_prob
+                {
+                    apply_wls_in_place(
+                        &mut trial_row,
+                        &self.lower,
+                        &self.upper,
+                        self.config.adaptive.wls_scale,
+                        &mut local_rng,
+                    );
+                }
+
+                // Clip to bounds using vectorized operation
+                Zip::from(&mut trial_row)
+                    .and(&self.lower)
+                    .and(&self.upper)
+                    .for_each(|x, lo, hi| *x = x.clamp(*lo, *hi));
+
+                // Apply integrality if provided
+                if let Some(mask) = &self.config.integrality {
+                    apply_integrality(&mut trial_row, mask, &self.lower, &self.upper);
+                }
+
+                trial_f[i].store(f.to_bits(), Ordering::Relaxed);
+                trial_cr[i].store(cr.to_bits(), Ordering::Relaxed);
+            });
 
             let t_build = t_build0.elapsed();
             let t_eval0 = Instant::now();
             let trial_energies =
-                evaluate_trials_parallel(&trials, energy_fn.clone(), &self.config.parallel);
+                evaluate_rows_parallel(&trials_buf, energy_fn.clone(), &self.config.parallel);
             let t_eval = t_eval0.elapsed();
             nfev += npop;
 
             let t_select0 = Instant::now();
             // Selection phase: update population based on trial results
-            for (i, (trial, trial_energy)) in
-                trials.into_iter().zip(trial_energies.iter()).enumerate()
-            {
-                let (f, cr) = trial_params[i];
+            for (i, trial_energy) in trial_energies.iter().enumerate() {
+                let f = f64::from_bits(trial_f[i].load(Ordering::Relaxed));
+                let cr = f64::from_bits(trial_cr[i].load(Ordering::Relaxed));
 
                 // Selection: replace if better
                 if *trial_energy <= energies[i] {
@@ -633,7 +585,7 @@ where
                     {
                         arch.add(pop.row(i).to_owned());
                     }
-                    pop.row_mut(i).assign(&trial.view());
+                    pop.row_mut(i).assign(&trials_buf.row(i));
                     energies[i] = *trial_energy;
                     accepted_trials += 1;
 

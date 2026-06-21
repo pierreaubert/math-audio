@@ -3,20 +3,21 @@ use rand::Rng;
 
 use crate::distinct_indices::distinct_indices;
 
-pub(crate) fn mutant_best1<R: Rng + ?Sized>(
+pub(crate) fn mutant_best1_into<R: Rng + ?Sized>(
+    out: &mut Array1<f64>,
     i: usize,
     pop: &Array2<f64>,
     best_idx: usize,
     f: f64,
     rng: &mut R,
-) -> Array1<f64> {
-    let _n = pop.ncols();
+) {
     let idxs = distinct_indices(i, 2, pop.nrows(), rng);
     let r0 = idxs[0];
     let r1 = idxs[1];
 
-    Zip::from(pop.row(best_idx))
+    Zip::from(&mut *out)
+        .and(pop.row(best_idx))
         .and(pop.row(r0))
         .and(pop.row(r1))
-        .map_collect(|&best, &x0, &x1| best + f * (x0 - x1))
+        .for_each(|o, &best, &x0, &x1| *o = best + f * (x0 - x1));
 }

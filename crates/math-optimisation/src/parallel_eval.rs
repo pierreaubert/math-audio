@@ -90,6 +90,37 @@ where
     trials.par_iter().map(|trial| eval_fn(trial)).collect()
 }
 
+/// Evaluate rows of a 2-D population in parallel.
+///
+/// This avoids constructing a `Vec<Array1<f64>>` when the trials are already
+/// stored as rows of an `Array2`.
+pub fn evaluate_rows_parallel<F>(
+    rows: &Array2<f64>,
+    eval_fn: Arc<F>,
+    config: &ParallelConfig,
+) -> Vec<f64>
+where
+    F: Fn(&Array1<f64>) -> f64 + Send + Sync,
+{
+    let npop = rows.nrows();
+    if !config.enabled || npop < 4 {
+        return (0..npop)
+            .map(|i| {
+                let individual = rows.row(i).to_owned();
+                eval_fn(&individual)
+            })
+            .collect();
+    }
+
+    (0..npop)
+        .into_par_iter()
+        .map(|i| {
+            let individual = rows.row(i).to_owned();
+            eval_fn(&individual)
+        })
+        .collect()
+}
+
 /// Structure to batch evaluate individuals with their indices.
 pub struct IndexedEvaluation {
     /// Index of the individual in the population.

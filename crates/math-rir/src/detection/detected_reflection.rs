@@ -112,34 +112,45 @@ pub(super) fn validate_and_merge(reflections: &mut Vec<DetectedReflection>, conf
     let toa_threshold = config.toa_threshold_samples();
     let doa_threshold_rad = config.doa_threshold_deg.to_radians();
 
-    let mut i = 0;
-    while i + 1 < reflections.len() {
-        let toa_diff = reflections[i + 1]
-            .toa_sample
-            .saturating_sub(reflections[i].toa_sample);
+    // In-place stack compaction: reflections[0..write] is the kept stack.
+    // When a candidate is too close to the top, keep the higher-energy one
+    // and continue checking against the new top (same semantics as the
+    // original step-back loop, but without O(n²) Vec::remove shifts).
+    let mut write = 0;
+    for read in 0..reflections.len() {
+        let mut candidate = read;
+        while write > 0 {
+            let prev = write - 1;
+            let toa_diff = reflections[candidate]
+                .toa_sample
+                .saturating_sub(reflections[prev].toa_sample);
 
-        let doa_diff = match (&reflections[i].doa, &reflections[i + 1].doa) {
-            (Some(a), Some(b)) => angular_distance(a, b),
-            // Without DOA data, skip the DOA check (only use TOA)
-            _ => f64::MAX,
-        };
+            let doa_diff = match (&reflections[prev].doa, &reflections[candidate].doa) {
+                (Some(a), Some(b)) => angular_distance(a, b),
+                _ => f64::MAX,
+            };
 
-        // Keep the pair separate if BOTH conditions are met:
-        // angular distance >= threshold AND temporal distance > threshold
-        let spatially_distinct = doa_diff >= doa_threshold_rad;
-        let temporally_distinct = toa_diff > toa_threshold;
+            let spatially_distinct = doa_diff >= doa_threshold_rad;
+            let temporally_distinct = toa_diff > toa_threshold;
 
-        if spatially_distinct && temporally_distinct {
-            i += 1;
-        } else {
-            // Merge: keep the one with higher energy
-            if reflections[i + 1].peak_energy > reflections[i].peak_energy {
-                reflections[i] = reflections[i + 1].clone();
+            if spatially_distinct && temporally_distinct {
+                break;
             }
-            reflections.remove(i + 1);
-            // Re-check both the next pair and, if replacement moved a later
-            // event leftward, the previous neighbor.
-            i = i.saturating_sub(1);
+            if reflections[candidate].peak_energy > reflections[prev].peak_energy {
+                // Candidate replaces previous; pop previous and keep checking.
+                write -= 1;
+            } else {
+                // Candidate is dominated; discard it.
+                candidate = usize::MAX;
+                break;
+            }
+        }
+        if candidate != usize::MAX {
+            if write != candidate {
+                reflections.swap(write, candidate);
+            }
+            write += 1;
         }
     }
+    reflections.truncate(write);
 }

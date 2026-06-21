@@ -12,10 +12,10 @@
 //! - A convenience entry point that computes [`crate::metrics::Iso3382Metrics`]
 //!   for every requested band in parallel.
 
-use math_audio_iir_fir::filtfilt;
-use rayon::prelude::*;
+use math_audio_iir_fir::{BiquadCoefficients, filtfilt};
+use std::collections::HashMap;
 
-use crate::metrics::{Iso3382Metrics, analyze_iso3382};
+use crate::metrics::{DecayWorkspace, Iso3382Metrics, analyze_iso3382_bands_with_contexts};
 
 /// ISO 3382-1 reports reverberation across octave bands 125 Hz … 4 kHz
 /// (and recommends 63 Hz and 8 kHz where the RIR supports them). These
@@ -40,7 +40,7 @@ pub enum BandWidth {
 }
 
 impl BandWidth {
-    fn bandedges(self, fc: f64) -> (f64, f64) {
+    pub(crate) fn bandedges(self, fc: f64) -> (f64, f64) {
         match self {
             // Base-2 edges. ISO 3382-1 §5.1 permits either base-2 or
             // base-10 (G=10^(3/10)) — they differ by < 0.3 % which is
@@ -48,6 +48,116 @@ impl BandWidth {
             BandWidth::Octave => (fc * 2f64.powf(-0.5), fc * 2f64.powf(0.5)),
             BandWidth::ThirdOctave => (fc * 2f64.powf(-1.0 / 6.0), fc * 2f64.powf(1.0 / 6.0)),
         }
+    }
+}
+
+/// Cache key for bandpass coefficients.
+///
+/// The three floating-point values are stored as raw bit patterns so the
+/// tuple implements [`Hash`] without requiring an `OrderedFloat` wrapper.
+type CoeffKey = (u64, u64, u64, usize);
+
+/// Reusable workspace for zero-phase Butterworth bandpass filtering.
+///
+/// Caches the second-order-section coefficients for each unique band and
+/// keeps f64/f32 input/output buffers across calls so that per-band ISO 3382
+/// analysis does not re-allocate them.
+#[derive(Debug, Default)]
+pub struct BandpassWorkspace {
+    coeff_cache: HashMap<CoeffKey, Vec<BiquadCoefficients<f64>>>,
+    scratch: Vec<f64>,
+    filtered: Vec<f64>,
+    output: Vec<f32>,
+}
+
+impl BandpassWorkspace {
+    /// Create a new, empty workspace.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Filter `rir` through a zero-phase Butterworth bandpass centred at `fc`.
+    ///
+    /// `order` is the order of each Butterworth stage (the cascade is
+    /// HP(order) ∘ LP(order), then `filtfilt` doubles the effective order
+    /// while removing phase). The coefficients for the requested band are
+    /// cached inside the workspace, and the internal scratch/output buffers
+    /// are reused. Returns the filtered signal at the same sample rate.
+    /// Empty input → empty output.
+    ///
+    /// If the band edges are invalid or `order == 0`, the input is returned
+    /// unchanged (copied into the workspace output buffer).
+    pub fn process(
+        &mut self,
+        rir: &[f32],
+        fc: f64,
+        width: BandWidth,
+        sample_rate: f64,
+        order: usize,
+    ) -> &[f32] {
+        // Invalid configuration: return the input unchanged.
+        if rir.is_empty() || sample_rate <= 0.0 || order == 0 {
+            self.output.clear();
+            self.output.extend_from_slice(rir);
+            return &self.output[..rir.len()];
+        }
+
+        let (mut f_low, mut f_high) = width.bandedges(fc);
+        let nyquist = sample_rate * 0.5;
+        // Clamp the band edges so a 16 kHz centre on a 32 kHz sample rate
+        // doesn't ask for a 22 kHz lowpass.
+        f_low = f_low.max(1.0);
+        f_high = f_high.min(nyquist * 0.99);
+        if f_high <= f_low {
+            self.output.clear();
+            self.output.extend_from_slice(rir);
+            return &self.output[..rir.len()];
+        }
+
+        let key: CoeffKey = (f_low.to_bits(), f_high.to_bits(), sample_rate.to_bits(), order);
+        let coeffs = self.coeff_cache.entry(key).or_insert_with(|| {
+            let mut sections = filtfilt::peq_to_coefficients(
+                &math_audio_iir_fir::peq_butterworth_highpass(order, f_low, sample_rate),
+            );
+            sections.extend(filtfilt::peq_to_coefficients(
+                &math_audio_iir_fir::peq_butterworth_lowpass(order, f_high, sample_rate),
+            ));
+            sections
+        });
+
+        self.scratch.resize(rir.len(), 0.0);
+        self.filtered.resize(rir.len(), 0.0);
+        self.output.resize(rir.len(), 0.0);
+
+        for (i, &s) in rir.iter().enumerate() {
+            self.scratch[i] = f64::from(s);
+        }
+
+        let filtfilt_out = filtfilt::filtfilt(&self.scratch, coeffs);
+        self.filtered.copy_from_slice(&filtfilt_out);
+        for i in 0..rir.len() {
+            self.output[i] = self.filtered[i] as f32;
+        }
+
+        &self.output[..rir.len()]
+    }
+}
+
+/// Reusable context for ISO 3382 band analysis.
+///
+/// Bundles a [`BandpassWorkspace`] for filtering with a [`DecayWorkspace`]
+/// for Schroeder backward integration. One context per band is used so that
+/// parallel band processing needs no shared mutable state.
+#[derive(Debug, Default)]
+pub struct BandAnalysisContext {
+    pub bp: BandpassWorkspace,
+    pub decay: DecayWorkspace,
+}
+
+impl BandAnalysisContext {
+    /// Create a new, empty context.
+    pub fn new() -> Self {
+        Self::default()
     }
 }
 
@@ -64,33 +174,8 @@ pub fn bandpass(
     sample_rate: f64,
     order: usize,
 ) -> Vec<f32> {
-    if rir.is_empty() || sample_rate <= 0.0 || order == 0 {
-        return rir.to_vec();
-    }
-    let (f_low, f_high) = width.bandedges(fc);
-    let nyquist = sample_rate * 0.5;
-    // Clamp the band edges so a 16 kHz centre on a 32 kHz sample rate
-    // doesn't ask for a 22 kHz lowpass.
-    let f_low = f_low.max(1.0);
-    let f_high = f_high.min(nyquist * 0.99);
-    if f_high <= f_low {
-        return rir.to_vec();
-    }
-
-    // Build a HP + LP cascade and convert to second-order sections
-    // suitable for `filtfilt`.
-    let mut sections = filtfilt::peq_to_coefficients(
-        &math_audio_iir_fir::peq_butterworth_highpass(order, f_low, sample_rate),
-    );
-    sections.extend(filtfilt::peq_to_coefficients(
-        &math_audio_iir_fir::peq_butterworth_lowpass(order, f_high, sample_rate),
-    ));
-
-    // `filtfilt` works in f64; convert in/out.
-    let mut scratch: Vec<f64> = Vec::with_capacity(rir.len());
-    scratch.extend(rir.iter().map(|&s| s as f64));
-    let filtered = filtfilt::filtfilt(&scratch, &sections);
-    filtered.into_iter().map(|s| s as f32).collect()
+    let mut ws = BandpassWorkspace::new();
+    ws.process(rir, fc, width, sample_rate, order).to_vec()
 }
 
 /// Per-band ISO 3382 analysis on a broadband RIR.
@@ -111,18 +196,9 @@ pub fn analyze_iso3382_bands(
     width: BandWidth,
     order: usize,
 ) -> Vec<(f64, Iso3382Metrics)> {
-    let nyquist = sample_rate * 0.5;
-    bands
-        .par_iter()
-        .filter_map(|&fc| {
-            let (f_low, f_high) = width.bandedges(fc);
-            if f_low <= 0.0 || f_high >= nyquist {
-                return None;
-            }
-            let filtered = bandpass(rir, fc, width, sample_rate, order);
-            Some((fc, analyze_iso3382(&filtered, sample_rate)))
-        })
-        .collect()
+    let mut contexts: Vec<BandAnalysisContext> =
+        bands.iter().map(|_| BandAnalysisContext::new()).collect();
+    analyze_iso3382_bands_with_contexts(rir, sample_rate, bands, width, order, &mut contexts)
 }
 
 /// Convenience: ISO octave-band analysis (125 Hz … 8 kHz).

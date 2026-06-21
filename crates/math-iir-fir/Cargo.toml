@@ -28,6 +28,14 @@ proptest = { workspace = true }
 name = "biquad_bench"
 harness = false
 
+[[bench]]
+name = "response_bench"
+harness = false
+
+[[bench]]
+name = "fir_design_bench"
+harness = false
+
 [lib]
 name = "math_audio_iir_fir"
 path = "src/mod.rs"

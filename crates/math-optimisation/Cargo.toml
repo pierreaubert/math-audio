@@ -33,6 +33,15 @@ plotly_static = ["plotly", "dep:plotly_static"]
 
 [dev-dependencies]
 proptest = { workspace = true }
+criterion = { workspace = true }
+
+[[bench]]
+name = "de_bench"
+harness = false
+
+[[bench]]
+name = "cmaes_bench"
+harness = false
 
 [target.'cfg(target_os = "macos")'.dependencies]
 
