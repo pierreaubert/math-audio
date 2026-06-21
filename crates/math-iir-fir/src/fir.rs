@@ -391,10 +391,13 @@ impl<T: FilterFloat> Fir<T> {
         let start = state_pos - n_taps + 1;
         let half = n_taps / 2;
 
-        let mut y = T::zero();
-        for i in 0..half {
-            y += self.coeffs[i] * (self.state[state_pos - i] + self.state[start + i]);
-        }
+        // Pair the oldest and newest samples in the window; for symmetric
+        // coefficients each pair shares one coefficient, halving the multiplies.
+        let pair_sums = self.state[start..start + half]
+            .iter()
+            .zip(self.state[state_pos - half + 1..=state_pos].iter().rev())
+            .map(|(&old, &new)| old + new);
+        let mut y: T = self.coeffs[..half].iter().zip(pair_sums).map(|(&c, s)| c * s).sum();
         if n_taps % 2 == 1 {
             y += self.coeffs[half] * self.state[start + half];
         }
