@@ -76,8 +76,8 @@ impl BiquadForm for Df1Form {
         // Fused multiply-add for the feed-forward and feedback dot products.
         // The two FMA groups can execute in parallel, and only one final
         // subtraction serializes them.
-        let output = b.b0.mul_add(input, b.b1.mul_add(b.x1, b.b2 * b.x2))
-            - b.a1.mul_add(b.y1, b.a2 * b.y2);
+        let output =
+            b.b0.mul_add(input, b.b1.mul_add(b.x1, b.b2 * b.x2)) - b.a1.mul_add(b.y1, b.a2 * b.y2);
 
         b.x2 = b.x1;
         b.x1 = input;
@@ -595,6 +595,24 @@ impl<T: FilterFloat> Biquad<T> {
     /// branch.
     #[inline(always)]
     pub fn process_block(&mut self, samples: &mut [T]) {
+        // AVX2 fast path: on x86_64 with AVX2/FMA, process f64 DF1 blocks four
+        // samples at a time in the main loop, then a two-sample tail, then a
+        // scalar tail. TDF2 and non-f64 types keep the scalar fallback below.
+        #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+        {
+            if !self.use_tdf2 && std::any::TypeId::of::<T>() == std::any::TypeId::of::<f64>() {
+                unsafe {
+                    let b = &mut *(self as *mut Biquad<T> as *mut Biquad<f64>);
+                    let s = std::slice::from_raw_parts_mut(
+                        samples.as_mut_ptr() as *mut f64,
+                        samples.len(),
+                    );
+                    Self::process_block_df1_avx2(b, s);
+                }
+                return;
+            }
+        }
+
         if self.use_tdf2 {
             self.process_block_form::<Tdf2Form>(samples);
         } else {
@@ -616,6 +634,144 @@ impl<T: FilterFloat> Biquad<T> {
                 ptr = ptr.add(1);
             }
         }
+    }
+
+    /// AVX2/FMA fast path for f64 DF1 block processing.
+    ///
+    /// Processes four samples per main-loop iteration using 256-bit loads and
+    /// stores, then falls back to the original two-sample AVX2 body and a
+    /// scalar tail for any remaining samples.
+    #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+    #[target_feature(enable = "avx2,fma")]
+    unsafe fn process_block_df1_avx2(b: &mut Biquad<f64>, samples: &mut [f64]) {
+        use std::arch::x86_64::*;
+
+        let mut x1 = b.x1;
+        let mut x2 = b.x2;
+        let mut y1 = b.y1;
+        let mut y2 = b.y2;
+
+        let len = samples.len();
+        let mut ptr = samples.as_mut_ptr();
+        let full_end = unsafe { ptr.add(len) };
+
+        let quad_end = unsafe { ptr.add(len & !3) };
+        while ptr < quad_end {
+            let xvec = unsafe { _mm256_loadu_pd(ptr) };
+            let x01 = _mm256_castpd256_pd128(xvec);
+            let x23 = _mm256_extractf128_pd(xvec, 1);
+
+            let xi0 = _mm_cvtsd_f64(x01);
+            let xj0 = _mm_cvtsd_f64(_mm_unpackhi_pd(x01, x01));
+
+            let state1_0 = _mm256_setr_pd(x2, y2, x1, y1);
+            let coeff1_0 = _mm256_setr_pd(b.b2, b.a2, b.b2, b.a2);
+            let mut acc0 = _mm256_mul_pd(coeff1_0, state1_0);
+            let state2_0 = _mm256_setr_pd(x1, y1, xi0, 0.0);
+            let coeff2_0 = _mm256_setr_pd(b.b1, b.a1, b.b1, 0.0);
+            acc0 = _mm256_fmadd_pd(coeff2_0, state2_0, acc0);
+            let state3_0 = _mm256_setr_pd(xi0, 0.0, xj0, 0.0);
+            let coeff3_0 = _mm256_setr_pd(b.b0, 0.0, b.b0, 0.0);
+            acc0 = _mm256_fmadd_pd(coeff3_0, state3_0, acc0);
+
+            let term1_i0 = _mm256_cvtsd_f64(acc0);
+            let term2_i0 = _mm256_cvtsd_f64(_mm256_permute4x64_pd(acc0, 0x55));
+            let yi0 = term1_i0 - term2_i0;
+            let term1_j0 = _mm256_cvtsd_f64(_mm256_permute4x64_pd(acc0, 0xAA));
+            let term2_j_partial0 = _mm256_cvtsd_f64(_mm256_permute4x64_pd(acc0, 0xFF));
+            let term2_j0 = b.a1.mul_add(yi0, term2_j_partial0);
+            let yj0 = term1_j0 - term2_j0;
+
+            let nx2 = xi0;
+            let nx1 = xj0;
+            let ny2 = yi0;
+            let ny1 = yj0;
+
+            let xi1 = _mm_cvtsd_f64(x23);
+            let xj1 = _mm_cvtsd_f64(_mm_unpackhi_pd(x23, x23));
+
+            let state1_1 = _mm256_setr_pd(nx2, ny2, nx1, ny1);
+            let coeff1_1 = _mm256_setr_pd(b.b2, b.a2, b.b2, b.a2);
+            let mut acc1 = _mm256_mul_pd(coeff1_1, state1_1);
+            let state2_1 = _mm256_setr_pd(nx1, ny1, xi1, 0.0);
+            let coeff2_1 = _mm256_setr_pd(b.b1, b.a1, b.b1, 0.0);
+            acc1 = _mm256_fmadd_pd(coeff2_1, state2_1, acc1);
+            let state3_1 = _mm256_setr_pd(xi1, 0.0, xj1, 0.0);
+            let coeff3_1 = _mm256_setr_pd(b.b0, 0.0, b.b0, 0.0);
+            acc1 = _mm256_fmadd_pd(coeff3_1, state3_1, acc1);
+
+            let term1_i1 = _mm256_cvtsd_f64(acc1);
+            let term2_i1 = _mm256_cvtsd_f64(_mm256_permute4x64_pd(acc1, 0x55));
+            let yi1 = term1_i1 - term2_i1;
+            let term1_j1 = _mm256_cvtsd_f64(_mm256_permute4x64_pd(acc1, 0xAA));
+            let term2_j_partial1 = _mm256_cvtsd_f64(_mm256_permute4x64_pd(acc1, 0xFF));
+            let term2_j1 = b.a1.mul_add(yi1, term2_j_partial1);
+            let yj1 = term1_j1 - term2_j1;
+
+            let y01 = _mm_setr_pd(yi0, yj0);
+            let y23 = _mm_setr_pd(yi1, yj1);
+            let yvec = _mm256_insertf128_pd(_mm256_castpd128_pd256(y01), y23, 1);
+            unsafe { _mm256_storeu_pd(ptr, yvec) };
+
+            x2 = xi1;
+            x1 = xj1;
+            y2 = yi1;
+            y1 = yj1;
+            ptr = unsafe { ptr.add(4) };
+        }
+
+        while (full_end as usize - ptr as usize) >= 2 * std::mem::size_of::<f64>() {
+            let xi = unsafe { *ptr };
+            let xj = unsafe { *ptr.add(1) };
+
+            let state1 = _mm256_setr_pd(x2, y2, x1, y1);
+            let coeff1 = _mm256_setr_pd(b.b2, b.a2, b.b2, b.a2);
+            let mut acc = _mm256_mul_pd(coeff1, state1);
+            let state2 = _mm256_setr_pd(x1, y1, xi, 0.0);
+            let coeff2 = _mm256_setr_pd(b.b1, b.a1, b.b1, 0.0);
+            acc = _mm256_fmadd_pd(coeff2, state2, acc);
+            let state3 = _mm256_setr_pd(xi, 0.0, xj, 0.0);
+            let coeff3 = _mm256_setr_pd(b.b0, 0.0, b.b0, 0.0);
+            acc = _mm256_fmadd_pd(coeff3, state3, acc);
+
+            let term1_i = _mm256_cvtsd_f64(acc);
+            let term2_i = _mm256_cvtsd_f64(_mm256_permute4x64_pd(acc, 0x55));
+            let yi = term1_i - term2_i;
+            let term1_j = _mm256_cvtsd_f64(_mm256_permute4x64_pd(acc, 0xAA));
+            let term2_j_partial = _mm256_cvtsd_f64(_mm256_permute4x64_pd(acc, 0xFF));
+            let term2_j = b.a1.mul_add(yi, term2_j_partial);
+            let yj = term1_j - term2_j;
+
+            unsafe {
+                *ptr = yi;
+                *ptr.add(1) = yj;
+                ptr = ptr.add(2);
+            }
+            x2 = xi;
+            x1 = xj;
+            y2 = yi;
+            y1 = yj;
+        }
+
+        while ptr < full_end {
+            let xi = unsafe { *ptr };
+            let term1 = b.b0.mul_add(xi, b.b1.mul_add(x1, b.b2 * x2));
+            let term2 = b.a1.mul_add(y1, b.a2 * y2);
+            let yi = term1 - term2;
+            unsafe {
+                *ptr = yi;
+                ptr = ptr.add(1);
+            }
+            x2 = x1;
+            x1 = xi;
+            y2 = y1;
+            y1 = yi;
+        }
+
+        b.x1 = x1;
+        b.x2 = x2;
+        b.y1 = y1;
+        b.y2 = y2;
     }
 
     /// Reset all internal state to zero while preserving coefficients.

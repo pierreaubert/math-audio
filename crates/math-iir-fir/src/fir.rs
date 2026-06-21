@@ -332,7 +332,16 @@ impl<T: FilterFloat> Fir<T> {
             } else {
                 self.compute_output()
             }
-            #[cfg(not(all(target_arch = "aarch64", target_feature = "neon")))]
+            #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+            if std::mem::size_of::<T>() == 8 {
+                unsafe { self.compute_output_f64_avx2(self.state_pos) }
+            } else {
+                self.compute_output()
+            }
+            #[cfg(not(any(
+                all(target_arch = "aarch64", target_feature = "neon"),
+                all(target_arch = "x86_64", target_feature = "avx2"),
+            )))]
             {
                 self.compute_output()
             }
@@ -378,6 +387,11 @@ impl<T: FilterFloat> Fir<T> {
     }
 
     fn process_block_symmetric(&mut self, samples: &mut [T]) {
+        #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+        if std::mem::size_of::<T>() == 8 {
+            return unsafe { self.process_block_symmetric_f64_avx2(samples) };
+        }
+
         let n_taps = self.coeffs.len();
 
         for sample in samples.iter_mut() {
@@ -466,6 +480,67 @@ impl<T: FilterFloat> Fir<T> {
         }
     }
 
+    /// x86_64 AVX2/FMA fast path for a single general (non-symmetric) output
+    /// sample when `T` is `f64`.
+    ///
+    /// # Safety
+    /// Must only be called when `T` is `f64` (checked by the caller via
+    /// `size_of::<T>() == 8`) and when AVX2/FMA are available on the host.
+    #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+    #[target_feature(enable = "avx2,fma")]
+    #[inline]
+    unsafe fn compute_output_f64_avx2(&self, state_pos: usize) -> T {
+        // SAFETY: caller verified `T` is `f64`. All pointer accesses are within
+        // the `coeffs`/`state` slices, and this function is compiled with
+        // AVX2/FMA enabled.
+        unsafe {
+            use std::arch::x86_64::*;
+
+            let coeffs_ptr = self.coeffs.as_ptr() as *const f64;
+            let state_ptr = self.state.as_ptr() as *const f64;
+            let n_taps = self.coeffs.len();
+
+            let mut acc0 = _mm256_setzero_pd();
+            let mut acc1 = _mm256_setzero_pd();
+            let mut i = 0;
+            while i + 7 < n_taps {
+                let c0 = _mm256_loadu_pd(coeffs_ptr.add(i));
+                let s0_raw = _mm256_loadu_pd(state_ptr.add(state_pos - i - 3));
+                let s0 = _mm256_permute4x64_pd(s0_raw, 0x1b);
+                acc0 = _mm256_fmadd_pd(c0, s0, acc0);
+
+                let c1 = _mm256_loadu_pd(coeffs_ptr.add(i + 4));
+                let s1_raw = _mm256_loadu_pd(state_ptr.add(state_pos - i - 7));
+                let s1 = _mm256_permute4x64_pd(s1_raw, 0x1b);
+                acc1 = _mm256_fmadd_pd(c1, s1, acc1);
+
+                i += 8;
+            }
+            let mut acc = _mm256_add_pd(acc0, acc1);
+
+            while i + 3 < n_taps {
+                let c = _mm256_loadu_pd(coeffs_ptr.add(i));
+                let s_raw = _mm256_loadu_pd(state_ptr.add(state_pos - i - 3));
+                let s = _mm256_permute4x64_pd(s_raw, 0x1b);
+                acc = _mm256_fmadd_pd(c, s, acc);
+                i += 4;
+            }
+
+            let hi = _mm256_extractf128_pd(acc, 1);
+            let lo = _mm256_castpd256_pd128(acc);
+            let sum128 = _mm_add_pd(lo, hi);
+            let sum64 = _mm_hadd_pd(sum128, sum128);
+            let mut y = _mm_cvtsd_f64(sum64);
+
+            while i < n_taps {
+                y = (*coeffs_ptr.add(i)).mul_add(*state_ptr.add(state_pos - i), y);
+                i += 1;
+            }
+
+            std::mem::transmute_copy::<f64, T>(&y)
+        }
+    }
+
     /// Computes one output sample exploiting symmetric coefficients.
     ///
     /// For a symmetric filter `h[i] == h[n_taps-1-i]` the convolution reduces to
@@ -485,6 +560,10 @@ impl<T: FilterFloat> Fir<T> {
         if std::mem::size_of::<T>() == 8 {
             return unsafe { self.compute_output_symmetric_f64(state_pos, start, half) };
         }
+        #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+        if std::mem::size_of::<T>() == 8 {
+            return unsafe { self.compute_output_symmetric_f64_avx2(state_pos, start, half) };
+        }
 
         // Pair the oldest and newest samples in the window; for symmetric
         // coefficients each pair shares one coefficient, halving the multiplies.
@@ -492,7 +571,11 @@ impl<T: FilterFloat> Fir<T> {
             .iter()
             .zip(self.state[state_pos - half + 1..=state_pos].iter().rev())
             .map(|(&old, &new)| old + new);
-        let mut y: T = self.coeffs[..half].iter().zip(pair_sums).map(|(&c, s)| c * s).sum();
+        let mut y: T = self.coeffs[..half]
+            .iter()
+            .zip(pair_sums)
+            .map(|(&c, s)| c * s)
+            .sum();
         if n_taps % 2 == 1 {
             y += self.coeffs[half] * self.state[start + half];
         }
@@ -566,6 +649,203 @@ impl<T: FilterFloat> Fir<T> {
             }
             // Caller guarantees T is f64, so the sizes match.
             std::mem::transmute_copy::<f64, T>(&y)
+        }
+    }
+
+    /// x86_64 AVX2/FMA fast path for [`compute_output_symmetric`] when `T` is `f64`.
+    ///
+    /// # Safety
+    /// Must only be called when `T` is `f64` (checked by the caller via
+    /// `size_of::<T>() == 8`) and when AVX2/FMA are available on the host.
+    #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+    #[target_feature(enable = "avx2,fma")]
+    #[inline]
+    unsafe fn compute_output_symmetric_f64_avx2(
+        &self,
+        state_pos: usize,
+        start: usize,
+        half: usize,
+    ) -> T {
+        // SAFETY: caller verified `T` is `f64`. All pointer accesses are within
+        // the `coeffs`/`state` slices, and this function is compiled with
+        // AVX2/FMA enabled.
+        unsafe {
+            use std::arch::x86_64::*;
+
+            let coeffs_ptr = self.coeffs.as_ptr() as *const f64;
+            let state_ptr = self.state.as_ptr() as *const f64;
+
+            // Use two independent vector accumulators and unroll by 4 pairs
+            // per iteration to keep the AVX2 FMA pipeline full on cores with
+            // multi-cycle FMA latency.
+            let mut acc0 = _mm256_setzero_pd();
+            let mut acc1 = _mm256_setzero_pd();
+            let mut i = 0;
+            while i + 7 < half {
+                let c0 = _mm256_loadu_pd(coeffs_ptr.add(i));
+                let old0 = _mm256_loadu_pd(state_ptr.add(start + i));
+                let new0_raw = _mm256_loadu_pd(state_ptr.add(state_pos - i - 3));
+                let new0 = _mm256_permute4x64_pd(new0_raw, 0x1b);
+                let pair0 = _mm256_add_pd(old0, new0);
+                acc0 = _mm256_fmadd_pd(c0, pair0, acc0);
+
+                let c1 = _mm256_loadu_pd(coeffs_ptr.add(i + 4));
+                let old1 = _mm256_loadu_pd(state_ptr.add(start + i + 4));
+                let new1_raw = _mm256_loadu_pd(state_ptr.add(state_pos - i - 7));
+                let new1 = _mm256_permute4x64_pd(new1_raw, 0x1b);
+                let pair1 = _mm256_add_pd(old1, new1);
+                acc1 = _mm256_fmadd_pd(c1, pair1, acc1);
+
+                i += 8;
+            }
+            let mut acc = _mm256_add_pd(acc0, acc1);
+
+            // Vector tail: process the remaining pairs (if any) with a single
+            // accumulator so the scalar loop only handles the last odd pair.
+            while i + 3 < half {
+                let c = _mm256_loadu_pd(coeffs_ptr.add(i));
+                let old = _mm256_loadu_pd(state_ptr.add(start + i));
+                let new_raw = _mm256_loadu_pd(state_ptr.add(state_pos - i - 3));
+                let new = _mm256_permute4x64_pd(new_raw, 0x1b);
+                let pair = _mm256_add_pd(old, new);
+                acc = _mm256_fmadd_pd(c, pair, acc);
+                i += 4;
+            }
+
+            let hi = _mm256_extractf128_pd(acc, 1);
+            let lo = _mm256_castpd256_pd128(acc);
+            let sum128 = _mm_add_pd(lo, hi);
+            let sum64 = _mm_hadd_pd(sum128, sum128);
+            let mut y = _mm_cvtsd_f64(sum64);
+
+            // Scalar tail for the final pair (kept as `mul_add` for one rounding).
+            while i < half {
+                let pair = *state_ptr.add(start + i) + *state_ptr.add(state_pos - i);
+                y = (*coeffs_ptr.add(i)).mul_add(pair, y);
+                i += 1;
+            }
+            let n_taps = self.coeffs.len();
+            if n_taps % 2 == 1 {
+                let c = *coeffs_ptr.add(half);
+                let s = *state_ptr.add(start + half);
+                y = c.mul_add(s, y);
+            }
+            // Caller guarantees T is f64, so the sizes match.
+            std::mem::transmute_copy::<f64, T>(&y)
+        }
+    }
+
+    /// x86_64 AVX2/FMA block fast path for symmetric FIR filters when `T` is `f64`.
+    ///
+    /// Processes four output samples in parallel, keeping four independent
+    /// vector accumulators so each coefficient broadcast is amortised over four
+    /// outputs and the inner loop avoids shuffles.
+    ///
+    /// # Safety
+    /// Must only be called when `T` is `f64` (checked by the caller via
+    /// `size_of::<T>() == 8`) and when AVX2/FMA are available on the host.
+    #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+    #[target_feature(enable = "avx2,fma")]
+    #[inline(never)]
+    unsafe fn process_block_symmetric_f64_avx2(&mut self, samples: &mut [T]) {
+        // SAFETY: caller verified `T` is `f64`. Pointer casts are therefore
+        // valid, all accesses stay within `coeffs`/`state`/`samples`, and this
+        // function is compiled with AVX2/FMA enabled.
+        unsafe {
+            use std::arch::x86_64::*;
+
+            let coeffs_ptr = self.coeffs.as_ptr() as *const f64;
+            let state_ptr = self.state.as_mut_ptr() as *mut f64;
+            let samples_ptr = samples.as_mut_ptr() as *mut f64;
+            let n_taps = self.coeffs.len();
+            let half = n_taps / 2;
+            let len = samples.len();
+            let mut pos = self.state_pos;
+            let mut i = 0;
+
+            // Main loop: handle four samples at once while the next four
+            // positions all fit in the upper half of the doubled buffer.
+            while i + 3 < len && pos + 3 < 2 * n_taps {
+                let x = _mm256_loadu_pd(samples_ptr.add(i));
+
+                // Duplicate the newly arrived samples so the upper half stays
+                // a contiguous window of the last `n_taps` samples.
+                _mm256_storeu_pd(state_ptr.add(pos), x);
+                _mm256_storeu_pd(state_ptr.add(pos - n_taps), x);
+
+                let mut acc0 = _mm256_setzero_pd();
+                let mut acc1 = _mm256_setzero_pd();
+                let mut acc2 = _mm256_setzero_pd();
+                let mut acc3 = _mm256_setzero_pd();
+                let mut k = 0;
+                while k + 3 < half {
+                    let c0 = _mm256_set1_pd(*coeffs_ptr.add(k));
+                    let old0 = _mm256_loadu_pd(state_ptr.add(pos - n_taps + 1 + k));
+                    let new0 = _mm256_loadu_pd(state_ptr.add(pos - k));
+                    let pair0 = _mm256_add_pd(old0, new0);
+                    acc0 = _mm256_fmadd_pd(c0, pair0, acc0);
+
+                    let c1 = _mm256_set1_pd(*coeffs_ptr.add(k + 1));
+                    let old1 = _mm256_loadu_pd(state_ptr.add(pos - n_taps + 2 + k));
+                    let new1 = _mm256_loadu_pd(state_ptr.add(pos - k - 1));
+                    let pair1 = _mm256_add_pd(old1, new1);
+                    acc1 = _mm256_fmadd_pd(c1, pair1, acc1);
+
+                    let c2 = _mm256_set1_pd(*coeffs_ptr.add(k + 2));
+                    let old2 = _mm256_loadu_pd(state_ptr.add(pos - n_taps + 3 + k));
+                    let new2 = _mm256_loadu_pd(state_ptr.add(pos - k - 2));
+                    let pair2 = _mm256_add_pd(old2, new2);
+                    acc2 = _mm256_fmadd_pd(c2, pair2, acc2);
+
+                    let c3 = _mm256_set1_pd(*coeffs_ptr.add(k + 3));
+                    let old3 = _mm256_loadu_pd(state_ptr.add(pos - n_taps + 4 + k));
+                    let new3 = _mm256_loadu_pd(state_ptr.add(pos - k - 3));
+                    let pair3 = _mm256_add_pd(old3, new3);
+                    acc3 = _mm256_fmadd_pd(c3, pair3, acc3);
+
+                    k += 4;
+                }
+                let mut acc = _mm256_add_pd(_mm256_add_pd(acc0, acc1), _mm256_add_pd(acc2, acc3));
+                while k < half {
+                    let c = _mm256_set1_pd(*coeffs_ptr.add(k));
+                    let old = _mm256_loadu_pd(state_ptr.add(pos - n_taps + 1 + k));
+                    let new = _mm256_loadu_pd(state_ptr.add(pos - k));
+                    let pair = _mm256_add_pd(old, new);
+                    acc = _mm256_fmadd_pd(c, pair, acc);
+                    k += 1;
+                }
+
+                if n_taps % 2 == 1 {
+                    let c = _mm256_set1_pd(*coeffs_ptr.add(half));
+                    let s = _mm256_loadu_pd(state_ptr.add(pos - half));
+                    acc = _mm256_fmadd_pd(c, s, acc);
+                }
+
+                _mm256_storeu_pd(samples_ptr.add(i), acc);
+
+                pos += 4;
+                if pos >= 2 * n_taps {
+                    pos -= n_taps;
+                }
+                i += 4;
+            }
+
+            // Scalar tail for any remaining samples and for crossing the
+            // circular-buffer wrap boundary one sample at a time.
+            while i < len {
+                let x = *samples_ptr.add(i);
+                *state_ptr.add(pos) = x;
+                *state_ptr.add(pos - n_taps) = x;
+                let y = self.compute_output_symmetric();
+                *samples_ptr.add(i) = std::mem::transmute_copy::<T, f64>(&y);
+                pos += 1;
+                if pos == 2 * n_taps {
+                    pos = n_taps;
+                }
+                i += 1;
+            }
+
+            self.state_pos = pos;
         }
     }
 
