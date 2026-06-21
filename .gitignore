@@ -63,3 +63,10 @@ CTAGS
 .idea
 .qwen
 .tokensave
+.evo/
+__pycache__/
+*.pyc
+.pytest_cache/
+node_modules/
+dist/
+build/

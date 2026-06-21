@@ -36,6 +36,10 @@ harness = false
 name = "fir_design_bench"
 harness = false
 
+[[bin]]
+name = "filter_bench"
+path = "src/bin/filter_bench.rs"
+
 [lib]
 name = "math_audio_iir_fir"
 path = "src/mod.rs"
