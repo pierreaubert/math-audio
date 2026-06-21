@@ -415,6 +415,14 @@ impl<T: FilterFloat> Fir<T> {
         let start = state_pos - n_taps + 1;
         let half = n_taps / 2;
 
+        // On aarch64 use NEON FMA to keep the symmetric dot product in vector
+        // registers (one rounding, one instruction per pair). FilterFloat is only
+        // implemented for f32/f64, so size == 8 identifies f64 at runtime.
+        #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
+        if std::mem::size_of::<T>() == 8 {
+            return unsafe { self.compute_output_symmetric_f64(state_pos, start, half) };
+        }
+
         // Pair the oldest and newest samples in the window; for symmetric
         // coefficients each pair shares one coefficient, halving the multiplies.
         let pair_sums = self.state[start..start + half]
@@ -426,6 +434,53 @@ impl<T: FilterFloat> Fir<T> {
             y += self.coeffs[half] * self.state[start + half];
         }
         y
+    }
+
+    /// aarch64 NEON fast path for [`compute_output_symmetric`] when `T` is `f64`.
+    ///
+    /// # Safety
+    /// Must only be called when `T` is `f64` (checked by the caller via
+    /// `size_of::<T>() == 8`).
+    #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
+    #[inline(always)]
+    unsafe fn compute_output_symmetric_f64(
+        &self,
+        state_pos: usize,
+        start: usize,
+        half: usize,
+    ) -> T {
+        // SAFETY: caller verified `T` is `f64`. All pointer accesses are within
+        // the `coeffs`/`state` slices, and NEON is available on this target.
+        unsafe {
+            use std::arch::aarch64::*;
+
+            let coeffs_ptr = self.coeffs.as_ptr() as *const f64;
+            let state_ptr = self.state.as_ptr() as *const f64;
+            let mut acc = vdupq_n_f64(0.0);
+            let mut i = 0;
+            while i + 1 < half {
+                let c = vld1q_f64(coeffs_ptr.add(i));
+                let old = vld1q_f64(state_ptr.add(start + i));
+                let new = vld1q_f64(state_ptr.add(state_pos - i - 1));
+                let pair = vaddq_f64(old, vextq_f64(new, new, 1));
+                acc = vfmaq_f64(acc, c, pair);
+                i += 2;
+            }
+            let mut y = vgetq_lane_f64(acc, 0) + vgetq_lane_f64(acc, 1);
+            while i < half {
+                let pair = *state_ptr.add(start + i) + *state_ptr.add(state_pos - i);
+                y = (*coeffs_ptr.add(i)).mul_add(pair, y);
+                i += 1;
+            }
+            let n_taps = self.coeffs.len();
+            if n_taps % 2 == 1 {
+                let c = *coeffs_ptr.add(half);
+                let s = *state_ptr.add(start + half);
+                y = c.mul_add(s, y);
+            }
+            // Caller guarantees T is f64, so the sizes match.
+            std::mem::transmute_copy::<f64, T>(&y)
+        }
     }
 
     /// Returns true if the coefficient vector is symmetric (within floating-point
