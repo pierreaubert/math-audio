@@ -341,6 +341,14 @@ impl<T: FilterFloat> Fir<T> {
 
     /// Processes a block of audio samples in-place.
     pub fn process_block(&mut self, samples: &mut [T]) {
+        if self.symmetric {
+            self.process_block_symmetric(samples);
+        } else {
+            self.process_block_general(samples);
+        }
+    }
+
+    fn process_block_general(&mut self, samples: &mut [T]) {
         let n_taps = self.coeffs.len();
 
         for sample in samples.iter_mut() {
@@ -350,11 +358,27 @@ impl<T: FilterFloat> Fir<T> {
             self.state[self.state_pos - n_taps] = x;
 
             // Compute output using convolution
-            *sample = if self.symmetric {
-                self.compute_output_symmetric()
-            } else {
-                self.compute_output()
-            };
+            *sample = self.compute_output();
+
+            // Update circular buffer position
+            self.state_pos += 1;
+            if self.state_pos == 2 * n_taps {
+                self.state_pos = n_taps;
+            }
+        }
+    }
+
+    fn process_block_symmetric(&mut self, samples: &mut [T]) {
+        let n_taps = self.coeffs.len();
+
+        for sample in samples.iter_mut() {
+            let x = *sample;
+            // Store input sample in circular buffer and its duplicate
+            self.state[self.state_pos] = x;
+            self.state[self.state_pos - n_taps] = x;
+
+            // Compute output using convolution
+            *sample = self.compute_output_symmetric();
 
             // Update circular buffer position
             self.state_pos += 1;
