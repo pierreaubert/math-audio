@@ -456,8 +456,30 @@ impl<T: FilterFloat> Fir<T> {
 
             let coeffs_ptr = self.coeffs.as_ptr() as *const f64;
             let state_ptr = self.state.as_ptr() as *const f64;
-            let mut acc = vdupq_n_f64(0.0);
+
+            // Use two independent vector accumulators and unroll by 4 pairs
+            // per iteration to keep the NEON FMA pipeline full on cores with
+            // multi-cycle FMA latency.
+            let mut acc0 = vdupq_n_f64(0.0);
+            let mut acc1 = vdupq_n_f64(0.0);
             let mut i = 0;
+            while i + 3 < half {
+                let c0 = vld1q_f64(coeffs_ptr.add(i));
+                let c1 = vld1q_f64(coeffs_ptr.add(i + 2));
+                let old0 = vld1q_f64(state_ptr.add(start + i));
+                let old1 = vld1q_f64(state_ptr.add(start + i + 2));
+                let new0 = vld1q_f64(state_ptr.add(state_pos - i - 1));
+                let new1 = vld1q_f64(state_ptr.add(state_pos - i - 3));
+                let pair0 = vaddq_f64(old0, vextq_f64(new0, new0, 1));
+                let pair1 = vaddq_f64(old1, vextq_f64(new1, new1, 1));
+                acc0 = vfmaq_f64(acc0, c0, pair0);
+                acc1 = vfmaq_f64(acc1, c1, pair1);
+                i += 4;
+            }
+            let mut acc = vaddq_f64(acc0, acc1);
+
+            // Vector tail: process the remaining pair (if any) with a single
+            // accumulator so the scalar loop only handles the last odd pair.
             while i + 1 < half {
                 let c = vld1q_f64(coeffs_ptr.add(i));
                 let old = vld1q_f64(state_ptr.add(start + i));
@@ -467,6 +489,8 @@ impl<T: FilterFloat> Fir<T> {
                 i += 2;
             }
             let mut y = vgetq_lane_f64(acc, 0) + vgetq_lane_f64(acc, 1);
+
+            // Scalar tail for the final pair (kept as `mul_add` for one rounding).
             while i < half {
                 let pair = *state_ptr.add(start + i) + *state_ptr.add(state_pos - i);
                 y = (*coeffs_ptr.add(i)).mul_add(pair, y);
