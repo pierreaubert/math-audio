@@ -48,6 +48,9 @@ pub struct Fir<T: FilterFloat = f64> {
     state: Vec<T>,
     /// Current position in the circular buffer
     state_pos: usize,
+    /// Whether the coefficients are symmetric, enabling the half-multiply fast path.
+    #[serde(skip)]
+    symmetric: bool,
 }
 
 impl<T: FilterFloat> Fir<T> {
@@ -66,6 +69,7 @@ impl<T: FilterFloat> Fir<T> {
         debug_assert!(srate > T::zero(), "Sample rate must be positive");
 
         let n_taps = coeffs.len();
+        let symmetric = Self::coeffs_are_symmetric(&coeffs);
         Fir {
             filter_type: FirFilterType::Custom,
             coeffs,
@@ -76,6 +80,7 @@ impl<T: FilterFloat> Fir<T> {
             kaiser_beta: T::zero(),
             state: vec![T::zero(); 2 * n_taps],
             state_pos: n_taps,
+            symmetric,
         }
     }
 
@@ -105,6 +110,7 @@ impl<T: FilterFloat> Fir<T> {
 
         let coeffs = design_fir_lowpass(n_taps, cutoff, srate, window, kaiser_beta);
         let n = coeffs.len();
+        let symmetric = Self::coeffs_are_symmetric(&coeffs);
         Fir {
             filter_type: FirFilterType::Lowpass,
             coeffs,
@@ -115,6 +121,7 @@ impl<T: FilterFloat> Fir<T> {
             kaiser_beta,
             state: vec![T::zero(); 2 * n],
             state_pos: n,
+            symmetric,
         }
     }
 
@@ -150,6 +157,7 @@ impl<T: FilterFloat> Fir<T> {
 
         let coeffs = design_fir_highpass(n_taps, cutoff, srate, window, kaiser_beta);
         let n = coeffs.len();
+        let symmetric = Self::coeffs_are_symmetric(&coeffs);
         Fir {
             filter_type: FirFilterType::Highpass,
             coeffs,
@@ -160,6 +168,7 @@ impl<T: FilterFloat> Fir<T> {
             kaiser_beta,
             state: vec![T::zero(); 2 * n],
             state_pos: n,
+            symmetric,
         }
     }
 
@@ -211,6 +220,7 @@ impl<T: FilterFloat> Fir<T> {
 
         let coeffs = design_fir_bandpass(n_taps, freq_low, freq_high, srate, window, kaiser_beta);
         let n = coeffs.len();
+        let symmetric = Self::coeffs_are_symmetric(&coeffs);
         Fir {
             filter_type: FirFilterType::Bandpass,
             coeffs,
@@ -221,6 +231,7 @@ impl<T: FilterFloat> Fir<T> {
             kaiser_beta,
             state: vec![T::zero(); 2 * n],
             state_pos: n,
+            symmetric,
         }
     }
 
@@ -272,6 +283,7 @@ impl<T: FilterFloat> Fir<T> {
 
         let coeffs = design_fir_bandstop(n_taps, freq_low, freq_high, srate, window, kaiser_beta);
         let n = coeffs.len();
+        let symmetric = Self::coeffs_are_symmetric(&coeffs);
         Fir {
             filter_type: FirFilterType::Bandstop,
             coeffs,
@@ -282,6 +294,7 @@ impl<T: FilterFloat> Fir<T> {
             kaiser_beta,
             state: vec![T::zero(); 2 * n],
             state_pos: n,
+            symmetric,
         }
     }
 
@@ -310,7 +323,11 @@ impl<T: FilterFloat> Fir<T> {
         self.state[self.state_pos - n_taps] = x;
 
         // Compute output using convolution
-        let y = self.compute_output();
+        let y = if self.symmetric {
+            self.compute_output_symmetric()
+        } else {
+            self.compute_output()
+        };
 
         // Update circular buffer position (kept in the upper half of the
         // doubled state buffer).
@@ -333,7 +350,11 @@ impl<T: FilterFloat> Fir<T> {
             self.state[self.state_pos - n_taps] = x;
 
             // Compute output using convolution
-            *sample = self.compute_output();
+            *sample = if self.symmetric {
+                self.compute_output_symmetric()
+            } else {
+                self.compute_output()
+            };
 
             // Update circular buffer position
             self.state_pos += 1;
@@ -356,6 +377,46 @@ impl<T: FilterFloat> Fir<T> {
             .zip(self.state[start..=state_pos].iter().rev())
             .map(|(&c, &s)| c * s)
             .sum()
+    }
+
+    /// Computes one output sample exploiting symmetric coefficients.
+    ///
+    /// For a symmetric filter `h[i] == h[n_taps-1-i]` the convolution reduces to
+    /// roughly half the multiplies: each coefficient pairs the newest and oldest
+    /// samples in the current window.
+    #[inline(always)]
+    fn compute_output_symmetric(&self) -> T {
+        let state_pos = self.state_pos;
+        let n_taps = self.coeffs.len();
+        let start = state_pos - n_taps + 1;
+        let half = n_taps / 2;
+
+        let mut y = T::zero();
+        for i in 0..half {
+            y += self.coeffs[i] * (self.state[state_pos - i] + self.state[start + i]);
+        }
+        if n_taps % 2 == 1 {
+            y += self.coeffs[half] * self.state[start + half];
+        }
+        y
+    }
+
+    /// Returns true if the coefficient vector is symmetric (within floating-point
+    /// rounding tolerance). The windowed-sinc designs are mathematically symmetric
+    /// but can differ by a few ULPs after normalization, so exact equality is too
+    /// strict.
+    fn coeffs_are_symmetric(coeffs: &[T]) -> bool {
+        let n = coeffs.len();
+        let eps = T::epsilon();
+        for i in 0..n / 2 {
+            let a = coeffs[i];
+            let b = coeffs[n - 1 - i];
+            let scale = a.abs().max(b.abs()).max(T::one());
+            if (a - b).abs() > eps * scale {
+                return false;
+            }
+        }
+        true
     }
 
     /// Calculates the filter's magnitude response at a single frequency `f`.

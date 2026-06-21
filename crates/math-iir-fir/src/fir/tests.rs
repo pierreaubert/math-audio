@@ -280,6 +280,15 @@ mod fir_tests {
     }
 
     #[test]
+    fn test_fir_symmetry_flag_detected() {
+        let fir = Fir::lowpass(101, 1000.0, 48000.0, WindowType::Hamming, 0.0);
+        assert!(fir.symmetric, "Hamming lowpass should be detected as symmetric");
+
+        let asym = Fir::new_custom(vec![0.1, 0.2, 0.3, 0.4], 48000.0);
+        assert!(!asym.symmetric, "Asymmetric coefficients should not be detected as symmetric");
+    }
+
+    #[test]
     fn test_fir_lowpass_cutoff_attenuation() {
         let cutoff = 1000.0;
         let fir = Fir::lowpass(101, cutoff, 48000.0, WindowType::Blackman, 0.0);
