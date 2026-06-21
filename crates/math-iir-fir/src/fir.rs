@@ -459,21 +459,20 @@ impl<T: FilterFloat> Fir<T> {
 
             // Use two independent vector accumulators and unroll by 4 pairs
             // per iteration to keep the NEON FMA pipeline full on cores with
-            // multi-cycle FMA latency.
+            // multi-cycle FMA latency. Load consecutive coefficient/old-state
+            // pairs with x2 loads to reduce load-unit pressure.
             let mut acc0 = vdupq_n_f64(0.0);
             let mut acc1 = vdupq_n_f64(0.0);
             let mut i = 0;
             while i + 3 < half {
-                let c0 = vld1q_f64(coeffs_ptr.add(i));
-                let c1 = vld1q_f64(coeffs_ptr.add(i + 2));
-                let old0 = vld1q_f64(state_ptr.add(start + i));
-                let old1 = vld1q_f64(state_ptr.add(start + i + 2));
+                let c = vld1q_f64_x2(coeffs_ptr.add(i));
+                let old = vld1q_f64_x2(state_ptr.add(start + i));
                 let new0 = vld1q_f64(state_ptr.add(state_pos - i - 1));
                 let new1 = vld1q_f64(state_ptr.add(state_pos - i - 3));
-                let pair0 = vaddq_f64(old0, vextq_f64(new0, new0, 1));
-                let pair1 = vaddq_f64(old1, vextq_f64(new1, new1, 1));
-                acc0 = vfmaq_f64(acc0, c0, pair0);
-                acc1 = vfmaq_f64(acc1, c1, pair1);
+                let pair0 = vaddq_f64(old.0, vextq_f64(new0, new0, 1));
+                let pair1 = vaddq_f64(old.1, vextq_f64(new1, new1, 1));
+                acc0 = vfmaq_f64(acc0, c.0, pair0);
+                acc1 = vfmaq_f64(acc1, c.1, pair1);
                 i += 4;
             }
             let mut acc = vaddq_f64(acc0, acc1);
