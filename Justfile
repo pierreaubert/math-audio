@@ -18,13 +18,18 @@ ntest:
 	cargo nextest run --release --no-fail-fast --workspace --lib
 
 # ----------------------------------------------------------------------
-# FORMAT
+# FORMAT & LINT
 # ----------------------------------------------------------------------
 
 alias format := fmt
 
 fmt:
 	cargo fmt --all
+
+
+lint:
+	cargo clippy --all --features plotly -- -D warnings
+
 
 # ----------------------------------------------------------------------
 # PROD

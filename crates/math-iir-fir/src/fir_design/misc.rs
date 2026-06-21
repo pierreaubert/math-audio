@@ -76,4 +76,3 @@ pub(super) fn interpolate_log_space(
 
     result
 }
-

@@ -1,4 +1,4 @@
-use criterion::{criterion_group, criterion_main, Criterion};
+use criterion::{Criterion, criterion_group, criterion_main};
 use math_rir::{analyze_iso3382, analyze_iso3382_octaves, analyze_iso3382_third_octaves};
 use std::hint::black_box;
 

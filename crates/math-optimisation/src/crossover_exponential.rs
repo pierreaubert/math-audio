@@ -9,7 +9,13 @@ pub(crate) fn exponential_crossover<R: Rng + ?Sized>(
     rng: &mut R,
 ) -> Array1<f64> {
     let mut trial = target.clone();
-    exponential_crossover_into(trial.as_slice_mut().expect("contiguous"), target.as_slice().expect("contiguous"), mutant.as_slice().expect("contiguous"), cr, rng);
+    exponential_crossover_into(
+        trial.as_slice_mut().expect("contiguous"),
+        target.as_slice().expect("contiguous"),
+        mutant.as_slice().expect("contiguous"),
+        cr,
+        rng,
+    );
     trial
 }
 

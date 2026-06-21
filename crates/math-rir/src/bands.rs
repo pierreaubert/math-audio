@@ -114,7 +114,12 @@ impl BandpassWorkspace {
             return &self.output[..rir.len()];
         }
 
-        let key: CoeffKey = (f_low.to_bits(), f_high.to_bits(), sample_rate.to_bits(), order);
+        let key: CoeffKey = (
+            f_low.to_bits(),
+            f_high.to_bits(),
+            sample_rate.to_bits(),
+            order,
+        );
         let coeffs = self.coeff_cache.entry(key).or_insert_with(|| {
             let mut sections = filtfilt::peq_to_coefficients(
                 &math_audio_iir_fir::peq_butterworth_highpass(order, f_low, sample_rate),

@@ -1,5 +1,7 @@
-use criterion::{criterion_group, criterion_main, Criterion};
-use math_audio_iir_fir::{FirDesignConfig, FirPhase, WindowType, generate_fir_from_response, generate_kirkeby_correction};
+use criterion::{Criterion, criterion_group, criterion_main};
+use math_audio_iir_fir::{
+    FirDesignConfig, FirPhase, WindowType, generate_fir_from_response, generate_kirkeby_correction,
+};
 use std::hint::black_box;
 
 fn bench_generate_fir_from_response(c: &mut Criterion) {
@@ -17,7 +19,9 @@ fn bench_generate_fir_from_response(c: &mut Criterion) {
         pre_ringing: None,
     };
     c.bench_function("generate_fir_from_response_512", |b| {
-        b.iter(|| generate_fir_from_response(black_box(&freqs), black_box(&mags), black_box(&config)))
+        b.iter(|| {
+            generate_fir_from_response(black_box(&freqs), black_box(&mags), black_box(&config))
+        })
     });
 }
 
@@ -49,5 +53,9 @@ fn bench_generate_kirkeby_correction(c: &mut Criterion) {
     });
 }
 
-criterion_group!(benches, bench_generate_fir_from_response, bench_generate_kirkeby_correction);
+criterion_group!(
+    benches,
+    bench_generate_fir_from_response,
+    bench_generate_kirkeby_correction
+);
 criterion_main!(benches);

@@ -1,5 +1,5 @@
-use criterion::{criterion_group, criterion_main, Criterion};
-use math_audio_optimisation::{cma_es, CmaEsConfig};
+use criterion::{Criterion, criterion_group, criterion_main};
+use math_audio_optimisation::{CmaEsConfig, cma_es};
 use ndarray::Array1;
 use std::hint::black_box;
 

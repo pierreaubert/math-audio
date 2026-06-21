@@ -114,11 +114,7 @@ impl DecayCurve {
         let inv_total = 1.0 / total;
         for i in 0..n {
             let r = ws.energy[i] * inv_total;
-            ws.samples[i] = if r <= 0.0 {
-                -300.0
-            } else {
-                10.0 * r.log10()
-            };
+            ws.samples[i] = if r <= 0.0 { -300.0 } else { 10.0 * r.log10() };
         }
 
         Self {

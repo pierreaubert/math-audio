@@ -248,10 +248,11 @@ impl AudioFeatureExtractor {
         }
 
         std::thread::scope(|s| {
-            let child_tempo =
-                s.spawn(|| self.tempo_features.compute_tempo(samples, sample_rate));
-            let child_spectral =
-                s.spawn(|| self.spectral_features.compute_spectral_features(samples, sample_rate));
+            let child_tempo = s.spawn(|| self.tempo_features.compute_tempo(samples, sample_rate));
+            let child_spectral = s.spawn(|| {
+                self.spectral_features
+                    .compute_spectral_features(samples, sample_rate)
+            });
             let child_zcr = s.spawn(|| zcr::compute_zcr(samples));
             let child_loudness = s.spawn(|| loudness::compute_loudness(samples));
             let child_chroma = s.spawn(|| chroma::compute_chroma_features(samples, sample_rate));

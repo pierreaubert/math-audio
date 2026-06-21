@@ -409,7 +409,7 @@ fn test_gate_state_boundary_close_threshold() {
     core.set_expand_params(3.0, 0.0, 40.0);
 
     let threshold = -20.0;
-    let close_th = threshold - 3.0; // -23.0
+    let _close_th = threshold - 3.0; // -23.0
     let ratio = 4.0;
     let knee = 0.0;
 

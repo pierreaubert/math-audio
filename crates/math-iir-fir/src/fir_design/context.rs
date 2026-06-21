@@ -56,12 +56,7 @@ impl FirDesignContext {
     }
 
     /// Ensure internal buffers can hold the requested sizes.
-    pub fn ensure_capacity(
-        &mut self,
-        complex_len: usize,
-        real_len: usize,
-        window_len: usize,
-    ) {
+    pub fn ensure_capacity(&mut self, complex_len: usize, real_len: usize, window_len: usize) {
         if self.complex_buf.len() < complex_len {
             self.complex_buf.resize(complex_len, Complex64::zero());
         }
@@ -339,11 +334,7 @@ impl FirDesignContext {
     }
 
     /// Convert a complex spectrum to a real impulse response via IFFT.
-    fn spectrum_to_impulse_response(
-        &mut self,
-        spectrum: &[Complex64],
-        fft_size: usize,
-    ) -> &[f64] {
+    fn spectrum_to_impulse_response(&mut self, spectrum: &[Complex64], fft_size: usize) -> &[f64] {
         let n_bins = spectrum.len();
         self.ensure_capacity(fft_size, fft_size, 0);
         self.complex_buf[..fft_size].fill(Complex64::zero());
@@ -354,8 +345,7 @@ impl FirDesignContext {
             self.complex_buf[fft_size - i] = s.conj();
         }
         if fft_size.is_multiple_of(2) {
-            self.complex_buf[n_bins - 1] =
-                Complex64::new(spectrum[n_bins - 1].norm(), 0.0);
+            self.complex_buf[n_bins - 1] = Complex64::new(spectrum[n_bins - 1].norm(), 0.0);
         }
 
         let ifft = self.planner.plan_fft_inverse(fft_size);
@@ -369,10 +359,7 @@ impl FirDesignContext {
     }
 
     /// Compute minimum phase from magnitude response using Hilbert transform.
-    fn compute_minimum_phase_from_magnitude(
-        &mut self,
-        magnitude_db: &[f64],
-    ) -> Vec<f64> {
+    fn compute_minimum_phase_from_magnitude(&mut self, magnitude_db: &[f64]) -> Vec<f64> {
         let n = magnitude_db.len();
         if n == 0 {
             return Vec::new();

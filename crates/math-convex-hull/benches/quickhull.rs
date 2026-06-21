@@ -1,4 +1,4 @@
-use criterion::{criterion_group, criterion_main, Criterion};
+use criterion::{Criterion, criterion_group, criterion_main};
 use math_convex_hull::{ConvexHull3D, Vertex};
 use std::hint::black_box;
 

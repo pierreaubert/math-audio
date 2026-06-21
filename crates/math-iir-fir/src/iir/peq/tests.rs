@@ -15,20 +15,6 @@ use super::misc::enforce_rme_room_filter_constraints;
 use super::misc::filter_peqs_by_gain;
 use super::misc::get_filter_priority;
 use super::misc::k_weighting_db;
-use super::peq_butterworth_highpass;
-use super::peq_butterworth_lowpass;
-use super::peq_butterworth_q;
-use super::peq_equal;
-use super::peq_format_apo;
-use super::peq_format_aupreset;
-use super::peq_format_rme_channel;
-use super::peq_format_rme_room;
-use super::peq_linkwitzriley_highpass;
-use super::peq_linkwitzriley_lowpass;
-use super::peq_linkwitzriley_q;
-use super::peq_loudness_gain;
-use super::peq_preamp_gain;
-use super::peq_spl;
 
 #[cfg(test)]
 mod peq_tests {

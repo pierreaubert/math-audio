@@ -8,23 +8,25 @@ pub(super) fn linear_fit(xs: &[f64], ys: &[f64]) -> Option<(f64, f64, f64)> {
 }
 
 /// Linear fit where `x` is `(i_start + i) * dt` — avoids allocating the `x` vector.
-pub(super) fn linear_fit_indexed(
-    ys: &[f64],
-    i_start: usize,
-    dt: f64,
-) -> Option<(f64, f64, f64)> {
+pub(super) fn linear_fit_indexed(ys: &[f64], i_start: usize, dt: f64) -> Option<(f64, f64, f64)> {
     let n = ys.len();
     if n < 2 {
         return None;
     }
     let n_f = n as f64;
     let sx: f64 = (0..n).map(|i| (i_start + i) as f64 * dt).sum();
-    let sxx: f64 = (0..n).map(|i| {
-        let x = (i_start + i) as f64 * dt;
-        x * x
-    }).sum();
+    let sxx: f64 = (0..n)
+        .map(|i| {
+            let x = (i_start + i) as f64 * dt;
+            x * x
+        })
+        .sum();
     let sy: f64 = ys.iter().sum();
-    let sxy: f64 = ys.iter().enumerate().map(|(i, &y)| (i_start + i) as f64 * dt * y).sum();
+    let sxy: f64 = ys
+        .iter()
+        .enumerate()
+        .map(|(i, &y)| (i_start + i) as f64 * dt * y)
+        .sum();
     let syy: f64 = ys.iter().map(|&y| y * y).sum();
 
     let denom = n_f * sxx - sx * sx;

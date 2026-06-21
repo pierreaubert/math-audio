@@ -466,7 +466,12 @@ where
                         }
                         Strategy::CurrentToBest1Bin | Strategy::CurrentToBest1Exp => {
                             mutant_current_to_best1_into(
-                                &mut scratch, i, &pop, best_idx, f, &mut local_rng,
+                                &mut scratch,
+                                i,
+                                &pop,
+                                best_idx,
+                                f,
+                                &mut local_rng,
                             );
                         }
                         Strategy::Best2Bin | Strategy::Best2Exp => {
@@ -474,7 +479,12 @@ where
                         }
                         Strategy::RandToBest1Bin | Strategy::RandToBest1Exp => {
                             mutant_rand_to_best1_into(
-                                &mut scratch, i, &pop, best_idx, f, &mut local_rng,
+                                &mut scratch,
+                                i,
+                                &pop,
+                                best_idx,
+                                f,
+                                &mut local_rng,
                             );
                         }
                         Strategy::AdaptiveBin | Strategy::AdaptiveExp => {

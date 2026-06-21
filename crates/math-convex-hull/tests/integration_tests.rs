@@ -83,7 +83,7 @@ fn test_cube() {
     // A cube should have 12 triangular faces (2 per square face)
     // Note: due to numerical precision and triangulation choices, we might get 12-14 faces
     assert!(
-        num_faces >= 12 && num_faces <= 14,
+        (12..=14).contains(&num_faces),
         "A cube should have approximately 12 triangular faces, got {}",
         num_faces
     );
@@ -95,7 +95,7 @@ fn test_octahedron() {
     let (num_faces, _) = run_test_with_visualization("octahedron", vertices, 8);
     // Octahedron has 8 faces, but numerical precision might cause slight variations
     assert!(
-        num_faces >= 8 && num_faces <= 12,
+        (8..=12).contains(&num_faces),
         "An octahedron should have approximately 8 faces, got {}",
         num_faces
     );
@@ -107,7 +107,7 @@ fn test_icosahedron() {
     let (num_faces, _) = run_test_with_visualization("icosahedron", vertices, 20);
     // Icosahedron has 20 faces, but numerical precision might cause variations
     assert!(
-        num_faces >= 20 && num_faces <= 32,
+        (20..=32).contains(&num_faces),
         "An icosahedron should have approximately 20 faces, got {}",
         num_faces
     );
@@ -230,18 +230,20 @@ fn test_all_tests_summary() {
     println!("CONVEX HULL TEST SUITE SUMMARY");
     println!("========================================");
 
+    type VertexGenerator = Box<dyn Fn() -> Vec<Vertex>>;
+
     // Use a function to generate test cases instead of storing them in a tuple
-    let test_cases: Vec<(&str, Box<dyn Fn() -> Vec<Vertex>>)> = vec![
-        ("Tetrahedron", Box::new(|| testdata::tetrahedron_vertices())),
+    let test_cases: Vec<(&str, VertexGenerator)> = vec![
+        ("Tetrahedron", Box::new(testdata::tetrahedron_vertices)),
         ("Cube", Box::new(|| testdata::cube_vertices(2.0))),
-        ("Octahedron", Box::new(|| testdata::octahedron_vertices())),
-        ("Icosahedron", Box::new(|| testdata::icosahedron_vertices())),
+        ("Octahedron", Box::new(testdata::octahedron_vertices)),
+        ("Icosahedron", Box::new(testdata::icosahedron_vertices)),
         (
             "Random Sphere 936",
             Box::new(|| testdata::random_sphere_points(936, 1.0)),
         ),
-        ("T-Design 180", Box::new(|| testdata::tdesign_180_sphere())),
-        ("T-Design 840", Box::new(|| testdata::tdesign_840_sphere())),
+        ("T-Design 180", Box::new(testdata::tdesign_180_sphere)),
+        ("T-Design 840", Box::new(testdata::tdesign_840_sphere)),
     ];
 
     let mut success_count = 0;
@@ -339,12 +341,12 @@ fn test_process_all_obj_files() {
                 let vertex_count = vertices.len();
 
                 // Check if we should skip due to vertex count
-                if let Some(max) = max_vertices {
-                    if vertex_count > max {
-                        println!("{} vertices (SKIPPED - too many vertices)", vertex_count);
-                        skipped_count += 1;
-                        continue;
-                    }
+                if let Some(max) = max_vertices
+                    && vertex_count > max
+                {
+                    println!("{} vertices (SKIPPED - too many vertices)", vertex_count);
+                    skipped_count += 1;
+                    continue;
                 }
 
                 match ConvexHull3D::build(&vertices) {

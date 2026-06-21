@@ -185,7 +185,10 @@ pub fn analyze_iso3382_bands_with_contexts(
                 return None;
             }
             let filtered = ctx.bp.process(rir, fc, width, sample_rate, order);
-            Some((fc, compute_iso3382_metrics(filtered, sample_rate, &mut ctx.decay)))
+            Some((
+                fc,
+                compute_iso3382_metrics(filtered, sample_rate, &mut ctx.decay),
+            ))
         })
         .collect()
 }

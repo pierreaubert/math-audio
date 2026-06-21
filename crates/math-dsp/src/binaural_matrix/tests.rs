@@ -242,8 +242,14 @@ fn weighted_inverse_identity_with_weights() {
         Complex64::new(0.0, 0.0),
         Complex64::new(1.0, 0.0),
     ];
-    let solved =
-        solve_weighted_regularized_inverse_bin(&[h.clone()], &[2.0], &target, 1e-9, None).unwrap();
+    let solved = solve_weighted_regularized_inverse_bin(
+        std::slice::from_ref(&h),
+        &[2.0],
+        &target,
+        1e-9,
+        None,
+    )
+    .unwrap();
     let f = DMatrix::from_row_slice(2, 2, &solved.values);
     let delivered = h.as_matrix() * f;
     assert!((delivered[(0, 0)].re - 1.0).abs() < 1e-6);
@@ -289,8 +295,14 @@ fn weighted_inverse_unweighted_matches_regularized() {
         Complex64::new(0.0, 0.0),
         Complex64::new(1.0, 0.0),
     ];
-    let weighted =
-        solve_weighted_regularized_inverse_bin(&[h.clone()], &[1.0], &target, 1e-9, None).unwrap();
+    let weighted = solve_weighted_regularized_inverse_bin(
+        std::slice::from_ref(&h),
+        &[1.0],
+        &target,
+        1e-9,
+        None,
+    )
+    .unwrap();
     let regularized = solve_regularized_inverse_bin(&[h], &target, 1e-9, None).unwrap();
     for (a, b) in weighted.values.iter().zip(regularized.values.iter()) {
         assert!(

@@ -1,4 +1,4 @@
-use criterion::{criterion_group, criterion_main, Criterion};
+use criterion::{Criterion, criterion_group, criterion_main};
 use math_audio_test_functions::functions::{ackley, levy, rastrigin, rosenbrock};
 use ndarray::Array1;
 use std::hint::black_box;
@@ -23,5 +23,11 @@ fn bench_levy(c: &mut Criterion) {
     c.bench_function("levy_30d", |b| b.iter(|| levy(black_box(&x))));
 }
 
-criterion_group!(benches, bench_rosenbrock, bench_rastrigin, bench_ackley, bench_levy);
+criterion_group!(
+    benches,
+    bench_rosenbrock,
+    bench_rastrigin,
+    bench_ackley,
+    bench_levy
+);
 criterion_main!(benches);

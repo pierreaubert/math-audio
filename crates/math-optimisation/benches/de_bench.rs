@@ -1,5 +1,5 @@
-use criterion::{criterion_group, criterion_main, Criterion};
-use math_audio_optimisation::{differential_evolution, DEConfigBuilder};
+use criterion::{Criterion, criterion_group, criterion_main};
+use math_audio_optimisation::{DEConfigBuilder, differential_evolution};
 use ndarray::Array1;
 use std::hint::black_box;
 
@@ -19,7 +19,11 @@ fn bench_de_sphere(c: &mut Criterion) {
                 black_box(&objective),
                 black_box(&bounds),
                 // DEConfig is not Clone; move a fresh copy each iteration via builder.
-                DEConfigBuilder::new().maxiter(100).seed(42).build().unwrap(),
+                DEConfigBuilder::new()
+                    .maxiter(100)
+                    .seed(42)
+                    .build()
+                    .unwrap(),
             )
             .unwrap()
         })

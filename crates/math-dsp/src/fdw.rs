@@ -261,6 +261,7 @@ fn morlet_power_at(
     re * re + im * im
 }
 
+#[allow(clippy::too_many_arguments)]
 fn time_frequency_energy(
     impulse_response: &[f32],
     direct_sample: usize,
@@ -404,9 +405,11 @@ mod tests {
     #[test]
     fn fdw_rejects_invalid_freq_range() {
         let ir = vec![1.0_f32; 512];
-        let mut config = FdwConfig::default();
-        config.min_freq_hz = 400.0;
-        config.max_freq_hz = 200.0;
+        let config = FdwConfig {
+            min_freq_hz: 400.0,
+            max_freq_hz: 200.0,
+            ..Default::default()
+        };
         let err = analyze_impulse_response_fdw(&ir, 48000.0, None, &config)
             .expect_err("invalid freq range should be rejected");
         assert!(err.contains("frequency range"));
@@ -415,8 +418,10 @@ mod tests {
     #[test]
     fn fdw_rejects_bad_cycles() {
         let ir = vec![1.0_f32; 512];
-        let mut config = FdwConfig::default();
-        config.cycles = 0.0;
+        let config = FdwConfig {
+            cycles: 0.0,
+            ..Default::default()
+        };
         let err = analyze_impulse_response_fdw(&ir, 48000.0, None, &config)
             .expect_err("zero cycles should be rejected");
         assert!(err.contains("cycles"));
@@ -425,9 +430,11 @@ mod tests {
     #[test]
     fn fdw_rejects_bad_window_limits() {
         let ir = vec![1.0_f32; 512];
-        let mut config = FdwConfig::default();
-        config.min_window_ms = 500.0;
-        config.max_window_ms = 100.0;
+        let config = FdwConfig {
+            min_window_ms: 500.0,
+            max_window_ms: 100.0,
+            ..Default::default()
+        };
         let err = analyze_impulse_response_fdw(&ir, 48000.0, None, &config)
             .expect_err("reversed window limits should be rejected");
         assert!(err.contains("window limits"));
@@ -446,9 +453,11 @@ mod tests {
     fn fdw_single_point() {
         let mut ir = vec![0.0_f32; 4096];
         ir[256] = 1.0;
-        let mut config = FdwConfig::default();
-        config.num_points = 1;
-        config.smoothing_octaves = 0.0;
+        let config = FdwConfig {
+            num_points: 1,
+            smoothing_octaves: 0.0,
+            ..Default::default()
+        };
         let analysis = analyze_impulse_response_fdw(&ir, 48000.0, Some(256), &config).unwrap();
         assert_eq!(analysis.frequencies.len(), 1);
         assert_eq!(analysis.magnitude_db.len(), 1);
