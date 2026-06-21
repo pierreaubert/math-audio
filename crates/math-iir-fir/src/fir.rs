@@ -326,7 +326,16 @@ impl<T: FilterFloat> Fir<T> {
         let y = if self.symmetric {
             self.compute_output_symmetric()
         } else {
-            self.compute_output()
+            #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
+            if std::mem::size_of::<T>() == 8 {
+                unsafe { self.compute_output_f64_neon(self.state_pos) }
+            } else {
+                self.compute_output()
+            }
+            #[cfg(not(all(target_arch = "aarch64", target_feature = "neon")))]
+            {
+                self.compute_output()
+            }
         };
 
         // Update circular buffer position (kept in the upper half of the
@@ -401,6 +410,60 @@ impl<T: FilterFloat> Fir<T> {
             .zip(self.state[start..=state_pos].iter().rev())
             .map(|(&c, &s)| c * s)
             .sum()
+    }
+
+    /// aarch64 NEON fast path for a single general (non-symmetric) output
+    /// sample when `T` is `f64`.
+    ///
+    /// # Safety
+    /// Must only be called when `T` is `f64` (checked by the caller via
+    /// `size_of::<T>() == 8`).
+    #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
+    #[inline(always)]
+    unsafe fn compute_output_f64_neon(&self, state_pos: usize) -> T {
+        // SAFETY: caller verified `T` is `f64`. All pointer accesses are within
+        // the `coeffs`/`state` slices, and NEON is available on this target.
+        unsafe {
+            use std::arch::aarch64::*;
+
+            let coeffs_ptr = self.coeffs.as_ptr() as *const f64;
+            let state_ptr = self.state.as_ptr() as *const f64;
+            let n_taps = self.coeffs.len();
+
+            let mut acc0 = vdupq_n_f64(0.0);
+            let mut acc1 = vdupq_n_f64(0.0);
+            let mut i = 0;
+            while i + 3 < n_taps {
+                let c0 = vld1q_f64(coeffs_ptr.add(i));
+                let s0_raw = vld1q_f64(state_ptr.add(state_pos - i - 1));
+                let s0 = vextq_f64(s0_raw, s0_raw, 1);
+                acc0 = vfmaq_f64(acc0, c0, s0);
+
+                let c1 = vld1q_f64(coeffs_ptr.add(i + 2));
+                let s1_raw = vld1q_f64(state_ptr.add(state_pos - i - 3));
+                let s1 = vextq_f64(s1_raw, s1_raw, 1);
+                acc1 = vfmaq_f64(acc1, c1, s1);
+
+                i += 4;
+            }
+            let mut acc = vaddq_f64(acc0, acc1);
+
+            while i + 1 < n_taps {
+                let c = vld1q_f64(coeffs_ptr.add(i));
+                let s_raw = vld1q_f64(state_ptr.add(state_pos - i - 1));
+                let s = vextq_f64(s_raw, s_raw, 1);
+                acc = vfmaq_f64(acc, c, s);
+                i += 2;
+            }
+            let mut y = vgetq_lane_f64(acc, 0) + vgetq_lane_f64(acc, 1);
+
+            while i < n_taps {
+                y = (*coeffs_ptr.add(i)).mul_add(*state_ptr.add(state_pos - i), y);
+                i += 1;
+            }
+
+            std::mem::transmute_copy::<f64, T>(&y)
+        }
     }
 
     /// Computes one output sample exploiting symmetric coefficients.
