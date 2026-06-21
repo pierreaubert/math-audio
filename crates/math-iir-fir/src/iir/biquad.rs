@@ -551,6 +551,7 @@ impl<T: FilterFloat> Biquad<T> {
     ///
     /// This method is more efficient than calling `process` for each sample
     /// as it avoids repeated struct field access and allows for better optimization.
+    #[inline(always)]
     pub fn process_block(&mut self, samples: &mut [T]) {
         if self.use_tdf2 {
             self.process_block_tdf2(samples);
@@ -559,6 +560,7 @@ impl<T: FilterFloat> Biquad<T> {
         }
     }
 
+    #[inline(always)]
     fn process_block_df1(&mut self, samples: &mut [T]) {
         let b0 = self.b0;
         let b1 = self.b1;
@@ -570,8 +572,12 @@ impl<T: FilterFloat> Biquad<T> {
         let mut y1 = self.y1;
         let mut y2 = self.y2;
 
-        for x in samples.iter_mut() {
-            let input = *x;
+        // Pointer walk avoids any per-iteration iterator bookkeeping and gives
+        // the backend a contiguous memory access pattern to reason about.
+        let mut ptr = samples.as_mut_ptr();
+        let end = unsafe { ptr.add(samples.len()) };
+        while ptr < end {
+            let input = unsafe { *ptr };
             let output = b0 * input + b1 * x1 + b2 * x2 - a1 * y1 - a2 * y2;
 
             x2 = x1;
@@ -579,7 +585,10 @@ impl<T: FilterFloat> Biquad<T> {
             y2 = y1;
             y1 = output;
 
-            *x = output;
+            unsafe {
+                *ptr = output;
+                ptr = ptr.add(1);
+            }
         }
 
         self.x1 = x1;
@@ -588,6 +597,7 @@ impl<T: FilterFloat> Biquad<T> {
         self.y2 = y2;
     }
 
+    #[inline(always)]
     fn process_block_tdf2(&mut self, samples: &mut [T]) {
         let b0 = self.b0;
         let b1 = self.b1;
