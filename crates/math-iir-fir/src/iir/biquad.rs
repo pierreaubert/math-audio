@@ -61,6 +61,44 @@ pub struct Biquad<T: FilterFloat = f64> {
     r_dw2: T,
 }
 
+/// Private form marker used for compile-time specialization of
+/// `Biquad::process_block`.  The runtime `use_tdf2` flag is resolved once per
+/// block; the inner loop is monomorphized for the selected form and contains
+/// no per-sample branch.
+trait BiquadForm {
+    fn process_sample<T: FilterFloat>(b: &mut Biquad<T>, input: T) -> T;
+}
+
+struct Df1Form;
+impl BiquadForm for Df1Form {
+    #[inline(always)]
+    fn process_sample<T: FilterFloat>(b: &mut Biquad<T>, input: T) -> T {
+        // Fused multiply-add for the feed-forward and feedback dot products.
+        // The two FMA groups can execute in parallel, and only one final
+        // subtraction serializes them.
+        let output = b.b0.mul_add(input, b.b1.mul_add(b.x1, b.b2 * b.x2))
+            - b.a1.mul_add(b.y1, b.a2 * b.y2);
+
+        b.x2 = b.x1;
+        b.x1 = input;
+        b.y2 = b.y1;
+        b.y1 = output;
+
+        output
+    }
+}
+
+struct Tdf2Form;
+impl BiquadForm for Tdf2Form {
+    #[inline(always)]
+    fn process_sample<T: FilterFloat>(b: &mut Biquad<T>, input: T) -> T {
+        let output = b.b0 * input + b.s1;
+        b.s1 = b.b1 * input - b.a1 * output + b.s2;
+        b.s2 = b.b2 * input - b.a2 * output;
+        output
+    }
+}
+
 impl<T: FilterFloat> Biquad<T> {
     /// Creates and initializes a new Biquad filter.
     ///
@@ -551,77 +589,33 @@ impl<T: FilterFloat> Biquad<T> {
     ///
     /// This method is more efficient than calling `process` for each sample
     /// as it avoids repeated struct field access and allows for better optimization.
+    ///
+    /// The runtime `use_tdf2` flag is resolved once per block; the inner loop
+    /// is monomorphized for the selected form and contains no per-sample
+    /// branch.
     #[inline(always)]
     pub fn process_block(&mut self, samples: &mut [T]) {
         if self.use_tdf2 {
-            self.process_block_tdf2(samples);
+            self.process_block_form::<Tdf2Form>(samples);
         } else {
-            self.process_block_df1(samples);
+            self.process_block_form::<Df1Form>(samples);
         }
     }
 
     #[inline(always)]
-    fn process_block_df1(&mut self, samples: &mut [T]) {
-        let b0 = self.b0;
-        let b1 = self.b1;
-        let b2 = self.b2;
-        let a1 = self.a1;
-        let a2 = self.a2;
-        let mut x1 = self.x1;
-        let mut x2 = self.x2;
-        let mut y1 = self.y1;
-        let mut y2 = self.y2;
-
+    fn process_block_form<F: BiquadForm>(&mut self, samples: &mut [T]) {
         // Pointer walk avoids any per-iteration iterator bookkeeping and gives
         // the backend a contiguous memory access pattern to reason about.
         let mut ptr = samples.as_mut_ptr();
         let end = unsafe { ptr.add(samples.len()) };
         while ptr < end {
             let input = unsafe { *ptr };
-            // Fused multiply-add for the feed-forward and feedback dot products.
-            // The two FMA groups can execute in parallel, and only one final
-            // subtraction serializes them.
-            let output = b0.mul_add(input, b1.mul_add(x1, b2 * x2))
-                - a1.mul_add(y1, a2 * y2);
-
-            x2 = x1;
-            x1 = input;
-            y2 = y1;
-            y1 = output;
-
+            let output = F::process_sample(self, input);
             unsafe {
                 *ptr = output;
                 ptr = ptr.add(1);
             }
         }
-
-        self.x1 = x1;
-        self.x2 = x2;
-        self.y1 = y1;
-        self.y2 = y2;
-    }
-
-    #[inline(always)]
-    fn process_block_tdf2(&mut self, samples: &mut [T]) {
-        let b0 = self.b0;
-        let b1 = self.b1;
-        let b2 = self.b2;
-        let a1 = self.a1;
-        let a2 = self.a2;
-        let mut s1 = self.s1;
-        let mut s2 = self.s2;
-
-        for x in samples.iter_mut() {
-            let input = *x;
-            let output = b0 * input + s1;
-            s1 = b1 * input - a1 * output + s2;
-            s2 = b2 * input - a2 * output;
-
-            *x = output;
-        }
-
-        self.s1 = s1;
-        self.s2 = s2;
     }
 
     /// Reset all internal state to zero while preserving coefficients.
