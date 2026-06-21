@@ -578,7 +578,11 @@ impl<T: FilterFloat> Biquad<T> {
         let end = unsafe { ptr.add(samples.len()) };
         while ptr < end {
             let input = unsafe { *ptr };
-            let output = b0 * input + b1 * x1 + b2 * x2 - a1 * y1 - a2 * y2;
+            // Fused multiply-add for the feed-forward and feedback dot products.
+            // The two FMA groups can execute in parallel, and only one final
+            // subtraction serializes them.
+            let output = b0.mul_add(input, b1.mul_add(x1, b2 * x2))
+                - a1.mul_add(y1, a2 * y2);
 
             x2 = x1;
             x1 = input;
