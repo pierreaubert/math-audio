@@ -42,7 +42,9 @@ pub struct Fir<T: FilterFloat = f64> {
     pub window: WindowType,
     /// Kaiser window beta parameter (if applicable)
     pub kaiser_beta: T,
-    /// Circular buffer for filter state
+    /// Doubled circular buffer for filter state. The upper half always holds a
+    /// contiguous window of the last `n_taps` samples, so the convolution can be
+    /// computed as a single slice dot-product without per-tap modulo indexing.
     state: Vec<T>,
     /// Current position in the circular buffer
     state_pos: usize,
@@ -72,8 +74,8 @@ impl<T: FilterFloat> Fir<T> {
             freq_upper: None,
             window: WindowType::Rectangular,
             kaiser_beta: T::zero(),
-            state: vec![T::zero(); n_taps],
-            state_pos: 0,
+            state: vec![T::zero(); 2 * n_taps],
+            state_pos: n_taps,
         }
     }
 
@@ -111,8 +113,8 @@ impl<T: FilterFloat> Fir<T> {
             freq_upper: None,
             window,
             kaiser_beta,
-            state: vec![T::zero(); n],
-            state_pos: 0,
+            state: vec![T::zero(); 2 * n],
+            state_pos: n,
         }
     }
 
@@ -156,8 +158,8 @@ impl<T: FilterFloat> Fir<T> {
             freq_upper: None,
             window,
             kaiser_beta,
-            state: vec![T::zero(); n],
-            state_pos: 0,
+            state: vec![T::zero(); 2 * n],
+            state_pos: n,
         }
     }
 
@@ -217,8 +219,8 @@ impl<T: FilterFloat> Fir<T> {
             freq_upper: Some(freq_high),
             window,
             kaiser_beta,
-            state: vec![T::zero(); n],
-            state_pos: 0,
+            state: vec![T::zero(); 2 * n],
+            state_pos: n,
         }
     }
 
@@ -278,8 +280,8 @@ impl<T: FilterFloat> Fir<T> {
             freq_upper: Some(freq_high),
             window,
             kaiser_beta,
-            state: vec![T::zero(); n],
-            state_pos: 0,
+            state: vec![T::zero(); 2 * n],
+            state_pos: n,
         }
     }
 
@@ -296,24 +298,26 @@ impl<T: FilterFloat> Fir<T> {
     /// Resets the filter state to zero.
     pub fn reset(&mut self) {
         self.state.fill(T::zero());
-        self.state_pos = 0;
+        self.state_pos = self.n_taps();
     }
 
     /// Processes a single audio sample through the filter.
     pub fn process(&mut self, x: T) -> T {
-        // Store input sample in circular buffer
+        let n_taps = self.coeffs.len();
+        // Store input sample in circular buffer and its duplicate so the
+        // convolution can read one contiguous slice.
         self.state[self.state_pos] = x;
+        self.state[self.state_pos - n_taps] = x;
 
         // Compute output using convolution
-        let mut y = T::zero();
-        let n_taps = self.coeffs.len();
-        for i in 0..n_taps {
-            let state_idx = (self.state_pos + n_taps - i) % n_taps;
-            y += self.coeffs[i] * self.state[state_idx];
-        }
+        let y = self.compute_output();
 
-        // Update circular buffer position
-        self.state_pos = (self.state_pos + 1) % n_taps;
+        // Update circular buffer position (kept in the upper half of the
+        // doubled state buffer).
+        self.state_pos += 1;
+        if self.state_pos == 2 * n_taps {
+            self.state_pos = n_taps;
+        }
 
         y
     }
@@ -324,21 +328,34 @@ impl<T: FilterFloat> Fir<T> {
 
         for sample in samples.iter_mut() {
             let x = *sample;
-            // Store input sample in circular buffer
+            // Store input sample in circular buffer and its duplicate
             self.state[self.state_pos] = x;
+            self.state[self.state_pos - n_taps] = x;
 
             // Compute output using convolution
-            let mut y = T::zero();
-            for i in 0..n_taps {
-                let state_idx = (self.state_pos + n_taps - i) % n_taps;
-                y += self.coeffs[i] * self.state[state_idx];
-            }
+            *sample = self.compute_output();
 
             // Update circular buffer position
-            self.state_pos = (self.state_pos + 1) % n_taps;
-
-            *sample = y;
+            self.state_pos += 1;
+            if self.state_pos == 2 * n_taps {
+                self.state_pos = n_taps;
+            }
         }
+    }
+
+    #[inline(always)]
+    fn compute_output(&self) -> T {
+        let state_pos = self.state_pos;
+        let n_taps = self.coeffs.len();
+        let start = state_pos - n_taps + 1;
+
+        // The newest sample is at `state_pos`, the oldest at `start`.
+        // Coeffs[0] multiplies the newest, so one slice is reversed.
+        self.coeffs
+            .iter()
+            .zip(self.state[start..=state_pos].iter().rev())
+            .map(|(&c, &s)| c * s)
+            .sum()
     }
 
     /// Calculates the filter's magnitude response at a single frequency `f`.
