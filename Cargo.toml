@@ -61,7 +61,7 @@ math-rir = { path = "crates/math-rir", version = "0.5" }
 math-test-functions = { path = "crates/math-test-functions", version = "0.5", default-features = false }
 
 # Plotting and visualization
-plotly = { version = "0.13" }
+plotly = { version = "0.14" }
 plotly_static = { version = "0.1", features = ["chromedriver", "webdriver_download"] }
 
 # Web/WASM
