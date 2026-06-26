@@ -12,7 +12,7 @@ serde = { workspace = true }
 thiserror = { workspace = true }
 rand = { workspace = true }
 rayon = { workspace = true }
-log = "0.4"
+log = "0.4.28"
 
 [dev-dependencies]
 directories = { workspace = true }
