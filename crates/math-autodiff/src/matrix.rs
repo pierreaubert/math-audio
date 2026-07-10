@@ -72,6 +72,29 @@ fn matrix_exp_skew_view(raw: &ArrayView2<f64>) -> Array2<f64> {
     dmatrix_to_ndarray2(&exp)
 }
 
+/// Compute the derivative of the scalar loss w.r.t. the real matrix `M`.
+///
+/// This is shared by both `Dense` and `Orthogonal` parameterizations: for
+/// `Dense` it is the parameter gradient directly, while `Orthogonal` applies
+/// the chain rule through the skew-symmetric exponential map.
+fn compute_dl_dm(
+    grad_output: &DiffTensor<f64>,
+    input: &DiffTensor<f64>,
+    n_out: usize,
+    n_in: usize,
+) -> Array2<f64> {
+    let mut dl_dm = Array2::<f64>::zeros((n_out, n_in));
+    for out_ch in 0..n_out {
+        let grad_slice = grad_output.data.index_axis(Axis(2), out_ch);
+        for in_ch in 0..n_in {
+            let input_slice = input.data.index_axis(Axis(2), in_ch);
+            let prod = &grad_slice * &input_slice.mapv(|x| x.conj());
+            dl_dm[[out_ch, in_ch]] = prod.sum().re;
+        }
+    }
+    dl_dm
+}
+
 /// Compute the matrix exponential of the skew-symmetric matrix `raw - raw.t()`.
 ///
 /// The result is an orthogonal matrix.
@@ -225,12 +248,36 @@ impl DiffModule<f64> for Matrix {
                     .to_string(),
             ));
         }
+        if input_shape.len() != grad_shape.len() {
+            return Err(AutodiffError::Message(format!(
+                "Matrix::backward: input and grad_output must have same rank, got {:?} and {:?}",
+                input_shape, grad_shape
+            )));
+        }
         let n_bins = input_shape[1];
+        if input_shape[2] != self.n_in {
+            return Err(AutodiffError::Message(format!(
+                "Matrix::backward: expected {} input channels, got {}",
+                self.n_in, input_shape[2]
+            )));
+        }
         if grad_shape[1] != n_bins || grad_shape[2] != self.n_out {
             return Err(AutodiffError::Message(format!(
                 "Matrix::backward: grad_output shape {:?} incompatible with (..., {}, {})",
                 grad_shape, n_bins, self.n_out
             )));
+        }
+        for (dim, (&g, &inp)) in grad_shape[..grad_shape.len() - 2]
+            .iter()
+            .zip(input_shape[..input_shape.len() - 2].iter())
+            .enumerate()
+        {
+            if g != inp {
+                return Err(AutodiffError::Message(format!(
+                    "Matrix::backward: batch dimension {} mismatch: grad_output {:?} vs input {:?}",
+                    dim, grad_shape, input_shape
+                )));
+            }
         }
 
         let m = self.build_matrix()?;
@@ -239,27 +286,13 @@ impl DiffModule<f64> for Matrix {
         // Dense gradient is straightforward.
         match self.matrix_type {
             MatrixType::Dense => {
+                let dl_dm = compute_dl_dm(grad_output, input, self.n_out, self.n_in);
                 let mut pg = view2_mut(&mut self.param_grad, "Matrix")?;
-                for out_ch in 0..self.n_out {
-                    let grad_slice = grad_output.data.index_axis(Axis(2), out_ch);
-                    for in_ch in 0..self.n_in {
-                        let input_slice = input.data.index_axis(Axis(2), in_ch);
-                        let prod = &grad_slice * &input_slice.mapv(|x| x.conj());
-                        pg[[out_ch, in_ch]] += prod.sum().re;
-                    }
-                }
+                pg += &dl_dm;
             }
             MatrixType::Orthogonal => {
                 // Compute dL/dM (same shape as M).
-                let mut dl_dm = Array2::<f64>::zeros((self.n_out, self.n_in));
-                for out_ch in 0..self.n_out {
-                    let grad_slice = grad_output.data.index_axis(Axis(2), out_ch);
-                    for in_ch in 0..self.n_in {
-                        let input_slice = input.data.index_axis(Axis(2), in_ch);
-                        let prod = &grad_slice * &input_slice.mapv(|x| x.conj());
-                        dl_dm[[out_ch, in_ch]] = prod.sum().re;
-                    }
-                }
+                let dl_dm = compute_dl_dm(grad_output, input, self.n_out, self.n_in);
                 // Numerical Jacobian of M w.r.t. raw parameters.
                 let v = view2(&self.param, "Matrix")?;
                 let eps = 1e-7;
