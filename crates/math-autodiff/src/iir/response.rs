@@ -1,6 +1,10 @@
-use ndarray::{Array2, Array3, Array4, Array5};
+use ndarray::{Array2, Array3, Array4, Array5, ArrayBase, Axis, Data, Ix4};
 use num_complex::Complex;
 use rustfft::FftPlanner;
+
+use crate::error::AutodiffError;
+
+const DEFAULT_GAMMA: [f64; 3] = [1.0, 1.0, 1.0];
 
 /// Response of a cascade of SOS sections.
 #[derive(Debug, Clone)]
@@ -13,6 +17,11 @@ pub struct SosResponse {
     pub dh_da: Array5<Complex<f64>>,
 }
 
+/// Validate common SOS inputs and resolve the gamma envelope.
+fn resolve_gamma(gamma: Option<&[f64; 3]>) -> [f64; 3] {
+    gamma.copied().unwrap_or(DEFAULT_GAMMA)
+}
+
 /// Compute H(f) and its analytical Jacobian w.r.t. b/a coefficients.
 ///
 /// # Arguments
@@ -23,7 +32,7 @@ pub struct SosResponse {
 ///
 /// # Panics
 ///
-/// Panics if `nfft` is zero, because a zero-length FFT is not meaningful.
+/// Panics if `b` and `a` have different shapes.
 #[must_use]
 pub fn sos_response(
     b: &Array4<Complex<f64>>,
@@ -31,6 +40,24 @@ pub fn sos_response(
     nfft: usize,
     gamma: &[f64; 3],
 ) -> SosResponse {
+    assert_eq!(
+        b.dim(),
+        a.dim(),
+        "sos_response: b and a must have the same shape"
+    );
+    let b_view = b.view();
+    let a_view = a.view();
+    sos_response_impl(&b_view, &a_view, nfft, gamma)
+}
+
+fn sos_response_impl<S>(
+    b: &ArrayBase<S, Ix4>,
+    a: &ArrayBase<S, Ix4>,
+    nfft: usize,
+    gamma: &[f64; 3],
+) -> SosResponse
+where
+    S: Data<Elem = Complex<f64>>, {
     let (n_sections, _, n_out, n_in) = b.dim();
     let n_bins = nfft / 2 + 1;
 
@@ -116,4 +143,185 @@ pub fn sos_response(
         dh_db: jacobian_b,
         dh_da: jacobian_a,
     }
+}
+
+/// Compute the complex frequency response of a cascade of second-order
+/// sections.
+///
+/// Coefficients have shape `(K, 3, N_out, N_in)` where `K` is the number of
+/// SOS sections, `3` is the number of taps, and `N_out`/`N_in` are the output
+/// and input channel counts. The returned response has shape
+/// `(M, N_out, N_in)` with `M = nfft / 2 + 1`.
+///
+/// If `gamma` is `None`, an identity envelope `[1.0, 1.0, 1.0]` is used.
+///
+/// # Errors
+///
+/// Returns `AutodiffError` if `b` and `a` have different shapes or if `nfft`
+/// is zero.
+pub fn sos_frequency_response(
+    b: &Array4<Complex<f64>>,
+    a: &Array4<Complex<f64>>,
+    nfft: usize,
+    gamma: Option<&[f64; 3]>,
+) -> Result<Array3<Complex<f64>>, AutodiffError> {
+    validate_sos_4d_inputs(b, a, nfft)?;
+    let gamma = resolve_gamma(gamma);
+    let b_view = b.view();
+    let a_view = a.view();
+    let resp = sos_response_impl(&b_view, &a_view, nfft, &gamma);
+    Ok(resp.h)
+}
+
+/// Compute the analytical Jacobian of the SOS frequency response w.r.t. the
+/// numerator and denominator coefficients.
+///
+/// Coefficients have shape `(K, 3, N_out, N_in)`. The returned Jacobians have
+/// shape `(M, K, 3, N_out, N_in)` with `M = nfft / 2 + 1`.
+///
+/// If `gamma` is `None`, an identity envelope `[1.0, 1.0, 1.0]` is used.
+///
+/// # Errors
+///
+/// Returns `AutodiffError` if `b` and `a` have different shapes or if `nfft`
+/// is zero.
+#[allow(clippy::type_complexity)]
+pub fn sos_frequency_response_jacobian(
+    b: &Array4<Complex<f64>>,
+    a: &Array4<Complex<f64>>,
+    nfft: usize,
+    gamma: Option<&[f64; 3]>,
+) -> Result<(Array5<Complex<f64>>, Array5<Complex<f64>>), AutodiffError> {
+    validate_sos_4d_inputs(b, a, nfft)?;
+    let gamma = resolve_gamma(gamma);
+    let b_view = b.view();
+    let a_view = a.view();
+    let resp = sos_response_impl(&b_view, &a_view, nfft, &gamma);
+    Ok((resp.dh_db, resp.dh_da))
+}
+
+/// Compute the complex frequency response of a cascade of second-order
+/// sections with a flat channel layout.
+///
+/// Coefficients have shape `(K, 3, N)` where `K` is the number of SOS sections,
+/// `3` is the number of taps, and `N` is the number of channels. The returned
+/// response has shape `(M, N)` with `M = nfft / 2 + 1`.
+///
+/// This is a convenience wrapper that internally reshapes the 3-D input to
+/// `(K, 3, N, 1)` so that each channel is treated as an independent output.
+///
+/// If `gamma` is `None`, an identity envelope `[1.0, 1.0, 1.0]` is used.
+///
+/// # Errors
+///
+/// Returns `AutodiffError` if `b` and `a` have different shapes, if the
+/// second axis is not `3`, or if `nfft` is zero.
+pub fn sos_frequency_response_parallel(
+    b: &Array3<Complex<f64>>,
+    a: &Array3<Complex<f64>>,
+    nfft: usize,
+    gamma: Option<&[f64; 3]>,
+) -> Result<Array2<Complex<f64>>, AutodiffError> {
+    validate_sos_3d_inputs(b, a, nfft)?;
+    let gamma = resolve_gamma(gamma);
+    let (n_sections, _, n_channels) = b.dim();
+    let b_view = b.view();
+    let a_view = a.view();
+    let b4 = b_view
+        .to_shape((n_sections, 3, n_channels, 1))
+        .map_err(|e| AutodiffError::Message(e.to_string()))?;
+    let a4 = a_view
+        .to_shape((n_sections, 3, n_channels, 1))
+        .map_err(|e| AutodiffError::Message(e.to_string()))?;
+    let resp = sos_response_impl(&b4, &a4, nfft, &gamma);
+    Ok(resp.h.index_axis(Axis(2), 0).to_owned())
+}
+
+/// Compute the analytical Jacobian of the SOS frequency response for a flat
+/// channel layout.
+///
+/// Coefficients have shape `(K, 3, N)`. The returned Jacobians have shape
+/// `(M, K, 3, N)` with `M = nfft / 2 + 1`.
+///
+/// If `gamma` is `None`, an identity envelope `[1.0, 1.0, 1.0]` is used.
+///
+/// # Errors
+///
+/// Returns `AutodiffError` if `b` and `a` have different shapes, if the
+/// second axis is not `3`, or if `nfft` is zero.
+#[allow(clippy::type_complexity)]
+pub fn sos_frequency_response_jacobian_parallel(
+    b: &Array3<Complex<f64>>,
+    a: &Array3<Complex<f64>>,
+    nfft: usize,
+    gamma: Option<&[f64; 3]>,
+) -> Result<(Array4<Complex<f64>>, Array4<Complex<f64>>), AutodiffError> {
+    validate_sos_3d_inputs(b, a, nfft)?;
+    let gamma = resolve_gamma(gamma);
+    let (n_sections, _, n_channels) = b.dim();
+    let b_view = b.view();
+    let a_view = a.view();
+    let b4 = b_view
+        .to_shape((n_sections, 3, n_channels, 1))
+        .map_err(|e| AutodiffError::Message(e.to_string()))?;
+    let a4 = a_view
+        .to_shape((n_sections, 3, n_channels, 1))
+        .map_err(|e| AutodiffError::Message(e.to_string()))?;
+    let resp = sos_response_impl(&b4, &a4, nfft, &gamma);
+    Ok((
+        resp.dh_db.index_axis(Axis(4), 0).to_owned(),
+        resp.dh_da.index_axis(Axis(4), 0).to_owned(),
+    ))
+}
+
+fn validate_sos_4d_inputs(
+    b: &Array4<Complex<f64>>,
+    a: &Array4<Complex<f64>>,
+    nfft: usize,
+) -> Result<(), AutodiffError> {
+    if b.dim() != a.dim() {
+        return Err(AutodiffError::Message(format!(
+            "sos_frequency_response: b and a must have the same shape, got {:?} and {:?}",
+            b.dim(),
+            a.dim()
+        )));
+    }
+    let (_, n_taps, _, _) = b.dim();
+    if n_taps != 3 {
+        return Err(AutodiffError::Message(format!(
+            "sos_frequency_response: second axis must be 3, got {n_taps}"
+        )));
+    }
+    if nfft == 0 {
+        return Err(AutodiffError::Message(
+            "sos_frequency_response: nfft must be greater than 0".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_sos_3d_inputs(
+    b: &Array3<Complex<f64>>,
+    a: &Array3<Complex<f64>>,
+    nfft: usize,
+) -> Result<(), AutodiffError> {
+    if b.dim() != a.dim() {
+        return Err(AutodiffError::Message(format!(
+            "sos_frequency_response_parallel: b and a must have the same shape, got {:?} and {:?}",
+            b.dim(),
+            a.dim()
+        )));
+    }
+    let (_, n_taps, _) = b.dim();
+    if n_taps != 3 {
+        return Err(AutodiffError::Message(format!(
+            "sos_frequency_response_parallel: second axis must be 3, got {n_taps}"
+        )));
+    }
+    if nfft == 0 {
+        return Err(AutodiffError::Message(
+            "sos_frequency_response_parallel: nfft must be greater than 0".to_string(),
+        ));
+    }
+    Ok(())
 }
