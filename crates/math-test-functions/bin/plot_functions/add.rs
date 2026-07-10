@@ -5,28 +5,40 @@ use plotly::common::{ColorScale, ColorScalePalette, Marker, Mode, Title};
 use plotly::contour::Contour;
 use plotly::{Layout, Plot, Scatter};
 
+pub(super) struct PlotGrid {
+    pub x_bounds: (f64, f64),
+    pub y_bounds: (f64, f64),
+    pub xn: usize,
+    pub yn: usize,
+    pub width: usize,
+    pub height: usize,
+}
+
 pub(super) fn create_plot(
     name: &str,
     func: TestFunction,
-    x_bounds: (f64, f64),
-    y_bounds: (f64, f64),
-    xn: usize,
-    yn: usize,
-    width: usize,
-    height: usize,
+    plot_grid: &PlotGrid,
     metadata: Option<&FunctionMetadata>,
 ) -> Plot {
-    let x_vals: Vec<f64> = (0..xn)
-        .map(|i| x_bounds.0 + (x_bounds.1 - x_bounds.0) * i as f64 / (xn - 1) as f64)
+    let x_vals: Vec<f64> = (0..plot_grid.xn)
+        .map(|i| {
+            plot_grid.x_bounds.0
+                + (plot_grid.x_bounds.1 - plot_grid.x_bounds.0) * i as f64
+                    / (plot_grid.xn - 1) as f64
+        })
         .collect();
 
-    let y_vals: Vec<f64> = (0..yn)
-        .map(|i| y_bounds.0 + (y_bounds.1 - y_bounds.0) * i as f64 / (yn - 1) as f64)
+    let y_vals: Vec<f64> = (0..plot_grid.yn)
+        .map(|i| {
+            plot_grid.y_bounds.0
+                + (plot_grid.y_bounds.1 - plot_grid.y_bounds.0) * i as f64
+                    / (plot_grid.yn - 1) as f64
+        })
         .collect();
 
-    let mut z_vals = Vec::with_capacity(yn);
+    let mut z_vals = Vec::with_capacity(plot_grid.yn);
     for &y in &y_vals {
-        let mut row = Vec::with_capacity(xn);
+        let mut row = Vec::with_capacity(plot_grid.xn);
         for &x in &x_vals {
             let input = Array1::from(vec![x, y]);
             let z = func(&input);
@@ -40,15 +52,15 @@ pub(super) fn create_plot(
         .color_bar(
             plotly::common::ColorBar::new()
                 .len_mode(plotly::common::ThicknessMode::Pixels)
-                .len(60 * height / 100)
+                .len(60 * plot_grid.height / 100)
                 .y_anchor(plotly::common::Anchor::Bottom)
                 .y(0.0),
         );
 
     let layout = Layout::new()
         .title(Title::with_text(format!("Function: {}", name)))
-        .width(width)
-        .height(height)
+        .width(plot_grid.width)
+        .height(plot_grid.height)
         .x_axis(plotly::layout::Axis::new().title(Title::with_text("X")))
         .y_axis(plotly::layout::Axis::new().title(Title::with_text("Y")));
 
@@ -56,7 +68,7 @@ pub(super) fn create_plot(
     plot.add_trace(contour);
 
     if let Some(meta) = metadata {
-        add_global_minima(&mut plot, meta, x_bounds, y_bounds);
+        add_global_minima(&mut plot, meta, plot_grid.x_bounds, plot_grid.y_bounds);
         if !meta.inequality_constraints.is_empty() {
             add_constraint_boundaries(&mut plot, meta, &x_vals, &y_vals);
         }

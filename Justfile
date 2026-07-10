@@ -3,6 +3,8 @@
 #	  cargo install just
 # ----------------------------------------------------------------------
 
+import 'builds/cross.just'
+
 default:
 	just --list
 

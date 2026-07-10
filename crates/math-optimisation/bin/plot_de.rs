@@ -1,17 +1,6 @@
 use clap::Parser;
-use directories::ProjectDirs;
-use math_audio_optimisation::function_registry::TestFunction;
-use math_audio_test_functions::{FunctionMetadata, get_function_metadata};
-use ndarray::Array1;
-use plotly::{
-    Layout, Plot, Scatter,
-    common::{ColorScale, ColorScalePalette, Marker, Mode, Title},
-    contour::Contour,
-};
+use math_audio_test_functions::get_function_metadata;
 use std::collections::BTreeMap;
-use std::fs::{self, File};
-use std::io::Write;
-use std::path::Path;
 
 #[path = "plot_de/add.rs"]
 mod add;
@@ -31,6 +20,7 @@ use misc::find_csv_for_function;
 use misc::generate_interactive_html;
 use misc::parse_bounds;
 use misc::save_plot_as_json;
+use optimization_trace::PlotGrid;
 use optimization_trace::create_plot;
 use optimization_trace::plot_convergence;
 use types::Args;
@@ -182,15 +172,18 @@ fn main() {
         };
 
         // Create the plot
+        let plot_grid = PlotGrid {
+            x_bounds: plot_x_bounds,
+            y_bounds: plot_y_bounds,
+            xn: args.xn,
+            yn: args.yn,
+            width: args.width,
+            height: args.height,
+        };
         let plot = create_plot(
             &name,
             func,
-            plot_x_bounds,
-            plot_y_bounds,
-            args.xn,
-            args.yn,
-            args.width,
-            args.height,
+            &plot_grid,
             if args.show_traces {
                 trace.as_ref()
             } else {

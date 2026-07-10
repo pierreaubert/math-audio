@@ -1,7 +1,6 @@
 use directories::ProjectDirs;
 use math_audio_optimisation::function_registry::TestFunction;
 use math_audio_test_functions::get_function_metadata;
-use std::fs::{self};
 
 /// Get the data generated directory using the directories crate
 pub(super) fn get_data_generated_dir() -> Result<std::path::PathBuf, String> {

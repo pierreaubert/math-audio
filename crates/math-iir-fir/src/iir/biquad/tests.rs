@@ -309,8 +309,7 @@ fn test_compute_coeffs_a0_guard_path() {
     // A valid but extremely small in-band LowshelfOrf frequency with extreme
     // negative gain produces a0 < 1e-15. (Exactly zero is now sanitized by
     // Biquad::new before coefficient generation.)
-    let mut bq =
-        Biquad::<f64>::new(BiquadFilterType::LowshelfOrf, 1.0e-10, 48000.0, 0.7, -640.0);
+    let mut bq = Biquad::<f64>::new(BiquadFilterType::LowshelfOrf, 1.0e-10, 48000.0, 0.7, -640.0);
     bq.compute_coeffs();
     let (a1, a2, b0, b1, b2) = bq.constants();
     // When a0 guard triggers, coefficients become identity (pass-through)

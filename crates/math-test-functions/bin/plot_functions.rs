@@ -1,13 +1,7 @@
 use clap::Parser;
 use directories::ProjectDirs;
-use math_audio_test_functions::{FunctionMetadata, functions, get_function_metadata};
-use ndarray::Array1;
-use plotly::common::{ColorScale, ColorScalePalette, Marker, Mode, Title};
-use plotly::contour::Contour;
-use plotly::{Layout, Plot, Scatter};
+use math_audio_test_functions::get_function_metadata;
 use std::collections::BTreeMap;
-use std::fs::File;
-use std::io::Write;
 
 #[path = "plot_functions/add.rs"]
 mod add;
@@ -16,6 +10,7 @@ mod misc;
 #[path = "plot_functions/types.rs"]
 mod types;
 
+use add::PlotGrid;
 use add::create_plot;
 use misc::parse_bounds;
 use misc::save_plot_as_json;
@@ -133,17 +128,15 @@ fn main() {
             plot_x_bounds.0, plot_x_bounds.1, plot_y_bounds.0, plot_y_bounds.1
         );
 
-        let plot = create_plot(
-            &name,
-            func,
-            plot_x_bounds,
-            plot_y_bounds,
-            args.xn,
-            args.yn,
-            args.width,
-            args.height,
-            metadata.get(&name),
-        );
+        let plot_grid = PlotGrid {
+            x_bounds: plot_x_bounds,
+            y_bounds: plot_y_bounds,
+            xn: args.xn,
+            yn: args.yn,
+            width: args.width,
+            height: args.height,
+        };
+        let plot = create_plot(&name, func, &plot_grid, metadata.get(&name));
 
         // Save plot as JSON file
         if let Err(e) = save_plot_as_json(&plot, &output_dir, &name) {

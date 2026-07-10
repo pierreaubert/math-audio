@@ -1,0 +1,49 @@
+# Multi-stage build: Builder stage
+FROM messense/rust-musl-cross:aarch64-musl AS builder
+
+# Install additional dependencies for audio and build tools - combined into single layer
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+    git \
+    cmake \
+    ninja-build \
+    perl \
+    pkg-config \
+    gfortran \
+    make \
+    && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
+
+# The base image (messense/rust-musl-cross) ships rust as a tarball; rustup
+# does not track its components. Re-install stable via rustup with every
+# component the project's rust-toolchain.toml asks for, so cargo's auto-sync
+# at build time becomes a no-op (otherwise rustup tries to remove a clippy it
+# never installed and fails with "directory does not exist").
+RUN rustup default stable && \
+    rustup target add aarch64-unknown-linux-musl && \
+    rustup component add clippy rustfmt rust-src rust-analyzer rustc-dev llvm-tools-preview
+
+# Install just (command runner)
+RUN cargo install just --locked && \
+    rm -rf /root/.cargo/registry /root/.cargo/git
+
+# Pin the toolchain so the project's `rust-toolchain.toml` does not trigger
+# a fresh rustup sync at runtime (which fails on this image because the base
+# rust install was placed by tarball, not by rustup).
+ENV RUSTUP_TOOLCHAIN=stable
+
+# Set up environment for static linking
+ENV RUSTFLAGS="-C target-feature=+crt-static"
+ENV PKG_CONFIG_ALL_STATIC=1
+ENV PKG_CONFIG_ALLOW_CROSS=1
+ENV OPENSSL_STATIC=1
+ENV OPENSSL_VENDORED=1
+
+WORKDIR /project
+
+# Copy source with .dockerignore in place
+COPY . .
+
+# Build release binary
+RUN cargo build --release --target aarch64-unknown-linux-musl && \
+    find target/aarch64-unknown-linux-musl/release -maxdepth 1 -type f -executable | xargs strip -v 2>/dev/null || true && \
+    rm -rf target/.rustc_info.json target/.fingerprint target/aarch64-unknown-linux-musl/release/deps/*.d
