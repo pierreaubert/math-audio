@@ -167,15 +167,10 @@ fn sgd_reduces_mse_loss() {
         let grad_output = mse_loss_backward(&output, &target).unwrap();
         gain.backward(&input, &output, &grad_output).unwrap();
 
-        let grads: Vec<&ArrayD<f64>> = gain.gradients();
-        let grads_owned: Vec<ArrayD<f64>> = grads.iter().map(|g| (**g).clone()).collect();
-        let mut params: Vec<&mut ArrayD<f64>> = gain.parameters_mut();
-        // SGD expects owned slices; clone parameters for the update.
-        let mut params_owned: Vec<ArrayD<f64>> = params.iter_mut().map(|p| (**p).clone()).collect();
-        optimizer.step(&mut params_owned, &grads_owned).unwrap();
-        for (p, p_owned) in params.iter_mut().zip(params_owned) {
-            **p = p_owned;
-        }
+        let grads_owned: Vec<ArrayD<f64>> = gain.gradients().iter().map(|g| (*g).clone()).collect();
+        let mut params = gain.parameters_mut();
+        let grads: Vec<&ArrayD<f64>> = grads_owned.iter().collect();
+        optimizer.step(&mut params[..], &grads[..]).unwrap();
     }
 
     let final_loss = {
@@ -211,12 +206,20 @@ fn losses_reject_mismatched_and_empty_tensors() {
 fn sgd_rejects_incompatible_gradients_before_updating() {
     let optimizer = Sgd::new(0.1);
     let original = ArrayD::from_elem(IxDyn(&[2]), 1.0);
-    let mut params = vec![original.clone()];
+    let mut params = [original.clone()];
     let wrong_count: Vec<ArrayD<f64>> = Vec::new();
-    assert!(optimizer.step(&mut params, &wrong_count).is_err());
+    let wrong_count_refs: Vec<&ArrayD<f64>> = wrong_count.iter().collect();
+    let mut params_refs: Vec<&mut ArrayD<f64>> = params.iter_mut().collect();
+    assert!(optimizer
+        .step(&mut params_refs[..], &wrong_count_refs[..])
+        .is_err());
     assert_eq!(params[0], original);
 
-    let wrong_shape = vec![ArrayD::zeros(IxDyn(&[1]))];
-    assert!(optimizer.step(&mut params, &wrong_shape).is_err());
+    let wrong_shape = [ArrayD::zeros(IxDyn(&[1]))];
+    let wrong_shape_refs: Vec<&ArrayD<f64>> = wrong_shape.iter().collect();
+    let mut params_refs: Vec<&mut ArrayD<f64>> = params.iter_mut().collect();
+    assert!(optimizer
+        .step(&mut params_refs[..], &wrong_shape_refs[..])
+        .is_err());
     assert_eq!(params[0], original);
 }
