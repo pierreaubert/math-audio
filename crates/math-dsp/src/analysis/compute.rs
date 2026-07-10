@@ -1,4 +1,3 @@
-use super::apply::apply_hann_window;
 use super::apply::apply_tukey_window;
 use super::estimate::estimate_rt60_broadband;
 use super::interpolate::interpolate_fr;
@@ -15,7 +14,10 @@ use math_audio_iir_fir::{Biquad, BiquadFilterType};
 use rustfft::num_complex::Complex;
 use std::f32::consts::PI;
 
-/// Compute spectrum using Welch's method (averaged periodograms) - internal version
+/// Compute a peak-amplitude-calibrated spectrum using Welch RMS averaging.
+///
+/// This is an amplitude spectrum, not a power spectral density: each frame is
+/// corrected for the Hann coherent gain before squared magnitudes are averaged.
 pub(super) fn compute_welch_spectrum_internal(
     signal: &[f32],
     sample_rate: u32,
@@ -38,7 +40,7 @@ pub(super) fn compute_welch_spectrum_internal(
     )
 }
 
-/// Compute spectrum using Welch's method with caller-provided buffers.
+/// Compute a peak-amplitude-calibrated Welch spectrum with caller-provided buffers.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn compute_welch_spectrum_with_buffers(
     signal: &[f32],
@@ -57,19 +59,14 @@ pub(super) fn compute_welch_spectrum_with_buffers(
     let overlap_samples = (fft_size as f32 * overlap.clamp(0.0, 0.95)) as usize;
     let hop_size = fft_size - overlap_samples;
 
-    let num_windows = if signal.len() >= fft_size {
-        1 + (signal.len() - fft_size) / hop_size
-    } else {
-        1
-    };
+    let num_windows = 1 + signal.len().saturating_sub(1) / hop_size;
 
     let num_bins = fft_size / 2;
     let mut magnitude_sum = vec![0.0_f32; num_bins];
     let mut phase_real_sum = vec![0.0_f32; num_bins];
     let mut phase_imag_sum = vec![0.0_f32; num_bins];
 
-    let window_power: f32 = hann_window.iter().map(|&w| w * w).sum();
-    let scale_factor = 2.0 / window_power;
+    let mut processed_windows = 0_usize;
 
     for window_idx in 0..num_windows {
         let start = window_idx * hop_size;
@@ -83,6 +80,15 @@ pub(super) fn compute_welch_spectrum_with_buffers(
         // Zero-pad the rest if necessary
         windowed[window_len..fft_size].fill(0.0);
 
+        // Coherent-gain normalization recovers the peak amplitude of a
+        // bin-centred sinusoid. Use only the part of the window that actually
+        // overlaps the signal so a zero-padded trailing frame is calibrated
+        // like a complete frame rather than being attenuated by its padding.
+        let coherent_sum: f32 = hann_window[..window_len].iter().sum();
+        if coherent_sum <= 1e-10 {
+            continue;
+        }
+
         // Convert to complex
         for (i, &val) in windowed.iter().enumerate() {
             buffer[i] = Complex::new(val, 0.0);
@@ -91,17 +97,25 @@ pub(super) fn compute_welch_spectrum_with_buffers(
         fft.process(buffer);
 
         for i in 0..num_bins {
-            let mag = buffer[i].norm() * scale_factor.sqrt();
+            let one_sided_scale = if i == 0 {
+                1.0 / coherent_sum
+            } else {
+                2.0 / coherent_sum
+            };
+            let mag = buffer[i].norm() * one_sided_scale;
             magnitude_sum[i] += mag * mag;
             phase_real_sum[i] += buffer[i].re;
             phase_imag_sum[i] += buffer[i].im;
         }
+        processed_windows += 1;
     }
+
+    let processed_windows = processed_windows.max(1);
 
     let magnitudes_db: Vec<f32> = magnitude_sum
         .iter()
         .map(|&mag_sq| {
-            let mag = (mag_sq / num_windows as f32).sqrt();
+            let mag = (mag_sq / processed_windows as f32).sqrt();
             if mag > 1e-10 {
                 20.0 * mag.log10()
             } else {
@@ -113,7 +127,9 @@ pub(super) fn compute_welch_spectrum_with_buffers(
     let phases_deg: Vec<f32> = phase_real_sum
         .iter()
         .zip(phase_imag_sum.iter())
-        .map(|(&re, &im)| (im / num_windows as f32).atan2(re / num_windows as f32) * 180.0 / PI)
+        .map(|(&re, &im)| {
+            (im / processed_windows as f32).atan2(re / processed_windows as f32) * 180.0 / PI
+        })
         .collect();
 
     let freqs: Vec<f32> = (0..num_bins)
@@ -123,7 +139,7 @@ pub(super) fn compute_welch_spectrum_with_buffers(
     Ok((freqs, magnitudes_db, phases_deg))
 }
 
-/// Compute spectrum using a single FFT - internal version
+/// Compute a peak-amplitude-calibrated spectrum using a single FFT.
 pub(super) fn compute_single_fft_spectrum_internal(
     signal: &[f32],
     sample_rate: u32,
@@ -138,8 +154,8 @@ pub(super) fn compute_single_fft_spectrum_internal(
     let copy_len = signal.len().min(fft_size);
     windowed[..copy_len].copy_from_slice(&signal[..copy_len]);
 
-    let window_scale_factor = if no_window {
-        1.0
+    let coherent_sum = if no_window {
+        copy_len as f32
     } else {
         let hann_window = crate::stft::generate_hann_window_symmetric(fft_size);
 
@@ -147,25 +163,29 @@ pub(super) fn compute_single_fft_spectrum_internal(
             *sample *= hann_window[i];
         }
 
-        hann_window.iter().map(|&w| w * w).sum::<f32>()
+        hann_window[..copy_len].iter().sum::<f32>()
     };
+
+    if coherent_sum <= 1e-10 {
+        return Err("Window has zero coherent gain".to_string());
+    }
 
     let mut buffer: Vec<Complex<f32>> = windowed.iter().map(|&x| Complex::new(x, 0.0)).collect();
 
     let fft = plan_fft_forward(fft_size);
     fft.process(&mut buffer);
 
-    let scale_factor = if no_window {
-        (2.0 / fft_size as f32).sqrt()
-    } else {
-        (2.0 / window_scale_factor).sqrt()
-    };
-
     let num_bins = fft_size / 2;
     let magnitudes_db: Vec<f32> = buffer[..num_bins]
         .iter()
-        .map(|c| {
-            let mag = c.norm() * scale_factor;
+        .enumerate()
+        .map(|(i, c)| {
+            let one_sided_scale = if i == 0 {
+                1.0 / coherent_sum
+            } else {
+                2.0 / coherent_sum
+            };
+            let mag = c.norm() * one_sided_scale;
             if mag > 1e-10 {
                 20.0 * mag.log10()
             } else {
@@ -287,9 +307,12 @@ pub(super) fn compute_thd_from_ir(
                 let bin = (f / freq_resolution).round() as usize;
                 // Only access positive frequency bins (0 to nyquist)
                 if bin < nyquist_bin && bin < spectrum.len() {
-                    // compute_fft_padded already applies 1/N normalization, matching
-                    // the scale of fundamental_db (derived from transfer function ratios)
-                    let mag = spectrum[bin].norm();
+                    // `harmonic_ir` is an impulse response, so its DFT is a
+                    // transfer function. Undo compute_fft_padded's signal-level
+                    // 1/N convention: unlike the fundamental's recorded/reference
+                    // ratio, there is no second spectrum here for that factor to
+                    // cancel against.
+                    let mag = spectrum[bin].norm() * fft_size as f32;
                     // Convert to dB (threshold at -120 dB to avoid log of tiny values)
                     if mag > 1e-6 {
                         harmonic_db[i] = 20.0 * mag.log10();
@@ -479,7 +502,6 @@ pub(super) fn compute_fft(
 ) -> Result<Vec<Complex<f32>>, String> {
     // Apply window
     let windowed = match window_type {
-        WindowType::Hann => apply_hann_window(signal),
         WindowType::Tukey(alpha) => apply_tukey_window(signal, alpha),
     };
 
@@ -573,7 +595,15 @@ pub fn compute_impulse_response_from_fr(
     phase_deg: &[f32],
     sample_rate: f32,
 ) -> (Vec<f32>, Vec<f32>) {
-    let fft_size = 1024;
+    // A response grid with M positive-frequency samples can carry roughly
+    // 2*(M-1) time-domain samples. Preserve at least the legacy 1024-sample
+    // resolution while allowing denser input grids to request a longer IR.
+    let fft_size = frequencies
+        .len()
+        .saturating_sub(1)
+        .saturating_mul(2)
+        .next_power_of_two()
+        .max(1024);
     let half = fft_size / 2; // Number of positive-frequency bins (excluding DC)
     let freq_bin = sample_rate / fft_size as f32;
 
@@ -894,7 +924,9 @@ pub fn compute_clarity_spectrum(
 }
 
 /// Compute Spectrogram from Impulse Response
-/// Returns (spectrogram_matrix_db, frequency_bins, time_bins)
+/// Returns peak-amplitude-calibrated dBFS values as
+/// `(spectrogram_matrix_db, frequency_bins, time_bins)`. A bin-centred sine
+/// with peak amplitude 1.0 is reported as 0 dBFS independently of window size.
 /// `window_size` samples (e.g. 512), `hop_size` samples (e.g. 128).
 pub fn compute_spectrogram(
     impulse: &[f32],
@@ -904,11 +936,14 @@ pub fn compute_spectrogram(
 ) -> (Vec<Vec<f32>>, Vec<f32>, Vec<f32>) {
     use rustfft::num_complex::Complex;
 
+    if window_size < 2 || hop_size == 0 || !sample_rate.is_finite() || sample_rate <= 0.0 {
+        return (Vec::new(), Vec::new(), Vec::new());
+    }
     if impulse.len() < window_size {
         return (Vec::new(), Vec::new(), Vec::new());
     }
 
-    let num_frames = (impulse.len() - window_size) / hop_size;
+    let num_frames = 1 + (impulse.len() - window_size) / hop_size;
     let mut spectrogram = Vec::with_capacity(num_frames);
     let mut times = Vec::with_capacity(num_frames);
 
@@ -916,6 +951,7 @@ pub fn compute_spectrogram(
     let window: Vec<f32> = (0..window_size)
         .map(|i| 0.5 * (1.0 - (2.0 * PI * i as f32 / (window_size as f32 - 1.0)).cos()))
         .collect();
+    let coherent_sum: f32 = window.iter().sum();
 
     // Setup FFT
     let fft = plan_fft_forward(window_size);
@@ -938,8 +974,14 @@ pub fn compute_spectrogram(
         // Store as dB
         let magnitude_db: Vec<f32> = buffer[..window_size / 2]
             .iter()
-            .map(|c| {
-                let mag = c.norm();
+            .enumerate()
+            .map(|(bin, c)| {
+                let one_sided_scale = if bin == 0 {
+                    1.0 / coherent_sum
+                } else {
+                    2.0 / coherent_sum
+                };
+                let mag = c.norm() * one_sided_scale;
                 if mag > 1e-9 {
                     20.0 * mag.log10()
                 } else {

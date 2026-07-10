@@ -1,4 +1,3 @@
-use super::compute::compute_fft;
 use super::compute::compute_schroeder_decay;
 use super::misc::next_power_of_two;
 use super::misc::trim_impulse_to_noise_floor;
@@ -6,7 +5,6 @@ use super::plan::plan_fft_forward;
 use super::plan::plan_fft_inverse;
 use super::types::Rt60Fit;
 use super::types::Rt60FitMethod;
-use super::types::WindowType;
 use super::types::fit_rt60_decay;
 use rustfft::num_complex::Complex;
 
@@ -21,14 +19,26 @@ use rustfft::num_complex::Complex;
 /// # Returns
 /// Estimated lag in samples (negative means recorded leads)
 pub(super) fn estimate_lag(reference: &[f32], recorded: &[f32]) -> Result<isize, String> {
-    let len = reference.len().min(recorded.len());
+    if reference.is_empty() || recorded.is_empty() {
+        return Err("Reference and recorded signals must be non-empty".to_string());
+    }
 
     // Zero-pad to avoid circular correlation artifacts
-    let fft_size = next_power_of_two(len * 2);
+    let fft_size = next_power_of_two(reference.len() + recorded.len() - 1);
 
-    // Use Hann window for correlation to suppress edge effects
-    let ref_fft = compute_fft(reference, fft_size, WindowType::Hann)?;
-    let rec_fft = compute_fft(recorded, fft_size, WindowType::Hann)?;
+    // Correlation must use the original samples. Applying a window changes the
+    // matched signal and can erase events at the buffer boundaries.
+    let mut ref_fft = vec![Complex::new(0.0_f32, 0.0_f32); fft_size];
+    let mut rec_fft = vec![Complex::new(0.0_f32, 0.0_f32); fft_size];
+    for (dst, &sample) in ref_fft.iter_mut().zip(reference) {
+        dst.re = sample;
+    }
+    for (dst, &sample) in rec_fft.iter_mut().zip(recorded) {
+        dst.re = sample;
+    }
+    let fft = plan_fft_forward(fft_size);
+    fft.process(&mut ref_fft);
+    fft.process(&mut rec_fft);
 
     // Cross-correlation in frequency domain: conj(X) * Y
     let mut cross_corr_fft: Vec<Complex<f32>> = ref_fft
@@ -54,7 +64,7 @@ pub(super) fn estimate_lag(reference: &[f32], recorded: &[f32]) -> Result<isize,
     }
 
     // Convert index to lag (handle wrap-around)
-    Ok(if max_idx <= fft_size / 2 {
+    Ok(if max_idx < recorded.len() {
         max_idx as isize
     } else {
         max_idx as isize - fft_size as isize

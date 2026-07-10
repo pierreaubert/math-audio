@@ -79,8 +79,11 @@ pub fn cross_correlate_envelope(
     let analytic = crate::instantaneous_frequency::analytic_signal(&xcorr);
     let envelope: Vec<f32> = analytic.iter().map(|c| c.norm()).collect();
 
-    // Find peak in the causal part (first half — positive lags only)
-    let search_len = fft_size / 2;
+    // Positive lags for conj(probe) * recorded occupy 0..recorded.len().
+    // The remaining non-zero correlation samples wrap at the end and represent
+    // negative lags, so searching the entire FFT half can select an alias when
+    // the recording is short relative to the padded transform.
+    let search_len = recorded.len().min(envelope.len());
     let mut peak_sample = 0_usize;
     let mut peak_value = 0.0_f32;
     for (i, &val) in envelope.iter().enumerate().take(search_len) {
@@ -91,7 +94,7 @@ pub fn cross_correlate_envelope(
     }
 
     // Parabolic interpolation for sub-sample precision
-    let peak_refined = if peak_sample > 0 && peak_sample < search_len - 1 {
+    let peak_refined = if peak_sample > 0 && peak_sample + 1 < search_len {
         let y_prev = envelope[peak_sample - 1] as f64;
         let y_peak = envelope[peak_sample] as f64;
         let y_next = envelope[peak_sample + 1] as f64;
@@ -171,13 +174,15 @@ pub fn deconvolve_sweep(
     fft.process(&mut x);
 
     // Regularisation: 60 dB below the sweep's peak bin magnitude.
-    let x_peak = x
+    let x_peak_sq = x
         .iter()
-        .map(|c| c.norm())
+        .map(|c| c.norm_sqr())
         .fold(0.0_f32, f32::max)
-        .max(1e-20);
-    let epsilon = x_peak * 1e-3; // 60 dB below peak
-    let eps_sq = epsilon * epsilon;
+        .max(f32::MIN_POSITIVE);
+    // A 60 dB amplitude ratio is 1e-6 in squared magnitude. Clamp after
+    // multiplication so a silent reference cannot underflow the denominator
+    // to zero and produce NaNs.
+    let eps_sq = (x_peak_sq * 1e-6).max(f32::MIN_POSITIVE);
 
     let spectrum_size = fft_size / 2 + 1;
     let mut h = Vec::with_capacity(spectrum_size);

@@ -123,6 +123,34 @@ fn test_filtfilt_preserves_dc() {
 }
 
 #[test]
+fn test_filtfilt_propagates_non_unity_dc_gain_between_sections() {
+    fn first_order_with_dc_gain(gain: f64, pole: f64) -> BiquadCoefficients<f64> {
+        BiquadCoefficients {
+            b0: gain * (1.0 - pole),
+            b1: 0.0,
+            b2: 0.0,
+            a1: -pole,
+            a2: 0.0,
+        }
+    }
+
+    let signal = vec![0.4_f64; 512];
+    let sections = [
+        first_order_with_dc_gain(2.0, 0.8),
+        first_order_with_dc_gain(0.25, 0.6),
+    ];
+    let filtered = filtfilt(&signal, &sections);
+    let expected = 0.4 * (2.0_f64 * 0.25).powi(2);
+
+    for (index, sample) in filtered.iter().enumerate() {
+        assert!(
+            (sample - expected).abs() < 1e-12,
+            "sample {index}: expected {expected}, got {sample}"
+        );
+    }
+}
+
+#[test]
 fn test_filtfilt_lowpass_removes_high_freq() {
     let sections = lowpass(4, 1000.0, 48000.0);
     let high = sine_wave(10000.0, 48000.0, 0.5);

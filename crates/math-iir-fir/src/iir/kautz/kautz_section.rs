@@ -4,7 +4,7 @@ use std::f64::consts::PI;
 
 /// A second-order Kautz section with pole tuned to a specific frequency.
 ///
-/// Implements an orthonormal basis function built from a second-order allpass.
+/// Implements a real fixed-pole resonant basis chained by a second-order allpass.
 /// The pole is placed at `pole_freq` with radius `pole_radius`, concentrating
 /// frequency resolution around that frequency.
 ///
@@ -22,11 +22,14 @@ use std::f64::consts::PI;
 /// preceding sections have been accumulated into the input) is:
 ///
 /// ```text
-/// φ(z) = sqrt(1 - r²) · (1 + z⁻¹) / (1 + a1·z⁻¹ + r²·z⁻²)  · chain
+/// φ(z) = sqrt(1 - r²) · (1 - r²)
+///        / (1 + a1·z⁻¹ + r²·z⁻²) · chain
 /// ```
 ///
 /// In the time domain, each section receives the allpass-filtered output from
-/// all previous sections and extracts its own orthonormal component.
+/// all previous sections and extracts one resonant component. This is useful as
+/// a fixed-pole modal basis, but it is not the complete two-function real
+/// orthonormal Kautz pair associated with a complex-conjugate pole pair.
 pub struct KautzSection<T: FilterFloat = f64> {
     /// Pole frequency in Hz.
     pub pole_freq: T,
@@ -89,7 +92,7 @@ impl<T: FilterFloat> KautzSection<T> {
     /// `x` is the input (allpass-chained output from all preceding sections).
     ///
     /// Returns `(basis_value, allpass_output)`:
-    /// - `basis_value`: the orthonormal basis function value (multiply by `gain` and sum)
+    /// - `basis_value`: the resonant basis function value (multiply by `gain` and sum)
     /// - `allpass_output`: the allpass output to pass as input to the next section
     ///
     /// Both the allpass and the basis extraction use transposed direct form II for

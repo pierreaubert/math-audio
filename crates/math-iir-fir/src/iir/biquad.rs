@@ -116,6 +116,25 @@ impl<T: FilterFloat> Biquad<T> {
     /// Use [`try_new`](Self::try_new) for explicit error handling.
     pub fn new(filter_type: BiquadFilterType, freq: T, srate: T, q: T, db_gain: T) -> Self {
         let zero = T::zero();
+        let srate = if srate.is_finite() && srate > zero {
+            srate
+        } else {
+            lit(48_000.0)
+        };
+        let nyquist = srate / lit(2.0);
+        // RBJ formulas contain `1 - cos(omega)`, which rounds to zero when
+        // omega is only machine epsilon away from an endpoint. A sqrt(epsilon)
+        // relative margin keeps fallback coefficients non-degenerate for both
+        // f32 and f64 while leaving every valid in-band frequency untouched.
+        let frequency_margin = nyquist * T::epsilon().sqrt();
+        let freq = if !freq.is_finite() || freq <= zero {
+            frequency_margin
+        } else if freq >= nyquist {
+            nyquist - frequency_margin
+        } else {
+            freq
+        };
+        let db_gain = if db_gain.is_finite() { db_gain } else { zero };
         let mut biquad = Biquad {
             filter_type,
             freq,
@@ -260,6 +279,21 @@ impl<T: FilterFloat> Biquad<T> {
         db_gain: T,
     ) {
         let zero = T::zero();
+        let srate = if srate.is_finite() && srate > zero {
+            srate
+        } else {
+            lit(48_000.0)
+        };
+        let nyquist = srate / lit(2.0);
+        let frequency_margin = nyquist * T::epsilon().sqrt();
+        let freq = if !freq.is_finite() || freq <= zero {
+            frequency_margin
+        } else if freq >= nyquist {
+            nyquist - frequency_margin
+        } else {
+            freq
+        };
+        let db_gain = if db_gain.is_finite() { db_gain } else { zero };
         self.filter_type = filter_type;
         self.freq = freq;
         self.srate = srate;

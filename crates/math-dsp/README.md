@@ -91,7 +91,7 @@ Pre-built configs for common use cases:
 
 | Config | Method | Use case |
 |---|---|---|
-| `WavAnalysisConfig::default()` | Welch's (averaged periodograms) | Stationary signals (music, noise) |
+| `WavAnalysisConfig::default()` | Welch RMS amplitude spectrum | Stationary signals (music, noise) |
 | `WavAnalysisConfig::for_log_sweep()` | Single FFT + pink compensation | Log sweep measurements |
 | `WavAnalysisConfig::for_impulse_response()` | Single FFT | Impulse response analysis |
 

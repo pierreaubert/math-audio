@@ -32,7 +32,8 @@ impl SpectrumAnalyzer {
         }
     }
 
-    /// Analyze `signal` using Welch's method and reuse all internal buffers.
+    /// Analyze `signal` as a peak-amplitude spectrum using Welch RMS averaging
+    /// and reuse all internal buffers. The result is not a PSD.
     ///
     /// # Errors
     /// Returns an error if the signal is empty.

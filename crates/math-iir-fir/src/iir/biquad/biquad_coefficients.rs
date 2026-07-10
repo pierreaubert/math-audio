@@ -19,6 +19,10 @@ impl<T: FilterFloat> BiquadCoefficients<T> {
     /// Linearly interpolate between two sets of coefficients.
     ///
     /// `t` ranges from 0.0 (fully `self`) to 1.0 (fully `other`).
+    /// For real, stable, normalized second-order denominators, this interval
+    /// remains stable: the Schur/Jury stability region in `(a1, a2)` is convex.
+    /// Values outside the documented interval are extrapolation and do not have
+    /// that guarantee.
     #[inline(always)]
     pub fn lerp(&self, other: &BiquadCoefficients<T>, t: T) -> BiquadCoefficients<T> {
         BiquadCoefficients {

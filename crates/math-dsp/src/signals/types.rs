@@ -49,7 +49,7 @@ pub fn aggregate_tone_phase(phasors: &[TonePhasorWindow]) -> TonePhaseResult {
         sum_re += p.re;
         sum_im += p.im;
         let mag = (p.re * p.re + p.im * p.im).sqrt();
-        sum_mag += mag / p.len as f64;
+        sum_mag += 2.0 * mag / p.len as f64;
         let phase = p.im.atan2(p.re);
         sum_cos += phase.cos();
         sum_sin += phase.sin();

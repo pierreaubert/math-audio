@@ -110,6 +110,24 @@ pub(super) fn design_fir_bandpass<T: FilterFloat>(
         *h_val *= window_coeffs[i];
     }
 
+    // Normalize at the middle of the requested passband. A bandpass has zero
+    // DC gain, so tap-sum normalization (used by a lowpass) is not meaningful.
+    let center_freq = (freq_low + freq_high) / lit::<T>(2.0);
+    let omega = two_pi * center_freq / srate;
+    let mut real = T::zero();
+    let mut imag = T::zero();
+    for (i, &coefficient) in h.iter().enumerate() {
+        let phase = -lit::<T>(i as f64) * omega;
+        real += coefficient * phase.cos();
+        imag += coefficient * phase.sin();
+    }
+    let center_gain = (real * real + imag * imag).sqrt();
+    if center_gain > lit(1e-10) {
+        for coefficient in &mut h {
+            *coefficient /= center_gain;
+        }
+    }
+
     h
 }
 
@@ -131,6 +149,15 @@ pub(super) fn design_fir_bandstop<T: FilterFloat>(
         *h_val = -*h_val;
     }
     h[m] += T::one();
+
+    // Spectral inversion of a finite, windowed bandpass is only approximately
+    // unity at DC. Normalize the completed bandstop exactly at that passband.
+    let dc_gain: T = h.iter().copied().sum();
+    if dc_gain.abs() > lit(1e-10) {
+        for coefficient in &mut h {
+            *coefficient /= dc_gain;
+        }
+    }
 
     h
 }

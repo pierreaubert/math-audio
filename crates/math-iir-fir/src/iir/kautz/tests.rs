@@ -151,6 +151,31 @@ fn test_process_matches_frequency_response() {
 }
 
 #[test]
+fn test_section_impulse_response_matches_analytic_basis_response() {
+    let sample_rate = 48_000.0;
+    let frequency = 1375.0;
+    let mut section = KautzSection::new(1000.0_f64, 5.0, 1.0, sample_rate);
+    let omega = 2.0 * std::f64::consts::PI * frequency / sample_rate;
+    let mut measured = Complex::new(0.0, 0.0);
+
+    for sample_index in 0..8192 {
+        let input = if sample_index == 0 { 1.0 } else { 0.0 };
+        let (basis, _) = section.process_section(input);
+        measured += Complex::from_polar(basis, -omega * sample_index as f64);
+    }
+
+    let expected = KautzSection::new(1000.0_f64, 5.0, 1.0, sample_rate).basis_response(
+        frequency,
+        sample_rate,
+        Complex::new(1.0, 0.0),
+    );
+    assert!(
+        (measured - expected).norm() < 1e-9,
+        "measured {measured:?}, expected {expected:?}"
+    );
+}
+
+#[test]
 fn test_kautz_ill_conditioned_poles() {
     // Issue #4: closely-spaced poles (100 Hz, 100.05 Hz, 100.1 Hz)
     // create an ill-conditioned basis matrix.  The old normal-equations

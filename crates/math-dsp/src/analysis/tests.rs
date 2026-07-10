@@ -1,6 +1,10 @@
 use super::apply::apply_hann_window;
 use super::compute::compute_coherence_from_realizations;
+use super::compute::compute_impulse_response_from_fr;
+use super::compute::compute_single_fft_spectrum_internal;
+use super::compute::compute_spectrogram;
 use super::compute::compute_thd_from_ir;
+use super::compute::compute_welch_spectrum_internal;
 use super::compute::compute_windowed_fr;
 use super::estimate::estimate_lag;
 use super::estimate::estimate_noise_floor_db_from_silence;
@@ -9,8 +13,70 @@ use super::plan::cross_correlate_envelope;
 use super::plan::deconvolve_sweep;
 use super::*;
 use rustfft::num_complex::Complex;
+use std::f32::consts::PI;
 
 mod misc;
+
+fn bin_centered_sine(amplitude: f32, bin: usize, len: usize) -> Vec<f32> {
+    (0..len)
+        .map(|n| amplitude * (2.0 * PI * bin as f32 * n as f32 / len as f32).sin())
+        .collect()
+}
+
+#[test]
+fn single_fft_reports_peak_amplitude_independent_of_fft_size() {
+    let amplitude = 0.25_f32;
+    let expected_db = 20.0 * amplitude.log10();
+
+    for (fft_size, bin) in [(1024, 32), (2048, 64)] {
+        let signal = bin_centered_sine(amplitude, bin, fft_size);
+        for no_window in [false, true] {
+            let (_, magnitude_db, _) =
+                compute_single_fft_spectrum_internal(&signal, 48_000, fft_size, no_window).unwrap();
+            assert!(
+                (magnitude_db[bin] - expected_db).abs() < 0.05,
+                "fft_size={fft_size}, no_window={no_window}: expected {expected_db:.3} dBFS, got {:.3}",
+                magnitude_db[bin]
+            );
+        }
+    }
+}
+
+#[test]
+fn welch_reports_peak_amplitude_independent_of_fft_size() {
+    let amplitude = 0.25_f32;
+    let expected_db = 20.0 * amplitude.log10();
+
+    for (fft_size, bin) in [(1024, 32), (2048, 64)] {
+        let signal = bin_centered_sine(amplitude, bin * 8, fft_size * 8);
+        let (_, magnitude_db, _) =
+            compute_welch_spectrum_internal(&signal, 48_000, fft_size, 0.5).unwrap();
+        assert!(
+            (magnitude_db[bin] - expected_db).abs() < 0.05,
+            "fft_size={fft_size}: expected {expected_db:.3} dBFS, got {:.3}",
+            magnitude_db[bin]
+        );
+    }
+}
+
+#[test]
+fn welch_includes_a_trailing_partial_frame() {
+    let fft_size = 1024;
+    let bin = 32;
+    let mut signal = vec![0.0_f32; fft_size + 3 * fft_size / 4];
+    let tail_start = fft_size + fft_size / 2;
+    for (n, sample) in signal[tail_start..].iter_mut().enumerate() {
+        *sample = 0.5 * (2.0 * PI * bin as f32 * n as f32 / fft_size as f32).sin();
+    }
+
+    let (_, magnitude_db, _) =
+        compute_welch_spectrum_internal(&signal, 48_000, fft_size, 0.5).unwrap();
+    assert!(
+        magnitude_db[bin] > -80.0,
+        "the only non-zero tail must contribute to Welch averaging, got {:.1} dB",
+        magnitude_db[bin]
+    );
+}
 
 #[cfg(test)]
 mod gd_1c_tests {
@@ -238,6 +304,17 @@ fn test_estimate_lag_positive() {
 }
 
 #[test]
+fn test_estimate_lag_does_not_window_away_an_edge_impulse() {
+    let mut reference = vec![0.0_f32; 64];
+    reference[0] = 1.0;
+    let mut recorded = vec![0.0_f32; 96];
+    recorded[17] = 1.0;
+
+    let lag = estimate_lag(&reference, &recorded).unwrap();
+    assert_eq!(lag, 17);
+}
+
+#[test]
 fn test_identical_signals_have_zero_lag() {
     // When signals are truly identical (like in the bug case),
     // lag should be exactly zero
@@ -306,6 +383,18 @@ fn test_cross_correlate_envelope_with_noise() {
         delay,
         result.peak_sample
     );
+}
+
+#[test]
+fn test_cross_correlate_envelope_ignores_wrapped_negative_lag_tail() {
+    // This short asymmetric pair has a larger analytic-envelope value at FFT
+    // index 3, outside the recording's valid positive-lag range 0..2. Searching
+    // fft_size/2 used to select that wrapped/zero-padded alias.
+    let probe = [0.023_056_554, -0.123_002_43, -0.681_590_6];
+    let recorded = [-1.188_907_5, 0.152_694_91];
+    let result = cross_correlate_envelope(&probe, &recorded, 48_000).unwrap();
+    assert_eq!(result.peak_sample, 1);
+    assert!(result.peak_sample < recorded.len());
 }
 
 #[test]
@@ -414,6 +503,86 @@ fn test_thd_window_min_is_frequency_dependent() {
         "THD should be in [0, 100], got {}",
         thd[0]
     );
+}
+
+#[test]
+fn test_thd_harmonic_ir_uses_transfer_function_amplitude() {
+    let sample_rate = 48_000.0_f32;
+    let start_freq = 20.0_f32;
+    let end_freq = 20_000.0_f32;
+    let duration = 1.0_f32;
+    let n = 65_536;
+    let peak_idx = 20_000;
+    let mut ir = vec![0.0_f32; n];
+    ir[peak_idx] = 1.0;
+
+    let h2_delay =
+        (duration * 2.0_f32.ln() / (end_freq / start_freq).ln() * sample_rate).round() as usize;
+    ir[peak_idx - h2_delay] = 0.1;
+
+    let (thd, harmonics) = compute_thd_from_ir(
+        &ir,
+        sample_rate,
+        &[1000.0],
+        &[0.0],
+        start_freq,
+        end_freq,
+        duration,
+    );
+    assert!(
+        (harmonics[0][0] + 20.0).abs() < 0.1,
+        "a 0.1 harmonic IR must be -20 dB, got {:.2} dB",
+        harmonics[0][0]
+    );
+    assert!(
+        (thd[0] - 10.0).abs() < 0.2,
+        "a single 0.1 second harmonic must produce 10% THD, got {:.3}%",
+        thd[0]
+    );
+}
+
+#[test]
+fn deconvolve_silent_reference_is_finite_and_zero() {
+    let recording = vec![0.25_f32; 1024];
+    let reference = vec![0.0_f32; 1024];
+    let response = deconvolve_sweep(&recording, &reference, 48_000).unwrap();
+    assert!(
+        response
+            .iter()
+            .all(|bin| bin.re.is_finite() && bin.im.is_finite())
+    );
+    assert!(response.iter().all(|bin| bin.norm() == 0.0));
+}
+
+#[test]
+fn impulse_response_resolution_scales_with_input_grid() {
+    let frequencies: Vec<f32> = (0..=2048).map(|i| 20.0 + i as f32 * 10.0).collect();
+    let magnitude_db = vec![0.0_f32; frequencies.len()];
+    let phase_deg = vec![0.0_f32; frequencies.len()];
+
+    let (times, impulse) =
+        compute_impulse_response_from_fr(&frequencies, &magnitude_db, &phase_deg, 48_000.0);
+    assert_eq!(times.len(), 4096);
+    assert_eq!(impulse.len(), 4096);
+}
+
+#[test]
+fn spectrogram_reports_peak_amplitude_and_includes_exact_frame() {
+    let amplitude = 0.25_f32;
+    let expected_db = 20.0 * amplitude.log10();
+
+    for (window_size, bin) in [(1024, 32), (2048, 64)] {
+        let signal = bin_centered_sine(amplitude, bin, window_size);
+        let (matrix, _, times) =
+            compute_spectrogram(&signal, 48_000.0, window_size, window_size / 4);
+        assert_eq!(matrix.len(), 1);
+        assert_eq!(times.len(), 1);
+        assert!(
+            (matrix[0][bin] - expected_db).abs() < 0.05,
+            "window_size={window_size}: expected {expected_db:.3} dBFS, got {:.3}",
+            matrix[0][bin]
+        );
+    }
 }
 
 #[test]

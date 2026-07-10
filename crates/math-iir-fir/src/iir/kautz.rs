@@ -1,8 +1,9 @@
 //! Kautz filter implementation for room mode correction.
 //!
-//! Kautz filters are rational orthonormal structures where each section has an
-//! independently chosen pole. By placing poles at detected room mode frequencies,
-//! the filter concentrates its frequency resolution exactly where it is needed.
+//! This module uses a Kautz-inspired fixed-pole modal structure where each
+//! section has an independently chosen complex-conjugate pole pair. By placing
+//! poles at detected room mode frequencies, the filter concentrates its
+//! frequency resolution exactly where it is needed.
 //! A 5-section Kautz filter can model 5 room modes more accurately than 5 standard
 //! biquad PEQs, using fewer parameters.
 //!
@@ -11,6 +12,10 @@
 //! Each [`KautzSection`] implements a second-order allpass with complex pole at
 //! `r * exp(jθ)`. The overall [`KautzFilter`] is a parallel bank of sections whose
 //! weighted basis function outputs are summed.
+//!
+//! Each implemented second-order section exposes one real resonant basis output.
+//! It is not the complete two-output orthonormal real Kautz pair; the API is
+//! intended for regularized modal correction rather than orthonormal expansion.
 //!
 //! # Gain optimization
 //!

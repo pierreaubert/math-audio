@@ -1,3 +1,4 @@
+use super::context::kirkeby_transition_width;
 use super::fir_design_config::FirDesignConfig;
 use super::fir_phase::FirPhase;
 use super::generate::generate_fir_from_response;
@@ -51,6 +52,35 @@ fn test_generate_fir_from_response_flat() {
     assert_eq!(coeffs.len(), 256);
     // Should have non-zero coefficients
     assert!(coeffs.iter().any(|&x| x.abs() > 1e-10));
+}
+
+#[test]
+fn kirkeby_transition_width_tracks_fft_bin_resolution() {
+    let width_48k = kirkeby_transition_width(48_000.0, 65_536, 20.0, 20_000.0);
+    let width_96k = kirkeby_transition_width(96_000.0, 65_536, 20.0, 20_000.0);
+    assert!((width_48k - 8.0 * 48_000.0 / 65_536.0).abs() < 1e-12);
+    assert!((width_96k - 8.0 * 96_000.0 / 65_536.0).abs() < 1e-12);
+}
+
+#[test]
+fn magnitude_response_accepts_deep_negative_db_notches() {
+    let frequencies = [20.0, 900.0, 1000.0, 1100.0, 20_000.0];
+    let magnitude_db = [0.0, -60.0, -60.0, -60.0, 0.0];
+    let config = FirDesignConfig {
+        n_taps: 4096,
+        sample_rate: 48_000.0,
+        phase: FirPhase::Linear,
+        ..Default::default()
+    };
+    let fir = Fir::new_custom(
+        generate_fir_from_response(&frequencies, &magnitude_db, &config),
+        config.sample_rate,
+    );
+    assert!(
+        fir.log_result(1000.0) < -30.0,
+        "negative dB targets must produce a deep cut, got {:.2} dB",
+        fir.log_result(1000.0)
+    );
 }
 
 #[test]

@@ -49,6 +49,28 @@ mod fir_tests {
     }
 
     #[test]
+    fn test_fir_bandpass_has_unity_gain_at_band_center() {
+        let low = 4000.0;
+        let high = 8000.0;
+        let fir = Fir::bandpass(51, low, high, 48_000.0, WindowType::Hann, 0.0);
+        let center_gain = fir.result((low + high) * 0.5);
+        assert!(
+            (center_gain - 1.0).abs() < 1e-12,
+            "bandpass center gain must be one, got {center_gain}"
+        );
+    }
+
+    #[test]
+    fn test_fir_bandstop_has_unity_dc_gain() {
+        let fir = Fir::bandstop(51, 4000.0, 8000.0, 48_000.0, WindowType::Hann, 0.0);
+        let dc_gain = fir.result(0.0);
+        assert!(
+            (dc_gain - 1.0).abs() < 1e-12,
+            "bandstop DC gain must be one, got {dc_gain}"
+        );
+    }
+
+    #[test]
     fn test_fir_custom_creation() {
         let coeffs = vec![0.1, 0.2, 0.4, 0.2, 0.1];
         let fir = Fir::new_custom(coeffs.clone(), 48000.0);

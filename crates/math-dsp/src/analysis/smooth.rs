@@ -3,6 +3,9 @@
 /// Frequencies must be sorted in ascending order (as from FFT or log-spaced grids).
 /// If the input slices are mismatched, only paired frequency/value samples are
 /// smoothed and returned.
+/// Values are averaged arithmetically in the domain supplied by the caller.
+/// In particular, dB inputs are smoothed in dB; callers that need energy-domain
+/// smoothing must convert to linear power before calling and convert back after.
 /// Uses a prefix sum with two-pointer sliding window for O(n) complexity.
 pub fn smooth_response_f64(frequencies: &[f64], values: &[f64], octaves: f64) -> Vec<f64> {
     if octaves <= 0.0 || frequencies.is_empty() || values.is_empty() {
@@ -57,6 +60,9 @@ pub fn smooth_response_f64(frequencies: &[f64], values: &[f64], octaves: f64) ->
 /// Frequencies must be sorted in ascending order (as from FFT or log-spaced grids).
 /// If the input slices are mismatched, only paired frequency/value samples are
 /// smoothed and returned.
+/// Values are averaged arithmetically in the domain supplied by the caller.
+/// In particular, dB inputs are smoothed in dB; callers that need energy-domain
+/// smoothing must convert to linear power before calling and convert back after.
 /// Uses a prefix sum with two-pointer sliding window for O(n) complexity.
 pub fn smooth_response_f32(frequencies: &[f32], values: &[f32], octaves: f32) -> Vec<f32> {
     if octaves <= 0.0 || frequencies.is_empty() || values.is_empty() {

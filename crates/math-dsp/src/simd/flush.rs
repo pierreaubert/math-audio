@@ -6,6 +6,10 @@ use rustfft::num_complex::Complex;
 /// cause significant CPU overhead when processed by FMA instructions. Normal values
 /// smaller than `f32::MIN_POSITIVE` do not exist — `f32::MIN_POSITIVE` IS the boundary.
 /// Values at or above `f32::MIN_POSITIVE` are normal and will never be zeroed.
+///
+/// This is intentionally nonlinear and permanently replaces subnormal samples.
+/// Apply it to DSP state or outputs where denormal suppression is desired, not to
+/// archival/raw audio buffers whose subnormal tail values must be preserved.
 #[inline]
 pub fn flush_denormals_inplace(samples: &mut [f32]) {
     // f32::MIN_POSITIVE (~1.175e-38) is the smallest positive *normal* f32.

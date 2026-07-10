@@ -1,6 +1,7 @@
 use std::f32::consts::PI;
 
 /// Apply Hann window to a signal
+#[cfg(test)]
 pub(super) fn apply_hann_window(signal: &[f32]) -> Vec<f32> {
     let len = signal.len();
     if len < 2 {

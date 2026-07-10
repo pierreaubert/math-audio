@@ -8,7 +8,7 @@ pub(super) type SpectrumResult = Result<(Vec<f32>, Vec<f32>, Vec<f32>), String>;
 pub struct WavAnalysisOutput {
     /// Frequency points in Hz (log-spaced)
     pub frequencies: Vec<f32>,
-    /// Magnitude in dB
+    /// Peak-amplitude magnitude in dBFS
     pub magnitude_db: Vec<f32>,
     /// Phase in degrees
     pub phase_deg: Vec<f32>,
@@ -41,7 +41,7 @@ pub struct AnalysisResult {
     pub clarity_c50_db: Vec<f32>,
     /// Clarity C80 in dB
     pub clarity_c80_db: Vec<f32>,
-    /// Spectrogram (Time x Freq magnitude in dB)
+    /// Spectrogram (time × frequency peak-amplitude magnitude in dBFS)
     pub spectrogram_db: Vec<Vec<f32>>,
 }
 
@@ -130,7 +130,6 @@ pub fn read_analysis_csv(csv_path: &Path) -> Result<AnalysisResult, String> {
 /// Window function type for FFT
 #[derive(Debug, Clone, Copy)]
 pub(super) enum WindowType {
-    Hann,
     Tukey(f32), // alpha parameter (0.0-1.0)
 }
 

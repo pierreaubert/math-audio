@@ -109,6 +109,43 @@ fn test_try_new_invalid_frequency_above_nyquist() {
 }
 
 #[test]
+fn test_new_clamps_frequency_into_open_nyquist_interval() {
+    for frequency in [0.0, -100.0, 24_000.0, 30_000.0, f64::NAN] {
+        let biquad = Biquad::new(BiquadFilterType::Lowpass, frequency, 48_000.0, 0.707, 0.0);
+        assert!(
+            biquad.freq > 0.0 && biquad.freq < 24_000.0,
+            "frequency {frequency} was stored as {}",
+            biquad.freq
+        );
+        let coefficients = biquad.coefficients();
+        assert!(
+            [
+                coefficients.b0,
+                coefficients.b1,
+                coefficients.b2,
+                coefficients.a1,
+                coefficients.a2,
+            ]
+            .iter()
+            .all(|coefficient| coefficient.is_finite())
+        );
+        if !frequency.is_finite() || frequency <= 0.0 {
+            assert!(
+                coefficients.b0 > 0.0,
+                "clamping {frequency} must avoid a degenerate zero-frequency lowpass"
+            );
+        }
+    }
+}
+
+#[test]
+fn test_update_params_clamps_frequency_into_open_nyquist_interval() {
+    let mut biquad = Biquad::new(BiquadFilterType::Lowpass, 1000.0, 48_000.0, 0.707, 0.0);
+    biquad.update_params(BiquadFilterType::Highpass, 48_000.0, 48_000.0, 0.707, 0.0);
+    assert!(biquad.freq > 0.0 && biquad.freq < 24_000.0);
+}
+
+#[test]
 fn test_try_new_invalid_q_negative() {
     let result = Biquad::try_new(BiquadFilterType::Peak, 1000.0, 48000.0, -1.0, 3.0);
     assert!(result.is_err());
@@ -269,8 +306,11 @@ fn test_compute_coeffs_all_filter_types_finite() {
 #[test]
 fn test_compute_coeffs_a0_guard_path() {
     // Extreme parameters can drive a0 to near-zero; verify fallback identity coeffs.
-    // LowshelfOrf at DC with extreme negative gain produces a0 < 1e-15.
-    let mut bq = Biquad::<f64>::new(BiquadFilterType::LowshelfOrf, 0.0, 48000.0, 0.7, -640.0);
+    // A valid but extremely small in-band LowshelfOrf frequency with extreme
+    // negative gain produces a0 < 1e-15. (Exactly zero is now sanitized by
+    // Biquad::new before coefficient generation.)
+    let mut bq =
+        Biquad::<f64>::new(BiquadFilterType::LowshelfOrf, 1.0e-10, 48000.0, 0.7, -640.0);
     bq.compute_coeffs();
     let (a1, a2, b0, b1, b2) = bq.constants();
     // When a0 guard triggers, coefficients become identity (pass-through)

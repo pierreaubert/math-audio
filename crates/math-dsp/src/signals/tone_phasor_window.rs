@@ -31,8 +31,9 @@ pub fn tone_phase_phasors(
         return Vec::new();
     }
     let steady_len = steady_end - steady_start;
-    let samples_per_cycle = (sample_rate as f64 / freq_hz as f64).round() as usize;
-    if samples_per_cycle < 2 || steady_len < samples_per_cycle {
+    let samples_per_cycle = sample_rate as f64 / freq_hz as f64;
+    let min_cycle_samples = samples_per_cycle.ceil() as usize;
+    if min_cycle_samples < 2 || steady_len < min_cycle_samples {
         // Less than one full cycle of the target frequency fits in the
         // analysis region — single-bin DFT below one cycle has severe
         // spectral leakage with falsely-low circular-std (correlated
@@ -44,14 +45,18 @@ pub fn tone_phase_phasors(
     // full cycle. Effective count is the largest k in [1, num_windows]
     // such that floor(steady_len / k) >= samples_per_cycle.
     let mut effective_windows = num_windows;
-    while effective_windows > 1 && steady_len / effective_windows < samples_per_cycle {
+    while effective_windows > 1 && steady_len / effective_windows < min_cycle_samples {
         effective_windows -= 1;
     }
     let raw_win_len = steady_len / effective_windows;
-    let win_len = (raw_win_len / samples_per_cycle) * samples_per_cycle;
-    if win_len < samples_per_cycle {
+    let complete_cycles = (raw_win_len as f64 / samples_per_cycle).floor() as usize;
+    if complete_cycles == 0 {
         return Vec::new();
     }
+    // Round the total duration of all complete cycles once. Rounding a single
+    // cycle and multiplying it accumulates the fractional-sample error and can
+    // leave long windows noticeably short or long of an integer cycle count.
+    let win_len = (complete_cycles as f64 * samples_per_cycle).round() as usize;
 
     let mut out = Vec::with_capacity(effective_windows);
     for w in 0..effective_windows {

@@ -44,6 +44,13 @@ pub fn design_dual_windows(
     synthesis_size: usize,
     hop_size: usize,
 ) -> (Vec<f32>, Vec<f32>) {
+    assert!(analysis_size > 0, "analysis_size must be positive");
+    assert!(synthesis_size > 1, "synthesis_size must be at least two");
+    assert!(
+        synthesis_size <= analysis_size,
+        "synthesis_size must not exceed analysis_size"
+    );
+    assert!(hop_size > 0, "hop_size must be positive");
     // Analysis window: Hann
     let w_a = generate_hann_window(analysis_size);
 
@@ -57,34 +64,24 @@ pub fn design_dual_windows(
     // Compute the COLA sum: Σ_k w_a(n - k*hop) * w_s(n - k*hop)
     // across all hop-shifted positions. We need this to be constant.
     // Normalize w_s so the sum equals 1.
-    let num_overlaps = analysis_size.div_ceil(hop_size);
-
     let mut cola_sum = vec![0.0f32; hop_size];
-    for k in 0..num_overlaps {
-        let shift = k * hop_size;
-        for (n, cola_val) in cola_sum.iter_mut().enumerate() {
-            let ana_idx = n + shift;
-            if ana_idx < analysis_size {
-                // Check if this falls within the synthesis window support
-                let syn_idx = ana_idx.wrapping_sub(offset);
-                if syn_idx < synthesis_size {
-                    *cola_val += w_a[ana_idx] * w_s_raw[syn_idx];
-                }
-            }
-        }
+    for (syn_idx, &synthesis_value) in w_s_raw.iter().enumerate() {
+        let ana_idx = offset + syn_idx;
+        cola_sum[ana_idx % hop_size] += w_a[ana_idx] * synthesis_value;
     }
 
-    // Normalize synthesis window
-    let avg_cola: f32 = cola_sum.iter().sum::<f32>() / cola_sum.len() as f32;
-    let norm_factor = if avg_cola > 1e-10 {
-        1.0 / avg_cola
-    } else {
-        1.0
-    };
+    assert!(
+        cola_sum.iter().all(|&sum| sum > 1e-10),
+        "hop_size leaves at least one COLA phase uncovered"
+    );
 
     let mut w_s = vec![0.0f32; analysis_size];
-    for i in 0..synthesis_size {
-        w_s[offset + i] = w_s_raw[i] * norm_factor;
+    for (i, &synthesis_value) in w_s_raw.iter().enumerate() {
+        let ana_idx = offset + i;
+        // Each hop residue is an independent pointwise COLA equation. Scaling
+        // all synthesis samples in that residue by its own overlap sum makes
+        // every equation equal one, rather than only normalizing their mean.
+        w_s[ana_idx] = synthesis_value / cola_sum[ana_idx % hop_size];
     }
 
     (w_a, w_s)

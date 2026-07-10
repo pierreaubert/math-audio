@@ -209,6 +209,31 @@ proptest! {
             "lerp(t=1) should return other"
         );
     }
+
+
+    /// The Schur/Jury region for a real monic second-order denominator is
+    /// convex, so interpolation between stable endpoint coefficients remains
+    /// stable for t in [0, 1].
+    #[test]
+    fn biquad_coefficient_lerp_preserves_stability(
+        first_type in biquad_filter_type_strategy(),
+        second_type in biquad_filter_type_strategy(),
+        first_freq in 100.0f64..20_000.0f64,
+        second_freq in 100.0f64..20_000.0f64,
+        first_q in 0.1f64..20.0f64,
+        second_q in 0.1f64..20.0f64,
+        t in 0.0f64..=1.0f64,
+    ) {
+        let first = Biquad::new(first_type, first_freq, 48_000.0, first_q, 12.0).coefficients();
+        let second = Biquad::new(second_type, second_freq, 48_000.0, second_q, -12.0).coefficients();
+        let interpolated = first.lerp(&second, t);
+        prop_assert!(
+            biquad_coefficients_stable(&interpolated),
+            "stable endpoints produced unstable interpolation at t={t}: a1={}, a2={}",
+            interpolated.a1,
+            interpolated.a2
+        );
+    }
 }
 
 // ============================================================================

@@ -12,7 +12,7 @@ use std::f32::consts::PI;
 /// ```text
 /// c = Σ_{k=0..N} s[k] · exp(−j·ω·k), ω = 2π·freq_hz/sample_rate
 /// phase = atan2(Im(c), Re(c))
-/// magnitude = |c| / N
+/// magnitude = 2·|c| / N
 /// ```
 ///
 /// The stability metric runs the same extraction over the first and
@@ -29,7 +29,7 @@ pub fn extract_tone_phase(signal: &[f32], freq_hz: f32, sample_rate: u32) -> Ton
     }
     let (re_full, im_full) = single_bin_dft(signal, freq_hz, sample_rate, 0);
     let magnitude_raw = (re_full * re_full + im_full * im_full).sqrt();
-    let magnitude = magnitude_raw / signal.len() as f64;
+    let magnitude = 2.0 * magnitude_raw / signal.len() as f64;
     let phase_rad = im_full.atan2(re_full);
 
     let mid = signal.len() / 2;
@@ -64,7 +64,8 @@ pub fn extract_tone_phase(signal: &[f32], freq_hz: f32, sample_rate: u32) -> Ton
 ///   wrapped to (−180°, 180°]. Computed from `atan2(ΣQᵢ, ΣIᵢ)` where the
 ///   I/Q come from each window with a shared `k_offset` so the phases
 ///   share a common time reference.
-/// - `magnitude`     — mean of `√(I² + Q²) / window_len` across windows.
+/// - `magnitude`     — mean peak amplitude, `2·√(I² + Q²) / window_len`,
+///   across windows.
 /// - `stability_deg` — circular standard deviation of per-window phase
 ///   (degrees). Equivalent to `√(−2·ln(R̄))` in radians, converted to
 ///   degrees, where `R̄` is the mean resultant length over all windows.

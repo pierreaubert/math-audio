@@ -566,6 +566,19 @@ fn tone_phase_recovers_sin_reference_zero() {
 }
 
 #[test]
+fn tone_phase_reports_input_peak_amplitude() {
+    let sample_rate = 48_000_u32;
+    let frequency = 1000.0_f32;
+    let amplitude = 0.4_f32;
+    let signal: Vec<f32> = (0..4800)
+        .map(|n| amplitude * (2.0 * PI * frequency * n as f32 / sample_rate as f32).sin())
+        .collect();
+
+    let result = extract_tone_phase(&signal, frequency, sample_rate);
+    assert!((result.magnitude - amplitude as f64).abs() < 1e-6);
+}
+
+#[test]
 fn tone_phase_recovers_synthetic_90_degree_shift() {
     // Synthesize a cos-phase burst (= 90° phase shift relative to sin).
     let freq = 20.0_f32;
@@ -682,6 +695,39 @@ fn windowed_phase_recovers_pure_sin() {
         "pure sin steady tone should give near-zero circular-std, got {:.3}°",
         r.stability_deg
     );
+}
+
+#[test]
+fn windowed_phase_reports_input_peak_amplitude() {
+    let sample_rate = 48_000_u32;
+    let frequency = 1000.0_f32;
+    let amplitude = 0.4_f32;
+    let signal: Vec<f32> = (0..48_000)
+        .map(|n| amplitude * (2.0 * PI * frequency * n as f32 / sample_rate as f32).sin())
+        .collect();
+
+    let result = extract_tone_phase_windowed(&signal, frequency, sample_rate, 8);
+    assert!((result.magnitude - amplitude as f64).abs() < 1e-6);
+}
+
+#[test]
+fn tone_phasor_windows_minimize_fractional_cycle_error() {
+    let sample_rate = 48_000_u32;
+    let frequency = 1000.3_f32;
+    let signal: Vec<f32> = (0..96_000)
+        .map(|n| (2.0 * PI * frequency * n as f32 / sample_rate as f32).sin())
+        .collect();
+    let phasors = tone_phase_phasors(&signal, frequency, sample_rate, 8);
+    assert!(!phasors.is_empty());
+
+    for phasor in phasors {
+        let cycles = phasor.len as f64 * frequency as f64 / sample_rate as f64;
+        assert!(
+            (cycles - cycles.round()).abs() < 0.02,
+            "window length {} spans {cycles:.6} cycles",
+            phasor.len
+        );
+    }
 }
 
 #[test]

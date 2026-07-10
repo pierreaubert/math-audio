@@ -15,6 +15,18 @@ use super::fir_phase::{FirPhase, finalize_impulse_response};
 use super::misc::interpolate_log_space;
 use super::pre_ringing_config::suppress_pre_ringing;
 
+pub(super) fn kirkeby_transition_width(
+    sample_rate: f64,
+    fft_len: usize,
+    min_freq: f64,
+    max_freq: f64,
+) -> f64 {
+    let bin_width = sample_rate / fft_len.max(1) as f64;
+    let band_half_width = ((max_freq - min_freq).max(0.0) * 0.5).max(bin_width);
+    let lower_edge_room = min_freq.max(bin_width);
+    (8.0 * bin_width).min(band_half_width).min(lower_edge_room)
+}
+
 /// Reusable workspace for FIR design.
 ///
 /// The context caches an [`FftPlanner`] and internal buffers.  It is safe to
@@ -71,6 +83,9 @@ impl FirDesignContext {
     /// Generate an FIR filter to match a target frequency response.
     ///
     /// This is the reusable equivalent of [`super::generate::generate_fir_from_response`].
+    /// `magnitude_db` is a magnitude contract: negative dB values represent
+    /// cuts and deep notches, while phase is selected by [`FirDesignConfig::phase`].
+    /// Use the Kirkeby API when measured excess phase must also be corrected.
     pub fn generate_fir_from_response(
         &mut self,
         freqs: &[f64],
@@ -237,7 +252,7 @@ impl FirDesignContext {
             let f = self.real_buf[i];
             let rel_mag = 10.0_f64.powf((meas_spl_interp[i] - target_spl_interp[i]) / 20.0);
 
-            let width = 10.0;
+            let width = kirkeby_transition_width(sample_rate, fft_len, min_freq, max_freq);
             let transition = if f < min_freq {
                 ((f - (min_freq - width)) / width).clamp(0.0, 1.0)
             } else if f > max_freq {

@@ -4,6 +4,9 @@ use super::fir_design_config::FirDesignConfig;
 ///
 /// This function takes a target magnitude response (in dB) at specified frequencies
 /// and generates FIR coefficients that approximate that response.
+/// Negative dB values are supported and produce cuts/notches; they are not
+/// negative linear gains. Arbitrary target phase is intentionally outside this
+/// magnitude-only API and is instead determined by `config.phase`.
 ///
 /// `FirPhase::Kirkeby` is intentionally unsupported here because Kirkeby
 /// regularized inversion requires both a measurement and a target response.

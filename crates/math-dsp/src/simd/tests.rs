@@ -1292,10 +1292,16 @@ fn test_fast_inv_sqrt_accuracy() {
         let got = fast_inv_sqrt(x);
         let rel_err = (got - expected).abs() / expected;
         assert!(
-            rel_err < 2e-3,
+            rel_err < 1e-6,
             "x={x} got={got} expected={expected} rel_err={rel_err}"
         );
     }
+}
+
+#[test]
+fn test_fast_inv_sqrt_nonpositive_domain() {
+    assert!(fast_inv_sqrt(0.0).is_infinite());
+    assert!(fast_inv_sqrt(-1.0).is_nan());
 }
 
 #[test]

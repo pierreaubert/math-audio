@@ -91,6 +91,9 @@ pub fn filtfilt_with_padlen<T: FilterFloat>(
     // Forward pass: cascade all sections
     let mut data = padded;
     for (sec_idx, section) in sections.iter().enumerate() {
+        // `data[0]` is the steady-state output level of every preceding
+        // section, so non-unity section DC gains are propagated through the
+        // cascade before this section's unit-input zi is scaled.
         let scale = data[0];
         let zi = [zi_base[sec_idx][0] * scale, zi_base[sec_idx][1] * scale];
         data = biquad_filter(&data, section, zi);
@@ -101,6 +104,8 @@ pub fn filtfilt_with_padlen<T: FilterFloat>(
 
     // Backward pass: cascade all sections again
     for (sec_idx, section) in sections.iter().enumerate() {
+        // As in the forward pass, the first sample carries the cumulative
+        // steady-state gain of all preceding sections in this pass.
         let scale = data[0];
         let zi = [zi_base[sec_idx][0] * scale, zi_base[sec_idx][1] * scale];
         data = biquad_filter(&data, section, zi);

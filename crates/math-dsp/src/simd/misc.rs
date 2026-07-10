@@ -351,15 +351,15 @@ pub fn compute_covariance_simd(
     }
 }
 
-/// Fast inverse square root (1/sqrt(x)) using one Newton-Raphson iteration.
-/// ~0.1% relative error — suitable for normalizing all-pass filter magnitudes.
+/// Inverse square root (`1 / sqrt(x)`).
+///
+/// Returns positive infinity for `x == 0` and NaN for negative inputs, matching
+/// the corresponding IEEE-754 square-root and reciprocal operations. Modern
+/// targets optimize this expression directly, without the Quake approximation's
+/// input-domain surprises and ~0.1% relative error.
 #[inline(always)]
 pub fn fast_inv_sqrt(x: f32) -> f32 {
-    let half = 0.5 * x;
-    let i = f32::to_bits(x);
-    let i = 0x5f37_59df - (i >> 1); // Initial "magic number" estimate
-    let y = f32::from_bits(i);
-    y * (1.5 - half * y * y) // One Newton-Raphson refinement
+    x.sqrt().recip()
 }
 
 /// SIMD-optimized peak detection (maximum absolute value)

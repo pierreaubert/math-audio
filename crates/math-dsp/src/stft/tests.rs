@@ -208,6 +208,25 @@ fn test_dual_window_design() {
 }
 
 #[test]
+fn test_dual_window_design_satisfies_pointwise_cola() {
+    let analysis_size = 1024;
+    let synthesis_size = 384;
+    let hop_size = 128;
+    let (analysis, synthesis) = design_dual_windows(analysis_size, synthesis_size, hop_size);
+
+    for residue in 0..hop_size {
+        let cola: f32 = (residue..analysis_size)
+            .step_by(hop_size)
+            .map(|i| analysis[i] * synthesis[i])
+            .sum();
+        assert!(
+            (cola - 1.0).abs() < 1e-5,
+            "COLA residue {residue} must equal one, got {cola}"
+        );
+    }
+}
+
+#[test]
 fn test_dual_window_stft_passthrough() {
     let analysis_size = 512;
     let synthesis_size = 128;

@@ -400,7 +400,11 @@ Used by `fir_design.rs::PreRingingConfig` and `suppress_pre_ringing`.
 
 ## Zero-phase forward-backward filtering (filtfilt)
 
-Used by `filtfilt.rs::filtfilt` / `sosfilt`. The steady-state initial-condition computation matches Gustafsson's approach (the basis for MATLAB `filtfilt` and `scipy.signal.sosfiltfilt`).
+Used by `filtfilt.rs::filtfilt` / `sosfilt`. The implementation uses odd
+extension plus per-section steady-state initial conditions, matching the default
+padding strategy of `scipy.signal.sosfiltfilt`. Each section is scaled by the
+first output of its predecessor, so non-unity DC gains propagate correctly.
+It does not implement Gustafsson's global forward/backward state solve.
 
 ```bibtex
 @article{gustafsson1996determining,
