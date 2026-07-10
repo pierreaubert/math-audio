@@ -1,8 +1,13 @@
-# FLAMO-like Differentiable DSP — Section 1 Implementation Plan
+# FLAMO-like Differentiable DSP — Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-TOOL: Use `superpowers:subagent-driven-development` (recommended) or `superpowers:executing-plans` to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Add frequency-domain `Delay`/`ParallelDelay`, structured `Matrix` (dense and orthogonal), and closed-loop `Recursion` modules to `crates/math-autodiff`, with tests and an FDN-matching example.
+**Recommended approach:** A / B / A
+- **Section 1 — Delays, Matrix Gains, and Recursion:** Approach A (implement directly in `math-autodiff`).
+- **Section 2 — Extended filter types:** Approach B (reuse `math-iir-fir` / `math-dsp` filter types and frequency responses).
+- **Section 3 — Trainer / dataset layer:** Approach A (implement a lightweight trainer directly in `math-autodiff`).
+
+**Goal (this plan):** Add frequency-domain `Delay`/`ParallelDelay`, structured `Matrix` (dense and orthogonal), and closed-loop `Recursion` modules to `crates/math-autodiff`, with tests and an FDN-matching example.
 
 **Architecture:** All new modules implement the existing `DiffModule<f64>` trait and operate on `(batch, n_bins, channels)` complex spectra. Delays are pure phase rotations, matrices are frequency-independent linear maps, and `Recursion` solves `(I - H_fb)^-1 @ H_ff` per frequency bin. Gradients are validated against finite differences.
 
@@ -1620,6 +1625,43 @@ git commit -m "docs(autodiff): add benchmark, README, and integration QA"
 - `Delay::new(nfft, n_out, n_in, tau_min)` and `ParallelDelay::new(nfft, n_channels, tau_min)` match the design doc.
 - `Matrix::new(nfft, n_out, n_in, MatrixType)` matches the design doc.
 - `Recursion::new(feedforward, feedback)` matches the design doc.
+
+---
+
+## Section 2: Extended filter types (roadmap) — Approach B
+
+**Goal:** extend the differentiable filter palette to match FLAMO’s broader examples.
+
+**Approach B:** reuse existing `math-iir-fir` / `math-dsp` filter types and frequency-response utilities instead of re-implementing coefficient equations inside `math-autodiff`.
+
+Candidate modules:
+- `SVF` (State Variable Filter) parameterized by `fc` and `R`, mapping to biquad coefficients.
+- `GEQ` (Graphic EQ) — cascade of peaking filters at ISO center frequencies.
+- `PEQ` (Parametric EQ) — arbitrary peaking/shelving sections.
+- `SOSFilter` — generic second-order sections with arbitrary coefficient parameterization.
+
+These reuse the existing `sos_frequency_response` engine and the coefficient-gradient pattern already present in `Biquad`.
+
+**Out of scope for this plan; to be scheduled after Section 1 is merged.**
+
+---
+
+## Section 3: Trainer / dataset layer (roadmap) — Approach A
+
+**Goal:** replace the hand-rolled SGD loop with a small, optional training harness.
+
+**Approach A:** build the trainer directly inside `crates/math-autodiff` on top of `DiffModule` and `Sgd`.
+
+Candidate components:
+- `Dataset` — holds `(input, target)` tensors and supports `expand`/shuffle/split semantics similar to FLAMO.
+- `Trainer` — owns the model, an optimizer (start with Adam-like momentum on top of `Sgd`), learning-rate schedule, early stopping, and per-epoch train/validation loops.
+- `EagerTrainer` — optimizes a single fixed `(input, target)` pair, which is the common case for LTI system identification.
+
+This layer stays optional: `DiffModule` + `Sgd` remain usable without it.
+
+**Out of scope for this plan; to be scheduled after Section 1 is merged.**
+
+---
 
 ## Execution Handoff
 

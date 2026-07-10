@@ -17,7 +17,9 @@ The document also sketches the next two phases (extended filter types and a trai
 - Full neural-hypernetwork conditioning (external parameters passed at forward time).
 - Audio file I/O, plotting, or checkpointing inside `math-autodiff` itself.
 
-## 3. Section 1: Delays, Matrix Gains, and Recursion (priority)
+## 3. Section 1: Delays, Matrix Gains, and Recursion (priority) — Approach A
+
+**Approach A:** implement the new frequency-domain primitives directly inside `crates/math-autodiff`, extending the existing `DiffModule`/`Series`/`Shell` infrastructure.
 
 ### 3.1 Requirements
 
@@ -199,7 +201,9 @@ All new modules return `AutodiffError` on:
 - Example:
   - `crates/math-autodiff/examples/fdn_match.rs`: match a target RIR using the FDN topology above.
 
-## 4. Section 2: Extended filter types (roadmap)
+## 4. Section 2: Extended filter types (roadmap) — Approach B
+
+**Approach B:** reuse the existing filter implementations and frequency-response utilities in `math-iir-fir` and `math-dsp` rather than re-implementing coefficient equations from scratch inside `math-autodiff`.
 
 Once Section 1 is merged, extend the filter palette to match FLAMO’s broader examples:
 
@@ -210,7 +214,9 @@ Once Section 1 is merged, extend the filter palette to match FLAMO’s broader e
 
 These reuse the existing `sos_frequency_response` engine and the coefficient-gradient pattern already present in `Biquad`.
 
-## 5. Section 3: Trainer / dataset layer (roadmap)
+## 5. Section 3: Trainer / dataset layer (roadmap) — Approach A
+
+**Approach A:** build a small, optional trainer/dataset harness directly inside `crates/math-autodiff` on top of the existing `DiffModule` and `Sgd` primitives.
 
 Replace the hand-rolled SGD loop with a small training harness:
 
