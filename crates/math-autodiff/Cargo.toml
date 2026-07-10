@@ -1,0 +1,25 @@
+[package]
+name = "math-autodiff"
+version = "0.5.0"
+edition = { workspace = true }
+authors = { workspace = true }
+license = { workspace = true }
+repository = { workspace = true }
+description = "Frequency-domain differentiable audio DSP"
+
+[lib]
+name = "math_audio_autodiff"
+path = "src/lib.rs"
+
+[dependencies]
+ndarray = { workspace = true }
+num-complex = { workspace = true }
+num-traits = { workspace = true }
+rustfft = { workspace = true }
+realfft = { workspace = true }
+math-iir-fir = { workspace = true }
+math-dsp = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+approx = { workspace = true }
