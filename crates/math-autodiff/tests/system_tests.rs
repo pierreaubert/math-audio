@@ -6,7 +6,7 @@ use math_audio_autodiff::module::DiffModule;
 use math_audio_autodiff::system::{Series, Shell};
 use math_audio_autodiff::tensor::DiffTensor;
 use math_audio_iir_fir::BiquadFilterType;
-use ndarray::{Array1, Array2, ArrayD, Axis, IxDyn};
+use ndarray::{Array1, ArrayD, Axis, IxDyn};
 use num_complex::Complex;
 
 const FS: f64 = 48_000.0;
@@ -26,9 +26,12 @@ fn set_biquad_param(biquad: &mut Biquad, fc_hz: f64, db_gain: f64) {
     let fc_raw = fc_raw_from_hz(fc_hz, biquad.fs);
     let gain_raw = gain_raw_from_db(db_gain);
     biquad.param.fill(0.0);
+    let shape = biquad.param.shape();
+    let n_out = shape[2];
+    let n_in = shape[3];
     for s in 0..biquad.n_sections {
-        for out in 0..biquad.param.dim().2 {
-            for inp in 0..biquad.param.dim().3 {
+        for out in 0..n_out {
+            for inp in 0..n_in {
                 biquad.param[[s, 0, out, inp]] = fc_raw;
                 biquad.param[[s, 1, out, inp]] = gain_raw;
             }
@@ -68,8 +71,8 @@ fn gain_forward_and_backward() {
     let n_out = 2;
     let n_in = 3;
     let mut gain = Gain::new(NFFT, n_out, n_in).expect("valid gain");
-    gain.param = Array2::from_shape_vec(
-        (n_out, n_in),
+    gain.param = ArrayD::from_shape_vec(
+        IxDyn(&[n_out, n_in]),
         vec![0.5, -0.3, 1.2, -0.7, 0.9, 0.1],
     )
     .unwrap();
@@ -154,7 +157,7 @@ fn parallel_gain_forward_and_backward() {
     let n_bins = NFFT / 2 + 1;
     let n_channels = 3;
     let mut gain = ParallelGain::new(NFFT, n_channels).expect("valid parallel gain");
-    gain.param = Array1::from_vec(vec![0.5, -0.7, 1.2]);
+    gain.param = ArrayD::from_shape_vec(IxDyn(&[n_channels]), vec![0.5, -0.7, 1.2]).unwrap();
 
     let input = random_spectrum(&[1, n_bins, n_channels]);
     let output = gain.forward(&input).expect("forward should succeed");
@@ -225,13 +228,23 @@ fn parallel_gain_forward_and_backward() {
 fn series_two_gains_multiplies() {
     let n_bins = NFFT / 2 + 1;
     let mut gain1 = Gain::new(NFFT, 3, 2).expect("valid gain");
-    gain1.param = Array2::from_shape_vec((3, 2), vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]).unwrap();
+    gain1.param = ArrayD::from_shape_vec(IxDyn(&[3, 2]), vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]).unwrap();
 
     let mut gain2 = Gain::new(NFFT, 2, 3).expect("valid gain");
-    gain2.param = Array2::from_shape_vec((2, 3), vec![0.5, 1.0, 1.5, 2.0, 2.5, 3.0]).unwrap();
+    gain2.param = ArrayD::from_shape_vec(IxDyn(&[2, 3]), vec![0.5, 1.0, 1.5, 2.0, 2.5, 3.0]).unwrap();
 
     // Expected combined gain matrix: gain2.param * gain1.param.
-    let expected = gain2.param.dot(&gain1.param);
+    let gain1_view = gain1
+        .param
+        .view()
+        .into_shape_with_order((3, 2))
+        .expect("gain1 shape");
+    let gain2_view = gain2
+        .param
+        .view()
+        .into_shape_with_order((2, 3))
+        .expect("gain2 shape");
+    let expected = gain2_view.dot(&gain1_view);
 
     let series = Series::new(vec![Box::new(gain1), Box::new(gain2)]).expect("valid series");
     assert_eq!(series.input_channels(), 2);
@@ -260,8 +273,8 @@ fn series_two_gains_multiplies() {
 fn series_gradient_matches_manual() {
     let n_bins = NFFT / 2 + 1;
     let mut gain = Gain::new(NFFT, 3, 2).expect("valid gain");
-    gain.param = Array2::from_shape_vec(
-        (3, 2),
+    gain.param = ArrayD::from_shape_vec(
+        IxDyn(&[3, 2]),
         vec![0.5, -0.3, 1.2, -0.7, 0.9, 0.1],
     )
     .unwrap();
@@ -316,38 +329,15 @@ fn series_gradient_matches_manual() {
     }
 
     // Verify accumulated gradients match.
-    let series_gain = series
-        .modules()
-        .first()
-        .unwrap()
-        .as_any()
-        .downcast_ref::<Gain>()
-        .unwrap();
-    assert_eq!(gain_manual.param_grad.shape(), series_gain.param_grad.shape());
-    for (manual, series) in gain_manual
-        .param_grad
-        .iter()
-        .zip(series_gain.param_grad.iter())
-    {
+    let series_gain_grad = series.modules()[0].gradients()[0];
+    assert_eq!(gain_manual.param_grad.shape(), series_gain_grad.shape());
+    for (manual, series) in gain_manual.param_grad.iter().zip(series_gain_grad.iter()) {
         assert_abs_diff_eq!(manual, series, epsilon = 1e-9);
     }
 
-    let series_biquad = series
-        .modules()
-        .get(1)
-        .unwrap()
-        .as_any()
-        .downcast_ref::<Biquad>()
-        .unwrap();
-    assert_eq!(
-        biquad_manual.param_grad.shape(),
-        series_biquad.param_grad.shape()
-    );
-    for (manual, series) in biquad_manual
-        .param_grad
-        .iter()
-        .zip(series_biquad.param_grad.iter())
-    {
+    let series_biquad_grad = series.modules()[1].gradients()[0];
+    assert_eq!(biquad_manual.param_grad.shape(), series_biquad_grad.shape());
+    for (manual, series) in biquad_manual.param_grad.iter().zip(series_biquad_grad.iter()) {
         assert_abs_diff_eq!(manual, series, epsilon = 1e-9);
     }
 }

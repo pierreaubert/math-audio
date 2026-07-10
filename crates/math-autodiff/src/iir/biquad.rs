@@ -21,7 +21,10 @@
     reason = "format strings are clearer with explicit arguments in error messages"
 )]
 
-use ndarray::{Array2, Array3, Array4, Array5, ArrayD, Axis, IxDyn};
+use ndarray::{
+    Array2, Array3, Array4, Array5, ArrayD, ArrayView3, ArrayView4, ArrayViewMut3, ArrayViewMut4,
+    Axis, IxDyn,
+};
 use math_audio_iir_fir::BiquadFilterType;
 use num_complex::Complex;
 use std::f64::consts::{LN_10, PI, SQRT_2};
@@ -325,6 +328,76 @@ fn compute_bandpass(fc1: f64, fc2: f64, gain_db: f64, fs: f64) -> SectionCoeffs 
     coeffs
 }
 
+fn biquad_param_view(param: &ArrayD<f64>) -> Result<ArrayView4<'_, f64>, AutodiffError> {
+    let shape = param.shape();
+    if shape.len() != 4 {
+        return Err(AutodiffError::Message(format!(
+            "Biquad: expected 4-D parameter tensor, got shape {:?}",
+            shape
+        )));
+    }
+    let (n_sections, n_params, n_out, n_in) = (shape[0], shape[1], shape[2], shape[3]);
+    param
+        .view()
+        .into_shape_with_order((n_sections, n_params, n_out, n_in))
+        .map_err(|e| AutodiffError::Message(format!("Biquad: failed to reshape param: {e}")))
+}
+
+fn biquad_param_grad_view_mut(
+    param_grad: &mut ArrayD<f64>,
+) -> Result<ArrayViewMut4<'_, f64>, AutodiffError> {
+    let shape = param_grad.shape();
+    if shape.len() != 4 {
+        return Err(AutodiffError::Message(format!(
+            "Biquad: expected 4-D parameter gradient tensor, got shape {:?}",
+            shape
+        )));
+    }
+    let (n_sections, n_params, n_out, n_in) = (shape[0], shape[1], shape[2], shape[3]);
+    param_grad
+        .view_mut()
+        .into_shape_with_order((n_sections, n_params, n_out, n_in))
+        .map_err(|e| AutodiffError::Message(format!("Biquad: failed to reshape param_grad: {e}")))
+}
+
+fn parallel_biquad_param_view(param: &ArrayD<f64>) -> Result<ArrayView3<'_, f64>, AutodiffError> {
+    let shape = param.shape();
+    if shape.len() != 3 {
+        return Err(AutodiffError::Message(format!(
+            "ParallelBiquad: expected 3-D parameter tensor, got shape {:?}",
+            shape
+        )));
+    }
+    let (n_sections, n_params, n_channels) = (shape[0], shape[1], shape[2]);
+    param
+        .view()
+        .into_shape_with_order((n_sections, n_params, n_channels))
+        .map_err(|e| {
+            AutodiffError::Message(format!("ParallelBiquad: failed to reshape param: {e}"))
+        })
+}
+
+fn parallel_biquad_param_grad_view_mut(
+    param_grad: &mut ArrayD<f64>,
+) -> Result<ArrayViewMut3<'_, f64>, AutodiffError> {
+    let shape = param_grad.shape();
+    if shape.len() != 3 {
+        return Err(AutodiffError::Message(format!(
+            "ParallelBiquad: expected 3-D parameter gradient tensor, got shape {:?}",
+            shape
+        )));
+    }
+    let (n_sections, n_params, n_channels) = (shape[0], shape[1], shape[2]);
+    param_grad
+        .view_mut()
+        .into_shape_with_order((n_sections, n_params, n_channels))
+        .map_err(|e| {
+            AutodiffError::Message(format!(
+                "ParallelBiquad: failed to reshape param_grad: {e}"
+            ))
+        })
+}
+
 /// Differentiable RBJ biquad with arbitrary input/output channel coupling.
 #[derive(Debug, Clone)]
 pub struct Biquad {
@@ -337,9 +410,9 @@ pub struct Biquad {
     /// Filter type (lowpass, highpass, or bandpass).
     pub filter_type: BiquadFilterType,
     /// Raw parameters, shape `(n_sections, P, n_out, n_in)`.
-    pub param: Array4<f64>,
+    pub param: ArrayD<f64>,
     /// Accumulated parameter gradients, same shape as `param`.
-    pub param_grad: Array4<f64>,
+    pub param_grad: ArrayD<f64>,
     /// Anti-aliasing decay in dB.
     pub alias_decay_db: f64,
 }
@@ -370,27 +443,10 @@ impl Biquad {
             fs,
             n_sections,
             filter_type,
-            param: Array4::zeros((n_sections, n_params, n_out, n_in)),
-            param_grad: Array4::zeros((n_sections, n_params, n_out, n_in)),
+            param: ArrayD::zeros(IxDyn(&[n_sections, n_params, n_out, n_in])),
+            param_grad: ArrayD::zeros(IxDyn(&[n_sections, n_params, n_out, n_in])),
             alias_decay_db,
         })
-    }
-
-    /// Zero the accumulated parameter gradients.
-    pub fn zero_grad(&mut self) {
-        self.param_grad.fill(0.0);
-    }
-
-    /// Return a reference to the raw parameters.
-    #[must_use]
-    pub fn parameters(&self) -> &Array4<f64> {
-        &self.param
-    }
-
-    /// Return a reference to the accumulated parameter gradients.
-    #[must_use]
-    pub fn gradients(&self) -> &Array4<f64> {
-        &self.param_grad
     }
 
     fn n_bins(&self) -> usize {
@@ -415,7 +471,8 @@ impl Biquad {
         ),
         AutodiffError,
     > {
-        let (n_sections, n_params, n_out, n_in) = self.param.dim();
+        let param = biquad_param_view(&self.param)?;
+        let (n_sections, n_params, n_out, n_in) = param.dim();
         let mut b = Array4::zeros((n_sections, 3, n_out, n_in));
         let mut a = Array4::zeros((n_sections, 3, n_out, n_in));
         let mut db_dparam = Array5::zeros((n_sections, 3, n_params, n_out, n_in));
@@ -428,8 +485,8 @@ impl Biquad {
                 for in_ch in 0..n_in {
                     let coeffs = match self.filter_type {
                         BiquadFilterType::Lowpass | BiquadFilterType::Highpass => {
-                            let fc_raw = self.param[[section, 0, out_ch, in_ch]];
-                            let gain_raw = self.param[[section, 1, out_ch, in_ch]];
+                            let fc_raw = param[[section, 0, out_ch, in_ch]];
+                            let gain_raw = param[[section, 1, out_ch, in_ch]];
                             let fc_norm = sigmoid(fc_raw);
                             let fc = fc_norm * half_fs;
                             let gain_db = raw_gain_to_db(gain_raw);
@@ -449,9 +506,9 @@ impl Biquad {
                             c
                         }
                         BiquadFilterType::Bandpass => {
-                            let fc1_raw = self.param[[section, 0, out_ch, in_ch]];
-                            let fc2_raw = self.param[[section, 1, out_ch, in_ch]];
-                            let gain_raw = self.param[[section, 2, out_ch, in_ch]];
+                            let fc1_raw = param[[section, 0, out_ch, in_ch]];
+                            let fc2_raw = param[[section, 1, out_ch, in_ch]];
+                            let gain_raw = param[[section, 2, out_ch, in_ch]];
                             let fc1_norm = sigmoid(fc1_raw);
                             let fc2_norm = sigmoid(fc2_raw);
                             let (fc_low_norm, fc_high_norm, swapped) = if fc1_norm <= fc2_norm {
@@ -534,7 +591,15 @@ impl DiffModule<f64> for Biquad {
         }
         let n_bins = input_shape[1];
         let n_in = input_shape[2];
-        let (_, _, n_out_stored, n_in_stored) = self.param.dim();
+        let param_shape = self.param.shape();
+        if param_shape.len() != 4 {
+            return Err(AutodiffError::Message(format!(
+                "Biquad::forward: expected 4-D parameter tensor, got shape {:?}",
+                param_shape
+            )));
+        }
+        let n_out_stored = param_shape[2];
+        let n_in_stored = param_shape[3];
         if n_bins != self.n_bins() {
             return Err(AutodiffError::Message(format!(
                 "Biquad::forward: expected {} frequency bins, got {}",
@@ -594,7 +659,17 @@ impl DiffModule<f64> for Biquad {
         }
         let n_bins = input_shape[1];
         let n_in = input_shape[2];
-        let (_, n_params, n_out, n_in_stored) = self.param.dim();
+        let param_shape = self.param.shape();
+        if param_shape.len() != 4 {
+            return Err(AutodiffError::Message(format!(
+                "Biquad::backward: expected 4-D parameter tensor, got shape {:?}",
+                param_shape
+            )));
+        }
+        let n_sections = param_shape[0];
+        let n_params = param_shape[1];
+        let n_out = param_shape[2];
+        let n_in_stored = param_shape[3];
         if n_bins != self.n_bins() {
             return Err(AutodiffError::Message(format!(
                 "Biquad::backward: expected {} frequency bins, got {}",
@@ -633,7 +708,8 @@ impl DiffModule<f64> for Biquad {
         // frequencies where the numerator/denominator response is exactly zero
         // (e.g. lowpass at Nyquist); their contribution is skipped because the
         // loss gradient at those bins is also zero for practical targets.
-        for section in 0..self.n_sections {
+        let mut param_grad = biquad_param_grad_view_mut(&mut self.param_grad)?;
+        for section in 0..n_sections {
             for out_ch in 0..n_out {
                 for in_ch in 0..n_in {
                     for param_idx in 0..n_params {
@@ -649,7 +725,7 @@ impl DiffModule<f64> for Biquad {
                                 }
                             }
                         }
-                        self.param_grad[[section, param_idx, out_ch, in_ch]] += accum;
+                        param_grad[[section, param_idx, out_ch, in_ch]] += accum;
                     }
                 }
             }
@@ -674,29 +750,27 @@ impl DiffModule<f64> for Biquad {
     }
 
     fn input_channels(&self) -> usize {
-        self.param.dim().3
+        self.param.shape().get(3).copied().unwrap_or(0)
     }
 
     fn output_channels(&self) -> usize {
-        self.param.dim().2
+        self.param.shape().get(2).copied().unwrap_or(0)
     }
 
     fn n_bins(&self) -> usize {
         self.n_bins()
     }
 
-    fn as_any(&self) -> &dyn std::any::Any
-    where
-        f64: 'static,
-    {
-        self
+    fn parameters(&self) -> Vec<&ArrayD<f64>> {
+        vec![&self.param]
     }
 
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any
-    where
-        f64: 'static,
-    {
-        self
+    fn gradients(&self) -> Vec<&ArrayD<f64>> {
+        vec![&self.param_grad]
+    }
+
+    fn zero_grad(&mut self) {
+        self.param_grad.fill(0.0);
     }
 }
 
@@ -712,9 +786,9 @@ pub struct ParallelBiquad {
     /// Filter type (lowpass, highpass, or bandpass).
     pub filter_type: BiquadFilterType,
     /// Raw parameters, shape `(n_sections, P, N)`.
-    pub param: Array3<f64>,
+    pub param: ArrayD<f64>,
     /// Accumulated parameter gradients, same shape as `param`.
-    pub param_grad: Array3<f64>,
+    pub param_grad: ArrayD<f64>,
     /// Anti-aliasing decay in dB.
     pub alias_decay_db: f64,
 }
@@ -745,27 +819,10 @@ impl ParallelBiquad {
             fs,
             n_sections,
             filter_type,
-            param: Array3::zeros((n_sections, n_params, n_channels)),
-            param_grad: Array3::zeros((n_sections, n_params, n_channels)),
+            param: ArrayD::zeros(IxDyn(&[n_sections, n_params, n_channels])),
+            param_grad: ArrayD::zeros(IxDyn(&[n_sections, n_params, n_channels])),
             alias_decay_db,
         })
-    }
-
-    /// Zero the accumulated parameter gradients.
-    pub fn zero_grad(&mut self) {
-        self.param_grad.fill(0.0);
-    }
-
-    /// Return a reference to the raw parameters.
-    #[must_use]
-    pub fn parameters(&self) -> &Array3<f64> {
-        &self.param
-    }
-
-    /// Return a reference to the accumulated parameter gradients.
-    #[must_use]
-    pub fn gradients(&self) -> &Array3<f64> {
-        &self.param_grad
     }
 
     fn n_bins(&self) -> usize {
@@ -790,7 +847,8 @@ impl ParallelBiquad {
         ),
         AutodiffError,
     > {
-        let (n_sections, n_params, n_channels) = self.param.dim();
+        let param = parallel_biquad_param_view(&self.param)?;
+        let (n_sections, n_params, n_channels) = param.dim();
         let mut b = Array3::zeros((n_sections, 3, n_channels));
         let mut a = Array3::zeros((n_sections, 3, n_channels));
         let mut db_dparam = Array4::zeros((n_sections, 3, n_params, n_channels));
@@ -802,8 +860,8 @@ impl ParallelBiquad {
             for ch in 0..n_channels {
                 let coeffs = match self.filter_type {
                     BiquadFilterType::Lowpass | BiquadFilterType::Highpass => {
-                        let fc_raw = self.param[[section, 0, ch]];
-                        let gain_raw = self.param[[section, 1, ch]];
+                        let fc_raw = param[[section, 0, ch]];
+                        let gain_raw = param[[section, 1, ch]];
                         let fc_norm = sigmoid(fc_raw);
                         let fc = fc_norm * half_fs;
                         let gain_db = raw_gain_to_db(gain_raw);
@@ -823,9 +881,9 @@ impl ParallelBiquad {
                         c
                     }
                     BiquadFilterType::Bandpass => {
-                        let fc1_raw = self.param[[section, 0, ch]];
-                        let fc2_raw = self.param[[section, 1, ch]];
-                        let gain_raw = self.param[[section, 2, ch]];
+                        let fc1_raw = param[[section, 0, ch]];
+                        let fc2_raw = param[[section, 1, ch]];
+                        let gain_raw = param[[section, 2, ch]];
                         let fc1_norm = sigmoid(fc1_raw);
                         let fc2_norm = sigmoid(fc2_raw);
                         let (fc_low_norm, fc_high_norm, swapped) = if fc1_norm <= fc2_norm {
@@ -907,7 +965,14 @@ impl DiffModule<f64> for ParallelBiquad {
         }
         let n_bins = input_shape[1];
         let n_channels = input_shape[2];
-        let (_, _, n_channels_stored) = self.param.dim();
+        let param_shape = self.param.shape();
+        if param_shape.len() != 3 {
+            return Err(AutodiffError::Message(format!(
+                "ParallelBiquad::forward: expected 3-D parameter tensor, got shape {:?}",
+                param_shape
+            )));
+        }
+        let n_channels_stored = param_shape[2];
         if n_bins != self.n_bins() {
             return Err(AutodiffError::Message(format!(
                 "ParallelBiquad::forward: expected {} frequency bins, got {}",
@@ -962,7 +1027,16 @@ impl DiffModule<f64> for ParallelBiquad {
         }
         let n_bins = input_shape[1];
         let n_channels = input_shape[2];
-        let (_, n_params, n_channels_stored) = self.param.dim();
+        let param_shape = self.param.shape();
+        if param_shape.len() != 3 {
+            return Err(AutodiffError::Message(format!(
+                "ParallelBiquad::backward: expected 3-D parameter tensor, got shape {:?}",
+                param_shape
+            )));
+        }
+        let n_sections = param_shape[0];
+        let n_params = param_shape[1];
+        let n_channels_stored = param_shape[2];
         if n_bins != self.n_bins() {
             return Err(AutodiffError::Message(format!(
                 "ParallelBiquad::backward: expected {} frequency bins, got {}",
@@ -997,7 +1071,8 @@ impl DiffModule<f64> for ParallelBiquad {
 
         // Accumulate parameter gradients. See `Biquad::backward` for the
         // non-finite Jacobian handling rationale.
-        for section in 0..self.n_sections {
+        let mut param_grad = parallel_biquad_param_grad_view_mut(&mut self.param_grad)?;
+        for section in 0..n_sections {
             for ch in 0..n_channels {
                 for param_idx in 0..n_params {
                     let mut accum = 0.0;
@@ -1012,7 +1087,7 @@ impl DiffModule<f64> for ParallelBiquad {
                             }
                         }
                     }
-                    self.param_grad[[section, param_idx, ch]] += accum;
+                    param_grad[[section, param_idx, ch]] += accum;
                 }
             }
         }
@@ -1034,28 +1109,26 @@ impl DiffModule<f64> for ParallelBiquad {
     }
 
     fn input_channels(&self) -> usize {
-        self.param.dim().2
+        self.param.shape().get(2).copied().unwrap_or(0)
     }
 
     fn output_channels(&self) -> usize {
-        self.param.dim().2
+        self.param.shape().get(2).copied().unwrap_or(0)
     }
 
     fn n_bins(&self) -> usize {
         self.n_bins()
     }
 
-    fn as_any(&self) -> &dyn std::any::Any
-    where
-        f64: 'static,
-    {
-        self
+    fn parameters(&self) -> Vec<&ArrayD<f64>> {
+        vec![&self.param]
     }
 
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any
-    where
-        f64: 'static,
-    {
-        self
+    fn gradients(&self) -> Vec<&ArrayD<f64>> {
+        vec![&self.param_grad]
+    }
+
+    fn zero_grad(&mut self) {
+        self.param_grad.fill(0.0);
     }
 }

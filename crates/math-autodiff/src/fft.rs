@@ -1,6 +1,6 @@
 #![allow(clippy::cast_precision_loss, reason = "FFT sizes are audio buffer lengths that fit exactly in f64 for practical values")]
 
-use ndarray::Array1;
+use ndarray::{Array1, ArrayD};
 use num_complex::Complex;
 use realfft::RealFftPlanner;
 
@@ -83,19 +83,15 @@ impl DiffModule<f64> for Fft {
         self.n_bins()
     }
 
-    fn as_any(&self) -> &dyn std::any::Any
-    where
-        f64: 'static,
-    {
-        self
+    fn parameters(&self) -> Vec<&ArrayD<f64>> {
+        vec![]
     }
 
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any
-    where
-        f64: 'static,
-    {
-        self
+    fn gradients(&self) -> Vec<&ArrayD<f64>> {
+        vec![]
     }
+
+    fn zero_grad(&mut self) {}
 }
 
 /// Complex-to-real inverse FFT differentiable module.
@@ -167,19 +163,15 @@ impl DiffModule<f64> for Ifft {
         self.n_bins()
     }
 
-    fn as_any(&self) -> &dyn std::any::Any
-    where
-        f64: 'static,
-    {
-        self
+    fn parameters(&self) -> Vec<&ArrayD<f64>> {
+        vec![]
     }
 
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any
-    where
-        f64: 'static,
-    {
-        self
+    fn gradients(&self) -> Vec<&ArrayD<f64>> {
+        vec![]
     }
+
+    fn zero_grad(&mut self) {}
 }
 
 /// Real-to-complex FFT with an exponential anti-aliasing envelope.
@@ -273,19 +265,15 @@ impl DiffModule<f64> for FftAntiAlias {
         self.n_bins()
     }
 
-    fn as_any(&self) -> &dyn std::any::Any
-    where
-        f64: 'static,
-    {
-        self
+    fn parameters(&self) -> Vec<&ArrayD<f64>> {
+        vec![]
     }
 
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any
-    where
-        f64: 'static,
-    {
-        self
+    fn gradients(&self) -> Vec<&ArrayD<f64>> {
+        vec![]
     }
+
+    fn zero_grad(&mut self) {}
 }
 
 /// Complex-to-real inverse FFT with an exponential anti-aliasing envelope.
@@ -379,17 +367,13 @@ impl DiffModule<f64> for IfftAntiAlias {
         self.n_bins()
     }
 
-    fn as_any(&self) -> &dyn std::any::Any
-    where
-        f64: 'static,
-    {
-        self
+    fn parameters(&self) -> Vec<&ArrayD<f64>> {
+        vec![]
     }
 
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any
-    where
-        f64: 'static,
-    {
-        self
+    fn gradients(&self) -> Vec<&ArrayD<f64>> {
+        vec![]
     }
+
+    fn zero_grad(&mut self) {}
 }

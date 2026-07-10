@@ -41,9 +41,12 @@ fn set_biquad_param(biquad: &mut Biquad, fc_hz: f64, db_gain: f64) {
     let fc_raw = fc_raw_from_hz(fc_hz, biquad.fs);
     let gain_raw = gain_raw_from_db(db_gain);
     biquad.param.fill(0.0);
+    let shape = biquad.param.shape();
+    let n_out = shape[2];
+    let n_in = shape[3];
     for s in 0..biquad.n_sections {
-        for out in 0..biquad.param.dim().2 {
-            for inp in 0..biquad.param.dim().3 {
+        for out in 0..n_out {
+            for inp in 0..n_in {
                 biquad.param[[s, 0, out, inp]] = fc_raw;
                 biquad.param[[s, 1, out, inp]] = gain_raw;
             }
@@ -55,8 +58,9 @@ fn set_parallel_biquad_param(biquad: &mut ParallelBiquad, fc_hz: f64, db_gain: f
     let fc_raw = fc_raw_from_hz(fc_hz, biquad.fs);
     let gain_raw = gain_raw_from_db(db_gain);
     biquad.param.fill(0.0);
+    let n_channels = biquad.param.shape()[2];
     for s in 0..biquad.n_sections {
-        for ch in 0..biquad.param.dim().2 {
+        for ch in 0..n_channels {
             biquad.param[[s, 0, ch]] = fc_raw;
             biquad.param[[s, 1, ch]] = gain_raw;
         }
@@ -117,11 +121,14 @@ fn biquad_gradient_finite_difference() {
     let _grad_input = biquad
         .backward(&input, &output, &grad_output)
         .expect("backward should succeed");
-    let analytical = biquad.gradients().clone();
+    let analytical = biquad.gradients()[0].clone();
 
     // Finite difference check.
     let epsilon = 1e-5;
-    let (_, n_params, n_out, n_in) = biquad.param.dim();
+    let param_shape = biquad.param.shape();
+    let n_params = param_shape[1];
+    let n_out = param_shape[2];
+    let n_in = param_shape[3];
     for section in 0..biquad.n_sections {
         for p in 0..n_params {
             for out in 0..n_out {
@@ -223,10 +230,11 @@ fn parallel_biquad_gradient_finite_difference() {
     let _grad_input = biquad
         .backward(&input, &output, &grad_output)
         .expect("backward should succeed");
-    let analytical = biquad.gradients().clone();
+    let analytical = biquad.gradients()[0].clone();
 
     let epsilon = 1e-5;
-    let (_, n_params, _) = biquad.param.dim();
+    let param_shape = biquad.param.shape();
+    let n_params = param_shape[1];
     for section in 0..biquad.n_sections {
         for p in 0..n_params {
             for ch in 0..n_channels {

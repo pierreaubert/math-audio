@@ -9,12 +9,72 @@
     reason = "format strings are clearer with explicit arguments in error messages"
 )]
 
-use ndarray::{Array1, Array2, ArrayD, Axis, IxDyn};
+use ndarray::{ArrayD, ArrayView1, ArrayView2, ArrayViewMut1, ArrayViewMut2, Axis, IxDyn};
 use num_complex::Complex;
 
 use crate::error::AutodiffError;
 use crate::module::DiffModule;
 use crate::tensor::DiffTensor;
+
+fn view2<'a>(param: &'a ArrayD<f64>, name: &str) -> Result<ArrayView2<'a, f64>, AutodiffError> {
+    let shape = param.shape();
+    if shape.len() != 2 {
+        return Err(AutodiffError::Message(format!(
+            "{name}: expected 2-D parameter tensor, got shape {:?}",
+            shape
+        )));
+    }
+    let (n_out, n_in) = (shape[0], shape[1]);
+    param
+        .view()
+        .into_shape_with_order((n_out, n_in))
+        .map_err(|e| AutodiffError::Message(format!("{name}: failed to reshape param: {e}")))
+}
+
+fn view2_mut<'a>(param: &'a mut ArrayD<f64>, name: &str) -> Result<ArrayViewMut2<'a, f64>, AutodiffError> {
+    let shape = param.shape();
+    if shape.len() != 2 {
+        return Err(AutodiffError::Message(format!(
+            "{name}: expected 2-D parameter gradient tensor, got shape {:?}",
+            shape
+        )));
+    }
+    let (n_out, n_in) = (shape[0], shape[1]);
+    param
+        .view_mut()
+        .into_shape_with_order((n_out, n_in))
+        .map_err(|e| AutodiffError::Message(format!("{name}: failed to reshape param_grad: {e}")))
+}
+
+fn view1<'a>(param: &'a ArrayD<f64>, name: &str) -> Result<ArrayView1<'a, f64>, AutodiffError> {
+    let shape = param.shape();
+    if shape.len() != 1 {
+        return Err(AutodiffError::Message(format!(
+            "{name}: expected 1-D parameter tensor, got shape {:?}",
+            shape
+        )));
+    }
+    let n = shape[0];
+    param
+        .view()
+        .into_shape_with_order(n)
+        .map_err(|e| AutodiffError::Message(format!("{name}: failed to reshape param: {e}")))
+}
+
+fn view1_mut<'a>(param: &'a mut ArrayD<f64>, name: &str) -> Result<ArrayViewMut1<'a, f64>, AutodiffError> {
+    let shape = param.shape();
+    if shape.len() != 1 {
+        return Err(AutodiffError::Message(format!(
+            "{name}: expected 1-D parameter gradient tensor, got shape {:?}",
+            shape
+        )));
+    }
+    let n = shape[0];
+    param
+        .view_mut()
+        .into_shape_with_order(n)
+        .map_err(|e| AutodiffError::Message(format!("{name}: failed to reshape param_grad: {e}")))
+}
 
 /// Matrix gain module: mixes `n_in` input channels into `n_out` output channels
 /// with a frequency-independent real gain matrix.
@@ -23,9 +83,9 @@ pub struct Gain {
     /// FFT length.
     pub nfft: usize,
     /// Raw gain parameters, shape `(n_out, n_in)`.
-    pub param: Array2<f64>,
+    pub param: ArrayD<f64>,
     /// Accumulated parameter gradients, same shape as `param`.
-    pub param_grad: Array2<f64>,
+    pub param_grad: ArrayD<f64>,
 }
 
 impl Gain {
@@ -42,26 +102,9 @@ impl Gain {
         }
         Ok(Self {
             nfft,
-            param: Array2::zeros((n_out, n_in)),
-            param_grad: Array2::zeros((n_out, n_in)),
+            param: ArrayD::zeros(IxDyn(&[n_out, n_in])),
+            param_grad: ArrayD::zeros(IxDyn(&[n_out, n_in])),
         })
-    }
-
-    /// Zero the accumulated parameter gradients.
-    pub fn zero_grad(&mut self) {
-        self.param_grad.fill(0.0);
-    }
-
-    /// Return a reference to the raw parameters.
-    #[must_use]
-    pub fn parameters(&self) -> &Array2<f64> {
-        &self.param
-    }
-
-    /// Return a reference to the accumulated parameter gradients.
-    #[must_use]
-    pub fn gradients(&self) -> &Array2<f64> {
-        &self.param_grad
     }
 
     fn n_bins(&self) -> usize {
@@ -71,6 +114,7 @@ impl Gain {
 
 impl DiffModule<f64> for Gain {
     fn forward(&self, input: &DiffTensor<f64>) -> Result<DiffTensor<f64>, AutodiffError> {
+        let param = view2(&self.param, "Gain")?;
         let input_shape = input.data.shape();
         if input_shape.len() < 3 {
             return Err(AutodiffError::Message(format!(
@@ -80,7 +124,7 @@ impl DiffModule<f64> for Gain {
         }
         let n_bins = input_shape[1];
         let n_in = input_shape[2];
-        let (n_out, n_in_stored) = self.param.dim();
+        let (n_out, n_in_stored) = param.dim();
         if n_bins != self.n_bins() {
             return Err(AutodiffError::Message(format!(
                 "Gain::forward: expected {} frequency bins, got {}",
@@ -101,7 +145,7 @@ impl DiffModule<f64> for Gain {
 
         for out_ch in 0..n_out {
             for in_ch in 0..n_in {
-                let h = Complex::new(self.param[[out_ch, in_ch]], 0.0);
+                let h = Complex::new(param[[out_ch, in_ch]], 0.0);
                 let input_slice = input.data.index_axis(Axis(2), in_ch);
                 let mut output_slice = output.index_axis_mut(Axis(2), out_ch);
                 output_slice += &input_slice.mapv(|x| x * h);
@@ -117,6 +161,18 @@ impl DiffModule<f64> for Gain {
         _output: &DiffTensor<f64>,
         grad_output: &DiffTensor<f64>,
     ) -> Result<DiffTensor<f64>, AutodiffError> {
+        let n_bins_expected = self.n_bins();
+        let param_shape = self.param.shape();
+        if param_shape.len() != 2 {
+            return Err(AutodiffError::Message(format!(
+                "Gain::backward: expected 2-D parameter tensor, got shape {:?}",
+                param_shape
+            )));
+        }
+        let (n_out, n_in_stored) = (param_shape[0], param_shape[1]);
+        let param = view2(&self.param, "Gain")?;
+        let mut param_grad = view2_mut(&mut self.param_grad, "Gain")?;
+
         let input_shape = input.data.shape();
         let grad_shape = grad_output.data.shape();
         if input_shape.len() < 3 {
@@ -133,12 +189,10 @@ impl DiffModule<f64> for Gain {
         }
         let n_bins = input_shape[1];
         let n_in = input_shape[2];
-        let (n_out, n_in_stored) = self.param.dim();
-        if n_bins != self.n_bins() {
+        if n_bins != n_bins_expected {
             return Err(AutodiffError::Message(format!(
                 "Gain::backward: expected {} frequency bins, got {}",
-                self.n_bins(),
-                n_bins
+                n_bins_expected, n_bins
             )));
         }
         if n_in != n_in_stored {
@@ -160,7 +214,7 @@ impl DiffModule<f64> for Gain {
             for in_ch in 0..n_in {
                 let input_slice = input.data.index_axis(Axis(2), in_ch);
                 let prod = &grad_slice * &input_slice.mapv(|x| x.conj());
-                self.param_grad[[out_ch, in_ch]] += prod.sum().re;
+                param_grad[[out_ch, in_ch]] += prod.sum().re;
             }
         }
 
@@ -168,7 +222,7 @@ impl DiffModule<f64> for Gain {
         let mut grad_input = ArrayD::zeros(IxDyn(input_shape));
         for in_ch in 0..n_in {
             for out_ch in 0..n_out {
-                let h = self.param[[out_ch, in_ch]];
+                let h = param[[out_ch, in_ch]];
                 let grad_slice = grad_output.data.index_axis(Axis(2), out_ch);
                 let mut input_grad_slice = grad_input.index_axis_mut(Axis(2), in_ch);
                 input_grad_slice += &grad_slice.mapv(|x| x * h);
@@ -179,29 +233,27 @@ impl DiffModule<f64> for Gain {
     }
 
     fn input_channels(&self) -> usize {
-        self.param.dim().1
+        self.param.shape().get(1).copied().unwrap_or(0)
     }
 
     fn output_channels(&self) -> usize {
-        self.param.dim().0
+        self.param.shape().first().copied().unwrap_or(0)
     }
 
     fn n_bins(&self) -> usize {
         self.n_bins()
     }
 
-    fn as_any(&self) -> &dyn std::any::Any
-    where
-        f64: 'static,
-    {
-        self
+    fn parameters(&self) -> Vec<&ArrayD<f64>> {
+        vec![&self.param]
     }
 
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any
-    where
-        f64: 'static,
-    {
-        self
+    fn gradients(&self) -> Vec<&ArrayD<f64>> {
+        vec![&self.param_grad]
+    }
+
+    fn zero_grad(&mut self) {
+        self.param_grad.fill(0.0);
     }
 }
 
@@ -212,9 +264,9 @@ pub struct ParallelGain {
     /// FFT length.
     pub nfft: usize,
     /// Raw gain parameters, shape `(n_channels,)`.
-    pub param: Array1<f64>,
+    pub param: ArrayD<f64>,
     /// Accumulated parameter gradients, same shape as `param`.
-    pub param_grad: Array1<f64>,
+    pub param_grad: ArrayD<f64>,
 }
 
 impl ParallelGain {
@@ -232,26 +284,9 @@ impl ParallelGain {
         }
         Ok(Self {
             nfft,
-            param: Array1::zeros(n_channels),
-            param_grad: Array1::zeros(n_channels),
+            param: ArrayD::zeros(IxDyn(&[n_channels])),
+            param_grad: ArrayD::zeros(IxDyn(&[n_channels])),
         })
-    }
-
-    /// Zero the accumulated parameter gradients.
-    pub fn zero_grad(&mut self) {
-        self.param_grad.fill(0.0);
-    }
-
-    /// Return a reference to the raw parameters.
-    #[must_use]
-    pub fn parameters(&self) -> &Array1<f64> {
-        &self.param
-    }
-
-    /// Return a reference to the accumulated parameter gradients.
-    #[must_use]
-    pub fn gradients(&self) -> &Array1<f64> {
-        &self.param_grad
     }
 
     fn n_bins(&self) -> usize {
@@ -261,6 +296,7 @@ impl ParallelGain {
 
 impl DiffModule<f64> for ParallelGain {
     fn forward(&self, input: &DiffTensor<f64>) -> Result<DiffTensor<f64>, AutodiffError> {
+        let param = view1(&self.param, "ParallelGain")?;
         let input_shape = input.data.shape();
         if input_shape.len() < 3 {
             return Err(AutodiffError::Message(format!(
@@ -277,17 +313,17 @@ impl DiffModule<f64> for ParallelGain {
                 n_bins
             )));
         }
-        if n_channels != self.param.len() {
+        if n_channels != param.len() {
             return Err(AutodiffError::Message(format!(
                 "ParallelGain::forward: expected {} channels, got {}",
-                self.param.len(),
+                param.len(),
                 n_channels
             )));
         }
 
         let mut output = input.data.clone();
         for ch in 0..n_channels {
-            let h = Complex::new(self.param[ch], 0.0);
+            let h = Complex::new(param[ch], 0.0);
             let mut slice = output.index_axis_mut(Axis(2), ch);
             slice.mapv_inplace(|x| x * h);
         }
@@ -301,6 +337,18 @@ impl DiffModule<f64> for ParallelGain {
         _output: &DiffTensor<f64>,
         grad_output: &DiffTensor<f64>,
     ) -> Result<DiffTensor<f64>, AutodiffError> {
+        let n_bins_expected = self.n_bins();
+        let param_shape = self.param.shape();
+        if param_shape.len() != 1 {
+            return Err(AutodiffError::Message(format!(
+                "ParallelGain::backward: expected 1-D parameter tensor, got shape {:?}",
+                param_shape
+            )));
+        }
+        let n_channels_stored = param_shape[0];
+        let param = view1(&self.param, "ParallelGain")?;
+        let mut param_grad = view1_mut(&mut self.param_grad, "ParallelGain")?;
+
         let input_shape = input.data.shape();
         let grad_shape = grad_output.data.shape();
         if input_shape != grad_shape {
@@ -317,18 +365,16 @@ impl DiffModule<f64> for ParallelGain {
         }
         let n_bins = input_shape[1];
         let n_channels = input_shape[2];
-        if n_bins != self.n_bins() {
+        if n_bins != n_bins_expected {
             return Err(AutodiffError::Message(format!(
                 "ParallelGain::backward: expected {} frequency bins, got {}",
-                self.n_bins(),
-                n_bins
+                n_bins_expected, n_bins
             )));
         }
-        if n_channels != self.param.len() {
+        if n_channels != n_channels_stored {
             return Err(AutodiffError::Message(format!(
                 "ParallelGain::backward: expected {} channels, got {}",
-                self.param.len(),
-                n_channels
+                n_channels_stored, n_channels
             )));
         }
 
@@ -337,13 +383,13 @@ impl DiffModule<f64> for ParallelGain {
             let grad_slice = grad_output.data.index_axis(Axis(2), ch);
             let input_slice = input.data.index_axis(Axis(2), ch);
             let prod = &grad_slice * &input_slice.mapv(|x| x.conj());
-            self.param_grad[ch] += prod.sum().re;
+            param_grad[ch] += prod.sum().re;
         }
 
         // Compute dLoss/dInput.
         let mut grad_input = ArrayD::zeros(IxDyn(input_shape));
         for ch in 0..n_channels {
-            let h = self.param[ch];
+            let h = param[ch];
             let grad_slice = grad_output.data.index_axis(Axis(2), ch);
             let mut input_grad_slice = grad_input.index_axis_mut(Axis(2), ch);
             input_grad_slice += &grad_slice.mapv(|x| x * h);
@@ -353,29 +399,27 @@ impl DiffModule<f64> for ParallelGain {
     }
 
     fn input_channels(&self) -> usize {
-        self.param.len()
+        self.param.shape().first().copied().unwrap_or(0)
     }
 
     fn output_channels(&self) -> usize {
-        self.param.len()
+        self.param.shape().first().copied().unwrap_or(0)
     }
 
     fn n_bins(&self) -> usize {
         self.n_bins()
     }
 
-    fn as_any(&self) -> &dyn std::any::Any
-    where
-        f64: 'static,
-    {
-        self
+    fn parameters(&self) -> Vec<&ArrayD<f64>> {
+        vec![&self.param]
     }
 
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any
-    where
-        f64: 'static,
-    {
-        self
+    fn gradients(&self) -> Vec<&ArrayD<f64>> {
+        vec![&self.param_grad]
+    }
+
+    fn zero_grad(&mut self) {
+        self.param_grad.fill(0.0);
     }
 }
 
@@ -479,17 +523,13 @@ impl DiffModule<f64> for Magnitude {
         self.n_bins()
     }
 
-    fn as_any(&self) -> &dyn std::any::Any
-    where
-        f64: 'static,
-    {
-        self
+    fn parameters(&self) -> Vec<&ArrayD<f64>> {
+        vec![]
     }
 
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any
-    where
-        f64: 'static,
-    {
-        self
+    fn gradients(&self) -> Vec<&ArrayD<f64>> {
+        vec![]
     }
+
+    fn zero_grad(&mut self) {}
 }

@@ -1,6 +1,6 @@
 //! System composition modules.
 
-use ndarray::{ArrayD, IxDyn};
+use ndarray::ArrayD;
 use num_complex::Complex;
 
 use crate::error::AutodiffError;
@@ -77,30 +77,6 @@ impl Series {
     pub fn modules(&self) -> &[Box<dyn DiffModule<f64>>] {
         &self.modules
     }
-
-    /// Zero gradients in all parameter-bearing modules.
-    pub fn zero_grad(&mut self) {
-        for module in &mut self.modules {
-            if let Some(gain) = module.as_any_mut().downcast_mut::<crate::gain::Gain>() {
-                gain.zero_grad();
-            } else if let Some(pg) = module
-                .as_any_mut()
-                .downcast_mut::<crate::gain::ParallelGain>()
-            {
-                pg.zero_grad();
-            } else if let Some(biquad) = module
-                .as_any_mut()
-                .downcast_mut::<crate::iir::biquad::Biquad>()
-            {
-                biquad.zero_grad();
-            } else if let Some(pbiquad) = module
-                .as_any_mut()
-                .downcast_mut::<crate::iir::biquad::ParallelBiquad>()
-            {
-                pbiquad.zero_grad();
-            }
-        }
-    }
 }
 
 impl DiffModule<f64> for Series {
@@ -148,18 +124,24 @@ impl DiffModule<f64> for Series {
         self.nfft
     }
 
-    fn as_any(&self) -> &dyn std::any::Any
-    where
-        f64: 'static,
-    {
-        self
+    fn parameters(&self) -> Vec<&ArrayD<f64>> {
+        self.modules
+            .iter()
+            .flat_map(|module| module.parameters())
+            .collect()
     }
 
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any
-    where
-        f64: 'static,
-    {
-        self
+    fn gradients(&self) -> Vec<&ArrayD<f64>> {
+        self.modules
+            .iter()
+            .flat_map(|module| module.gradients())
+            .collect()
+    }
+
+    fn zero_grad(&mut self) {
+        for module in &mut self.modules {
+            module.zero_grad();
+        }
     }
 }
 
@@ -263,48 +245,31 @@ impl Shell {
         self.input_layer.backward(input, &x1, &grad_x1)
     }
 
-    /// Zero gradients in the core module.
+    /// Zero gradients in all parameter-bearing sub-modules.
     pub fn zero_grad(&mut self) {
-        if let Some(gain) = self.core.as_any_mut().downcast_mut::<crate::gain::Gain>() {
-            gain.zero_grad();
-        } else if let Some(pg) = self
-            .core
-            .as_any_mut()
-            .downcast_mut::<crate::gain::ParallelGain>()
-        {
-            pg.zero_grad();
-        } else if let Some(biquad) = self
-            .core
-            .as_any_mut()
-            .downcast_mut::<crate::iir::biquad::Biquad>()
-        {
-            biquad.zero_grad();
-        } else if let Some(pbiquad) = self
-            .core
-            .as_any_mut()
-            .downcast_mut::<crate::iir::biquad::ParallelBiquad>()
-        {
-            pbiquad.zero_grad();
-        }
+        self.input_layer.zero_grad();
+        self.core.zero_grad();
+        self.output_layer.zero_grad();
     }
 
-    /// Return parameter tensors from the core module.
-    ///
-    /// For the MVP this returns an empty vector. Collecting typed parameters
-    /// through a `Box<dyn DiffModule<f64>>` trait object is deferred until the
-    /// `DiffModule` trait exposes parameter accessors.
+    /// Return parameter tensors from all parameter-bearing sub-modules.
     #[must_use]
     pub fn parameters(&self) -> Vec<&ArrayD<f64>> {
-        vec![]
+        let mut params = Vec::new();
+        params.extend(self.input_layer.parameters());
+        params.extend(self.core.parameters());
+        params.extend(self.output_layer.parameters());
+        params
     }
 
-    /// Return gradient tensors from the core module.
-    ///
-    /// For the MVP this returns an empty vector. See [`Self::parameters`] for
-    /// the rationale.
+    /// Return gradient tensors from all parameter-bearing sub-modules.
     #[must_use]
     pub fn gradients(&self) -> Vec<&ArrayD<f64>> {
-        vec![]
+        let mut grads = Vec::new();
+        grads.extend(self.input_layer.gradients());
+        grads.extend(self.core.gradients());
+        grads.extend(self.output_layer.gradients());
+        grads
     }
 
     /// Compute the complex frequency response of the core module.
@@ -322,7 +287,7 @@ impl Shell {
         let n_bins = self.core.n_bins();
 
         // Build an identity spectrum: input[in_ch, f, in_ch] = 1 for all f.
-        let mut input_data = ArrayD::zeros(IxDyn(&[n_in, n_bins, n_in]));
+        let mut input_data = ArrayD::zeros(ndarray::IxDyn(&[n_in, n_bins, n_in]));
         for in_ch in 0..n_in {
             for f in 0..n_bins {
                 input_data[[in_ch, f, in_ch]] = Complex::new(1.0, 0.0);
@@ -340,7 +305,7 @@ impl Shell {
         }
 
         // Permute (n_in, n_bins, n_out) -> (n_bins, n_out, n_in).
-        let mut response = ArrayD::zeros(IxDyn(&[n_bins, n_out, n_in]));
+        let mut response = ArrayD::zeros(ndarray::IxDyn(&[n_bins, n_out, n_in]));
         for in_ch in 0..n_in {
             for f in 0..n_bins {
                 for out_ch in 0..n_out {

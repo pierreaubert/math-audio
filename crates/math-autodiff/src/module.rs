@@ -1,4 +1,4 @@
-use std::any::Any;
+use ndarray::ArrayD;
 
 use crate::error::AutodiffError;
 use crate::tensor::DiffTensor;
@@ -37,16 +37,12 @@ pub trait DiffModule<T> {
     /// Number of FFT frequency bins (`nfft/2+1`).
     fn n_bins(&self) -> usize;
 
-    /// Return a reference to this module as `&dyn Any`.
-    ///
-    /// Enables downcasting from `Box<dyn DiffModule<f64>>` to concrete types
-    /// for parameter inspection and gradient zeroing.
-    fn as_any(&self) -> &dyn Any
-    where
-        T: 'static;
+    /// Return references to this module's parameter tensors.
+    fn parameters(&self) -> Vec<&ArrayD<f64>>;
 
-    /// Return a mutable reference to this module as `&mut dyn Any`.
-    fn as_any_mut(&mut self) -> &mut dyn Any
-    where
-        T: 'static;
+    /// Return references to this module's accumulated parameter gradients.
+    fn gradients(&self) -> Vec<&ArrayD<f64>>;
+
+    /// Zero all accumulated parameter gradients.
+    fn zero_grad(&mut self);
 }
