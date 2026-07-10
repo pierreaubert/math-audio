@@ -225,6 +225,32 @@ fn parallel_gain_forward_and_backward() {
 }
 
 #[test]
+fn magnitude_backward_ignores_imaginary_upstream_gradient() {
+    let n_bins = NFFT / 2 + 1;
+    let input = random_spectrum(&[1, n_bins, 1]);
+    let mut magnitude = Magnitude::new(NFFT, 1);
+    let output = magnitude.forward(&input).expect("forward should succeed");
+    let grad_output = DiffTensor::from_array(ArrayD::from_elem(
+        IxDyn(&[1, n_bins, 1]),
+        Complex::new(2.0, 7.0),
+    ));
+
+    let grad_input = magnitude
+        .backward(&input, &output, &grad_output)
+        .expect("backward should succeed");
+
+    for (actual, sample) in grad_input.data.iter().zip(&input.data) {
+        let expected = if sample.norm() > 1e-12 {
+            *sample * (2.0 / sample.norm())
+        } else {
+            Complex::new(0.0, 0.0)
+        };
+        assert_abs_diff_eq!(actual.re, expected.re, epsilon = 1e-12);
+        assert_abs_diff_eq!(actual.im, expected.im, epsilon = 1e-12);
+    }
+}
+
+#[test]
 fn series_two_gains_multiplies() {
     let n_bins = NFFT / 2 + 1;
     let mut gain1 = Gain::new(NFFT, 3, 2).expect("valid gain");

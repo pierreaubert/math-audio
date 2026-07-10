@@ -13,6 +13,7 @@ mutants.out
 /*.json
 /*.json.bz2
 /todos.md
+/tmp
 
 # node
 /node_modules
@@ -32,6 +33,8 @@ bugs.md
 src/unused.rs
 /plans
 check_output_*.txt
+.superpowers
+/docs/superpowers
 
 # Logs
 logs

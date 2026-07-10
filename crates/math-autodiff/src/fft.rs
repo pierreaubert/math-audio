@@ -14,6 +14,34 @@ const fn nfft_as_f64(nfft: usize) -> f64 {
     nfft as f64
 }
 
+/// Return whether a packed real-FFT bin has no negative-frequency partner.
+#[inline]
+const fn is_packed_endpoint(nfft: usize, bin: usize) -> bool {
+    bin == 0 || (nfft.is_multiple_of(2) && bin == nfft / 2)
+}
+
+/// Weight a packed real-FFT bin before applying the unnormalised inverse FFT
+/// to compute the adjoint of an unnormalised forward FFT.
+#[inline]
+const fn rfft_adjoint_weight(nfft: usize, bin: usize) -> f64 {
+    if is_packed_endpoint(nfft, bin) {
+        1.0
+    } else {
+        0.5
+    }
+}
+
+/// Weight an unnormalised forward-FFT bin to compute the adjoint of the
+/// normalised inverse real FFT.
+#[inline]
+fn irfft_adjoint_weight(nfft: usize, bin: usize) -> f64 {
+    if is_packed_endpoint(nfft, bin) {
+        1.0 / nfft_as_f64(nfft)
+    } else {
+        2.0 / nfft_as_f64(nfft)
+    }
+}
+
 /// Real-to-complex FFT differentiable module.
 #[derive(Debug, Clone)]
 pub struct Fft {
@@ -59,15 +87,19 @@ impl DiffModule<f64> for Fft {
 
         let mut grad_vec = vec![Complex::new(0.0, 0.0); self.n_bins()];
         for (i, sample) in grad_output.data.iter().enumerate().take(self.n_bins()) {
-            grad_vec[i] = *sample;
+            let weight = rfft_adjoint_weight(self.nfft, i);
+            grad_vec[i] = if is_packed_endpoint(self.nfft, i) {
+                Complex::new(sample.re, 0.0)
+            } else {
+                *sample * weight
+            };
         }
 
         let mut grad_input = c2r.make_output_vec();
         c2r.process(&mut grad_vec, &mut grad_input)?;
 
-        let scale = nfft_as_f64(self.nfft);
         Ok(DiffTensor::from_array(Array1::from_iter(
-            grad_input.into_iter().map(|r| Complex::new(r / scale, 0.0)),
+            grad_input.into_iter().map(|r| Complex::new(r, 0.0)),
         )))
     }
 
@@ -151,6 +183,15 @@ impl DiffModule<f64> for Ifft {
 
         let mut spectrum = r2c.make_output_vec();
         r2c.process(&mut grad_vec, &mut spectrum)?;
+
+        for (bin, sample) in spectrum.iter_mut().enumerate() {
+            let weight = irfft_adjoint_weight(self.nfft, bin);
+            *sample = if is_packed_endpoint(self.nfft, bin) {
+                Complex::new(sample.re * weight, 0.0)
+            } else {
+                *sample * weight
+            };
+        }
 
         Ok(DiffTensor::from_array(Array1::from_iter(spectrum)))
     }
@@ -246,18 +287,22 @@ impl DiffModule<f64> for FftAntiAlias {
 
         let mut grad_vec = vec![Complex::new(0.0, 0.0); self.n_bins()];
         for (i, sample) in grad_output.data.iter().enumerate().take(self.n_bins()) {
-            grad_vec[i] = *sample;
+            let weight = rfft_adjoint_weight(self.nfft, i);
+            grad_vec[i] = if is_packed_endpoint(self.nfft, i) {
+                Complex::new(sample.re, 0.0)
+            } else {
+                *sample * weight
+            };
         }
 
         let mut grad_time = c2r.make_output_vec();
         c2r.process(&mut grad_vec, &mut grad_time)?;
 
-        let scale = nfft_as_f64(self.nfft);
         Ok(DiffTensor::from_array(Array1::from_iter(
             grad_time
                 .iter()
                 .zip(&self.envelope)
-                .map(|(sample, env)| Complex::new(sample * env / scale, 0.0)),
+                .map(|(sample, env)| Complex::new(sample * env, 0.0)),
         )))
     }
 
@@ -363,6 +408,15 @@ impl DiffModule<f64> for IfftAntiAlias {
 
         let mut spectrum = r2c.make_output_vec();
         r2c.process(&mut grad_vec, &mut spectrum)?;
+
+        for (bin, sample) in spectrum.iter_mut().enumerate() {
+            let weight = irfft_adjoint_weight(self.nfft, bin);
+            *sample = if is_packed_endpoint(self.nfft, bin) {
+                Complex::new(sample.re * weight, 0.0)
+            } else {
+                *sample * weight
+            };
+        }
 
         Ok(DiffTensor::from_array(Array1::from_iter(spectrum)))
     }

@@ -25,6 +25,17 @@ fn ones_spectrum(shape: &[usize]) -> DiffTensor<f64> {
     DiffTensor::from_array(ArrayD::from_shape_vec(IxDyn(shape), data).unwrap())
 }
 
+fn complex_spectrum(shape: &[usize]) -> DiffTensor<f64> {
+    let n = shape.iter().product();
+    let data = (0..n)
+        .map(|i| {
+            let phase = i as f64 * 0.17;
+            Complex::new(0.5 + phase.sin(), phase.cos() - 0.25)
+        })
+        .collect();
+    DiffTensor::from_array(ArrayD::from_shape_vec(IxDyn(shape), data).unwrap())
+}
+
 fn mse_loss(output: &DiffTensor<f64>, target: &DiffTensor<f64>) -> f64 {
     output
         .data
@@ -106,7 +117,7 @@ fn biquad_gradient_finite_difference() {
         .collect();
     let target = DiffTensor::from_array(Array3::from_shape_vec((1, n_bins, 1), target_values).unwrap());
 
-    let input = ones_spectrum(&[1, n_bins, 1]);
+    let input = complex_spectrum(&[1, n_bins, 1]);
     let output = biquad.forward(&input).expect("forward should succeed");
     let grad_output_data: Vec<Complex<f64>> = output
         .data
@@ -215,7 +226,7 @@ fn parallel_biquad_gradient_finite_difference() {
     let target =
         DiffTensor::from_array(Array3::from_shape_vec((1, n_bins, n_channels), target_values).unwrap());
 
-    let input = ones_spectrum(&[1, n_bins, n_channels]);
+    let input = complex_spectrum(&[1, n_bins, n_channels]);
     let output = biquad.forward(&input).expect("forward should succeed");
     let grad_output_data: Vec<Complex<f64>> = output
         .data

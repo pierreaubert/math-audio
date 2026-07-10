@@ -515,7 +515,8 @@ impl DiffModule<f64> for Magnitude {
                 Complex::new(0.0, 0.0)
             }
         });
-        let grad = grad_input * &grad_output.data;
+        let real_grad_output = grad_output.data.mapv(|g| Complex::new(g.re, 0.0));
+        let grad = grad_input * real_grad_output;
         Ok(DiffTensor::from_array(grad))
     }
 

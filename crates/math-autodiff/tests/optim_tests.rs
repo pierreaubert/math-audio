@@ -40,7 +40,7 @@ fn mse_loss_matches_manual() {
         + (2.0_f64.powi(2) + 1.0_f64.powi(2)))
         / 3.0;
 
-    assert_abs_diff_eq!(mse_loss(&pred, &target), expected, epsilon = 1e-12);
+    assert_abs_diff_eq!(mse_loss(&pred, &target).unwrap(), expected, epsilon = 1e-12);
 }
 
 #[test]
@@ -58,7 +58,7 @@ fn mse_loss_backward_matches_finite_diff() {
     let pred = complex_tensor(&values, &[3]);
     let target = complex_tensor(&target_values, &[3]);
 
-    let grad = mse_loss_backward(&pred, &target);
+    let grad = mse_loss_backward(&pred, &target).unwrap();
     let eps = 1e-6;
 
     for i in 0..values.len() {
@@ -67,8 +67,8 @@ fn mse_loss_backward_matches_finite_diff() {
         plus[i].re += eps;
         let mut minus = values.clone();
         minus[i].re -= eps;
-        let loss_plus = mse_loss(&complex_tensor(&plus, &[3]), &target);
-        let loss_minus = mse_loss(&complex_tensor(&minus, &[3]), &target);
+        let loss_plus = mse_loss(&complex_tensor(&plus, &[3]), &target).unwrap();
+        let loss_minus = mse_loss(&complex_tensor(&minus, &[3]), &target).unwrap();
         let numerical = (loss_plus - loss_minus) / (2.0 * eps);
         assert_abs_diff_eq!(grad.data[i].re, numerical, epsilon = 1e-5);
 
@@ -77,8 +77,8 @@ fn mse_loss_backward_matches_finite_diff() {
         plus[i].im += eps;
         let mut minus = values.clone();
         minus[i].im -= eps;
-        let loss_plus = mse_loss(&complex_tensor(&plus, &[3]), &target);
-        let loss_minus = mse_loss(&complex_tensor(&minus, &[3]), &target);
+        let loss_plus = mse_loss(&complex_tensor(&plus, &[3]), &target).unwrap();
+        let loss_minus = mse_loss(&complex_tensor(&minus, &[3]), &target).unwrap();
         let numerical = (loss_plus - loss_minus) / (2.0 * eps);
         assert_abs_diff_eq!(grad.data[i].im, numerical, epsilon = 1e-5);
     }
@@ -99,7 +99,7 @@ fn magnitude_mse_loss_backward_matches_finite_diff() {
     let pred = complex_tensor(&values, &[3]);
     let target = complex_tensor(&target_values, &[3]);
 
-    let grad = magnitude_mse_loss_backward(&pred, &target);
+    let grad = magnitude_mse_loss_backward(&pred, &target).unwrap();
     let eps = 1e-6;
 
     for i in 0..values.len() {
@@ -108,8 +108,8 @@ fn magnitude_mse_loss_backward_matches_finite_diff() {
         plus[i].re += eps;
         let mut minus = values.clone();
         minus[i].re -= eps;
-        let loss_plus = magnitude_mse_loss(&complex_tensor(&plus, &[3]), &target);
-        let loss_minus = magnitude_mse_loss(&complex_tensor(&minus, &[3]), &target);
+        let loss_plus = magnitude_mse_loss(&complex_tensor(&plus, &[3]), &target).unwrap();
+        let loss_minus = magnitude_mse_loss(&complex_tensor(&minus, &[3]), &target).unwrap();
         let numerical = (loss_plus - loss_minus) / (2.0 * eps);
         assert_abs_diff_eq!(grad.data[i].re, numerical, epsilon = 1e-5);
 
@@ -118,8 +118,8 @@ fn magnitude_mse_loss_backward_matches_finite_diff() {
         plus[i].im += eps;
         let mut minus = values.clone();
         minus[i].im -= eps;
-        let loss_plus = magnitude_mse_loss(&complex_tensor(&plus, &[3]), &target);
-        let loss_minus = magnitude_mse_loss(&complex_tensor(&minus, &[3]), &target);
+        let loss_plus = magnitude_mse_loss(&complex_tensor(&plus, &[3]), &target).unwrap();
+        let loss_minus = magnitude_mse_loss(&complex_tensor(&minus, &[3]), &target).unwrap();
         let numerical = (loss_plus - loss_minus) / (2.0 * eps);
         assert_abs_diff_eq!(grad.data[i].im, numerical, epsilon = 1e-5);
     }
@@ -158,13 +158,13 @@ fn sgd_reduces_mse_loss() {
 
     let initial_loss = {
         let output = gain.forward(&input).unwrap();
-        mse_loss(&output, &target)
+        mse_loss(&output, &target).unwrap()
     };
 
     for _ in 0..200 {
         gain.zero_grad();
         let output = gain.forward(&input).unwrap();
-        let grad_output = mse_loss_backward(&output, &target);
+        let grad_output = mse_loss_backward(&output, &target).unwrap();
         gain.backward(&input, &output, &grad_output).unwrap();
 
         let grads: Vec<&ArrayD<f64>> = gain.gradients();
@@ -172,7 +172,7 @@ fn sgd_reduces_mse_loss() {
         let mut params: Vec<&mut ArrayD<f64>> = gain.parameters_mut();
         // SGD expects owned slices; clone parameters for the update.
         let mut params_owned: Vec<ArrayD<f64>> = params.iter_mut().map(|p| (**p).clone()).collect();
-        optimizer.step(&mut params_owned, &grads_owned);
+        optimizer.step(&mut params_owned, &grads_owned).unwrap();
         for (p, p_owned) in params.iter_mut().zip(params_owned) {
             **p = p_owned;
         }
@@ -180,7 +180,7 @@ fn sgd_reduces_mse_loss() {
 
     let final_loss = {
         let output = gain.forward(&input).unwrap();
-        mse_loss(&output, &target)
+        mse_loss(&output, &target).unwrap()
     };
 
     assert!(
@@ -188,4 +188,35 @@ fn sgd_reduces_mse_loss() {
         "SGD did not reduce MSE loss: initial {initial_loss}, final {final_loss}"
     );
     assert_abs_diff_eq!(gain.param[[0, 0]], target_gain, epsilon = 1e-2);
+}
+
+#[test]
+fn losses_reject_mismatched_and_empty_tensors() {
+    let one = complex_tensor(&[Complex::new(1.0, 0.0)], &[1]);
+    let two = complex_tensor(
+        &[Complex::new(1.0, 0.0), Complex::new(2.0, 0.0)],
+        &[2],
+    );
+    let empty = complex_tensor(&[], &[0]);
+
+    assert!(mse_loss(&one, &two).is_err());
+    assert!(mse_loss_backward(&one, &two).is_err());
+    assert!(magnitude_mse_loss(&one, &two).is_err());
+    assert!(magnitude_mse_loss_backward(&one, &two).is_err());
+    assert!(mse_loss(&empty, &empty).is_err());
+    assert!(magnitude_mse_loss(&empty, &empty).is_err());
+}
+
+#[test]
+fn sgd_rejects_incompatible_gradients_before_updating() {
+    let optimizer = Sgd::new(0.1);
+    let original = ArrayD::from_elem(IxDyn(&[2]), 1.0);
+    let mut params = vec![original.clone()];
+    let wrong_count: Vec<ArrayD<f64>> = Vec::new();
+    assert!(optimizer.step(&mut params, &wrong_count).is_err());
+    assert_eq!(params[0], original);
+
+    let wrong_shape = vec![ArrayD::zeros(IxDyn(&[1]))];
+    assert!(optimizer.step(&mut params, &wrong_shape).is_err());
+    assert_eq!(params[0], original);
 }

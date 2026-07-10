@@ -698,8 +698,11 @@ impl DiffModule<f64> for Biquad {
                 for bin in 0..n_bins {
                     let grad_bin = grad_axis2.index_axis(Axis(1), bin);
                     let input_bin = input_axis2.index_axis(Axis(1), bin);
-                    let prod = &grad_bin * &input_bin;
-                    dl_dh[[bin, out_ch, in_ch]] = prod.sum();
+                    dl_dh[[bin, out_ch, in_ch]] = grad_bin
+                        .iter()
+                        .zip(input_bin.iter())
+                        .map(|(grad, input)| *grad * input.conj())
+                        .sum::<Complex<f64>>();
                 }
             }
         }
@@ -1069,7 +1072,11 @@ impl DiffModule<f64> for ParallelBiquad {
             for bin in 0..n_bins {
                 let grad_bin = grad_axis2.index_axis(Axis(1), bin);
                 let input_bin = input_axis2.index_axis(Axis(1), bin);
-                dl_dh[[bin, ch]] = (&grad_bin * &input_bin).sum();
+                dl_dh[[bin, ch]] = grad_bin
+                    .iter()
+                    .zip(input_bin.iter())
+                    .map(|(grad, input)| *grad * input.conj())
+                    .sum::<Complex<f64>>();
             }
         }
 
