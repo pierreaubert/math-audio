@@ -87,6 +87,10 @@ impl DiffModule<f64> for Fft {
         vec![]
     }
 
+    fn parameters_mut(&mut self) -> Vec<&mut ArrayD<f64>> {
+        vec![]
+    }
+
     fn gradients(&self) -> Vec<&ArrayD<f64>> {
         vec![]
     }
@@ -164,6 +168,10 @@ impl DiffModule<f64> for Ifft {
     }
 
     fn parameters(&self) -> Vec<&ArrayD<f64>> {
+        vec![]
+    }
+
+    fn parameters_mut(&mut self) -> Vec<&mut ArrayD<f64>> {
         vec![]
     }
 
@@ -269,6 +277,10 @@ impl DiffModule<f64> for FftAntiAlias {
         vec![]
     }
 
+    fn parameters_mut(&mut self) -> Vec<&mut ArrayD<f64>> {
+        vec![]
+    }
+
     fn gradients(&self) -> Vec<&ArrayD<f64>> {
         vec![]
     }
@@ -368,6 +380,10 @@ impl DiffModule<f64> for IfftAntiAlias {
     }
 
     fn parameters(&self) -> Vec<&ArrayD<f64>> {
+        vec![]
+    }
+
+    fn parameters_mut(&mut self) -> Vec<&mut ArrayD<f64>> {
         vec![]
     }
 

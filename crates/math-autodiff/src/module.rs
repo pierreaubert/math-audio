@@ -40,6 +40,9 @@ pub trait DiffModule<T> {
     /// Return references to this module's parameter tensors.
     fn parameters(&self) -> Vec<&ArrayD<f64>>;
 
+    /// Return mutable references to this module's parameter tensors.
+    fn parameters_mut(&mut self) -> Vec<&mut ArrayD<f64>>;
+
     /// Return references to this module's accumulated parameter gradients.
     fn gradients(&self) -> Vec<&ArrayD<f64>>;
 

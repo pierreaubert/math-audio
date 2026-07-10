@@ -765,6 +765,10 @@ impl DiffModule<f64> for Biquad {
         vec![&self.param]
     }
 
+    fn parameters_mut(&mut self) -> Vec<&mut ArrayD<f64>> {
+        vec![&mut self.param]
+    }
+
     fn gradients(&self) -> Vec<&ArrayD<f64>> {
         vec![&self.param_grad]
     }
@@ -1122,6 +1126,10 @@ impl DiffModule<f64> for ParallelBiquad {
 
     fn parameters(&self) -> Vec<&ArrayD<f64>> {
         vec![&self.param]
+    }
+
+    fn parameters_mut(&mut self) -> Vec<&mut ArrayD<f64>> {
+        vec![&mut self.param]
     }
 
     fn gradients(&self) -> Vec<&ArrayD<f64>> {

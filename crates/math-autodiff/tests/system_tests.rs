@@ -343,6 +343,51 @@ fn series_gradient_matches_manual() {
 }
 
 #[test]
+fn shell_parameters_mut_changes_core() {
+    let n_bins = NFFT / 2 + 1;
+    let input_layer = Magnitude::new(NFFT, 2);
+    let mut core = Gain::new(NFFT, 2, 2).expect("valid gain");
+    core.param = ArrayD::from_shape_vec(IxDyn(&[2, 2]), vec![1.0, 0.0, 0.0, 1.0]).unwrap();
+    let output_layer = Magnitude::new(NFFT, 2);
+
+    let mut shell = Shell::new(
+        Box::new(input_layer),
+        Box::new(core),
+        Box::new(output_layer),
+    )
+    .expect("valid shell");
+
+    let input = ones_spectrum(&[1, n_bins, 2]);
+    let output_before = shell.forward(&input).expect("forward should succeed");
+
+    {
+        let mut params_mut = shell.parameters_mut();
+        assert_eq!(params_mut.len(), 1, "shell should expose exactly the core's parameters");
+        let core_param = &mut params_mut[0];
+        assert_eq!(core_param.shape(), &[2, 2]);
+        // Scale the first output channel by 2.0.
+        core_param[[0, 0]] = 2.0;
+        core_param[[0, 1]] = 0.0;
+        core_param[[1, 0]] = 0.0;
+        core_param[[1, 1]] = 1.0;
+    }
+
+    let output_after = shell.forward(&input).expect("forward should succeed");
+
+    // Magnitude leaves the all-ones input unchanged; the modified gain matrix
+    // should now scale channel 0 by 2.0 and leave channel 1 unchanged.
+    for f in 0..n_bins {
+        assert_abs_diff_eq!(output_after.data[[0, f, 0]].re, 2.0, epsilon = 1e-12);
+        assert_abs_diff_eq!(output_after.data[[0, f, 0]].im, 0.0, epsilon = 1e-12);
+        assert_abs_diff_eq!(output_after.data[[0, f, 1]].re, 1.0, epsilon = 1e-12);
+        assert_abs_diff_eq!(output_after.data[[0, f, 1]].im, 0.0, epsilon = 1e-12);
+    }
+
+    // Ensure the output actually changed from the pre-modification run.
+    assert_ne!(output_before.data[[0, 0, 0]].re, output_after.data[[0, 0, 0]].re);
+}
+
+#[test]
 fn shell_get_freq_response() {
     let n_bins = NFFT / 2 + 1;
     let fft = Fft::new(NFFT);

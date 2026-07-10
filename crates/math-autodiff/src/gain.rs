@@ -248,6 +248,10 @@ impl DiffModule<f64> for Gain {
         vec![&self.param]
     }
 
+    fn parameters_mut(&mut self) -> Vec<&mut ArrayD<f64>> {
+        vec![&mut self.param]
+    }
+
     fn gradients(&self) -> Vec<&ArrayD<f64>> {
         vec![&self.param_grad]
     }
@@ -414,6 +418,10 @@ impl DiffModule<f64> for ParallelGain {
         vec![&self.param]
     }
 
+    fn parameters_mut(&mut self) -> Vec<&mut ArrayD<f64>> {
+        vec![&mut self.param]
+    }
+
     fn gradients(&self) -> Vec<&ArrayD<f64>> {
         vec![&self.param_grad]
     }
@@ -524,6 +532,10 @@ impl DiffModule<f64> for Magnitude {
     }
 
     fn parameters(&self) -> Vec<&ArrayD<f64>> {
+        vec![]
+    }
+
+    fn parameters_mut(&mut self) -> Vec<&mut ArrayD<f64>> {
         vec![]
     }
 

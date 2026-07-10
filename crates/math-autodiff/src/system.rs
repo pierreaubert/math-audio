@@ -131,6 +131,13 @@ impl DiffModule<f64> for Series {
             .collect()
     }
 
+    fn parameters_mut(&mut self) -> Vec<&mut ArrayD<f64>> {
+        self.modules
+            .iter_mut()
+            .flat_map(|module| module.parameters_mut())
+            .collect()
+    }
+
     fn gradients(&self) -> Vec<&ArrayD<f64>> {
         self.modules
             .iter()
@@ -259,6 +266,16 @@ impl Shell {
         params.extend(self.input_layer.parameters());
         params.extend(self.core.parameters());
         params.extend(self.output_layer.parameters());
+        params
+    }
+
+    /// Return mutable parameter tensors from all parameter-bearing sub-modules.
+    #[must_use]
+    pub fn parameters_mut(&mut self) -> Vec<&mut ArrayD<f64>> {
+        let mut params = Vec::new();
+        params.extend(self.input_layer.parameters_mut());
+        params.extend(self.core.parameters_mut());
+        params.extend(self.output_layer.parameters_mut());
         params
     }
 
