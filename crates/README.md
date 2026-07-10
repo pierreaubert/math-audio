@@ -12,6 +12,7 @@ Mathematical and DSP libraries for the SOTF audio processing project.
 | [math-test-functions](math-test-functions/) | `math_audio_test_functions` | 56+ benchmark functions for optimizer validation |
 | [math-delaunay](math-delaunay/) | `math_delaunay` | Delaunay triangulation and Voronoi diagrams (port of d3-delaunay) |
 | [math-rir](math-rir/) | `math_rir` | Room Impulse Response analysis: SSIR reflection detection, segmentation, mixing time |
+| [math-autodiff](math-autodiff/) | `math_audio_autodiff` | Frequency-domain differentiable audio DSP |
 
 ## Dependency Graph
 
@@ -29,6 +30,8 @@ math-dsp  (depends on math-iir-fir)
 math-delaunay  (independent)
 
 math-rir  (independent)
+
+math-autodiff  (depends on math-iir-fir, math-dsp)
 ```
 
 ## Build & Test
@@ -38,7 +41,7 @@ math-rir  (independent)
 just prod-math
 
 # Run all tests
-cargo test -p math-iir-fir -p math-dsp -p math-optimisation -p math-test-functions -p math-delaunay -p math-rir --lib
+cargo test -p math-iir-fir -p math-dsp -p math-optimisation -p math-test-functions -p math-delaunay -p math-rir -p math-autodiff --lib
 
 # Run benchmarks
 just bench-math
@@ -54,6 +57,7 @@ Due to dependency ordering, publish in this sequence:
 1. `math-test-functions`
 2. `math-optimisation`
 3. `math-iir-fir`
-5. `math-rir`
 4. `math-dsp`
-5. `math-delaunay`
+5. `math-rir`
+6. `math-delaunay`
+7. `math-autodiff`

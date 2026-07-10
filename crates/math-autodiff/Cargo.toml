@@ -22,6 +22,11 @@ math-iir-fir = { workspace = true }
 math-dsp = { workspace = true }
 thiserror = { workspace = true }
 
+[[bench]]
+name = "biquad_bench"
+harness = false
+
 [dev-dependencies]
 approx = { workspace = true }
 rand = { workspace = true }
+criterion = { workspace = true }
