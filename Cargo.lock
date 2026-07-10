@@ -1722,6 +1722,7 @@ dependencies = [
  "approx",
  "math-dsp",
  "math-iir-fir",
+ "nalgebra",
  "ndarray",
  "num-complex",
  "num-traits",

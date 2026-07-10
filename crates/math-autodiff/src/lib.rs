@@ -5,13 +5,14 @@
 
 #![warn(clippy::pedantic)]
 
+pub mod delay;
 pub mod error;
 pub mod fft;
-pub mod delay;
 pub mod gain;
 pub mod gradient;
 pub mod iir;
 pub mod loss;
+pub mod matrix;
 pub mod module;
 pub mod optim;
 pub mod system;

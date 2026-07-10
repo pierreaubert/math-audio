@@ -13,6 +13,7 @@ path = "src/lib.rs"
 
 [dependencies]
 ndarray = { workspace = true }
+nalgebra = { workspace = true }
 num-complex = { workspace = true }
 num-traits = { workspace = true }
 rustfft = { workspace = true }
