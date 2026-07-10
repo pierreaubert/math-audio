@@ -24,3 +24,31 @@ impl<T: num_traits::Float> DiffTensor<T> {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use approx::assert_abs_diff_eq;
+
+    #[test]
+    fn zeros_creates_correct_shape_and_zero_filled() {
+        let t = DiffTensor::<f64>::zeros(ndarray::Ix2(2, 3));
+        assert_eq!(t.data.shape(), &[2, 3]);
+        for c in t.data.iter() {
+            assert_abs_diff_eq!(c.re, 0.0, epsilon = 1e-12);
+            assert_abs_diff_eq!(c.im, 0.0, epsilon = 1e-12);
+        }
+    }
+
+    #[test]
+    fn from_array_preserves_shape_and_values() {
+        let values = vec![Complex::new(1.0, -1.0); 6];
+        let arr = Array::from_shape_vec(ndarray::Ix2(2, 3), values).unwrap();
+        let t = DiffTensor::<f64>::from_array(arr.clone());
+        assert_eq!(t.data.shape(), &[2, 3]);
+        for (actual, expected) in t.data.iter().zip(arr.iter()) {
+            assert_abs_diff_eq!(actual.re, expected.re, epsilon = 1e-12);
+            assert_abs_diff_eq!(actual.im, expected.im, epsilon = 1e-12);
+        }
+    }
+}
