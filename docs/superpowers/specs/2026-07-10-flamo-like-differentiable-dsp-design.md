@@ -118,9 +118,11 @@ The module itself has no parameters, so it only needs to propagate `dL/dinput`. 
 
 ```text
 dL/dH_closed[f] = sum_b (dL/doutput)[b,f] * conj(input[b,f])^T
-dL/dH_ff[f]    = (I - H_fb[f])^-T @ dL/dH_closed[f]
-dL/dH_fb[f]    = (I - H_fb[f])^-T @ dL/dH_closed[f] @ H_ff[f]^T @ (I - H_fb[f])^-T
+dL/dH_ff[f]    = (I - H_fb[f])^-H @ dL/dH_closed[f]
+dL/dH_fb[f]    = (I - H_fb[f])^-H @ dL/dH_closed[f] @ H_ff[f]^H @ (I - H_fb[f])^-H
 ```
+
+where `^H` denotes the conjugate transpose.
 
 These gradients are then passed as `grad_output` to the `H_ff` and `H_fb` submodules via their own `backward` methods. The submodule structure mirrors `Shell`: `Recursion` owns `Box<dyn DiffModule<f64>>` for feedforward and feedback.
 

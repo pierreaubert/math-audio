@@ -13,7 +13,7 @@ differentiation framework is required.
 |--------|-------------|
 | `fft` | Real-to-complex FFT / inverse-FFT differentiable wrapper. |
 | `gain` | Frequency-independent real gain matrices and magnitude output. |
-| `delay` | Single-channel (`Delay`) and multi-channel (`ParallelDelay`) frequency-domain delays. |
+| `delay` | MIMO (`Delay`) and diagonal per-channel (`ParallelDelay`) frequency-domain delays. |
 | `matrix` | Learnable real matrices: dense (`Dense`) and orthogonal (`Orthogonal`) parameterizations. |
 | `recursion` | Closed-loop composition (`Recursion`) for feedback systems such as FDNs. |
 | `iir::biquad` | Differentiable RBJ biquad filter. |

@@ -32,7 +32,7 @@ fn build_fdn_core(
 
     let mut delays = ParallelDelay::new(NFFT, N, 1.0)?;
     for (i, &tau) in delay_values.iter().enumerate() {
-        // softplus(raw) + 1.0 ≈ tau for large tau.
+        // raw_to_tau(raw) = softplus(raw) - softplus(0.0) + 1.0 ≈ tau for large tau.
         delays.param[[i]] = tau;
     }
 

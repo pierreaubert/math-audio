@@ -70,10 +70,10 @@ use crate::error::AutodiffError;
 use crate::module::DiffModule;
 use crate::tensor::DiffTensor;
 
-/// Softplus mapping raw parameters to positive delay samples.
+/// Standard softplus mapping raw parameters to positive delay samples.
 #[inline]
 fn softplus(x: f64) -> f64 {
-    (1.0 + (-x).exp()).ln()
+    (1.0 + x.exp()).ln()
 }
 
 /// Derivative of softplus.
@@ -83,9 +83,10 @@ fn softplus_derivative(x: f64) -> f64 {
 }
 
 /// Map a raw delay parameter to a positive delay in samples.
+/// `raw = 0` maps exactly to `tau_min`.
 #[inline]
 fn raw_to_tau(raw: f64, tau_min: f64) -> f64 {
-    softplus(raw) + tau_min
+    softplus(raw) - softplus(0.0) + tau_min
 }
 
 /// Build the complex delay frequency response for one delay value.

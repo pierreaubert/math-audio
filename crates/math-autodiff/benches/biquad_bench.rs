@@ -31,6 +31,7 @@ fn biquad_backward_benchmark(c: &mut Criterion) {
 
     c.bench_function("biquad backward", |b| {
         b.iter(|| {
+            biquad.zero_grad();
             black_box(
                 biquad
                     .backward(
