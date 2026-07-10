@@ -1725,6 +1725,7 @@ dependencies = [
  "ndarray",
  "num-complex",
  "num-traits",
+ "rand",
  "realfft",
  "rustfft",
  "thiserror 2.0.18",

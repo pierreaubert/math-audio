@@ -684,6 +684,20 @@ impl DiffModule<f64> for Biquad {
     fn n_bins(&self) -> usize {
         self.n_bins()
     }
+
+    fn as_any(&self) -> &dyn std::any::Any
+    where
+        f64: 'static,
+    {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any
+    where
+        f64: 'static,
+    {
+        self
+    }
 }
 
 /// Differentiable RBJ biquad with a diagonal (per-channel) frequency response.
@@ -1029,5 +1043,19 @@ impl DiffModule<f64> for ParallelBiquad {
 
     fn n_bins(&self) -> usize {
         self.n_bins()
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any
+    where
+        f64: 'static,
+    {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any
+    where
+        f64: 'static,
+    {
+        self
     }
 }

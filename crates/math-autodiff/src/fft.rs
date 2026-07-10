@@ -82,6 +82,20 @@ impl DiffModule<f64> for Fft {
     fn n_bins(&self) -> usize {
         self.n_bins()
     }
+
+    fn as_any(&self) -> &dyn std::any::Any
+    where
+        f64: 'static,
+    {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any
+    where
+        f64: 'static,
+    {
+        self
+    }
 }
 
 /// Complex-to-real inverse FFT differentiable module.
@@ -151,6 +165,20 @@ impl DiffModule<f64> for Ifft {
 
     fn n_bins(&self) -> usize {
         self.n_bins()
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any
+    where
+        f64: 'static,
+    {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any
+    where
+        f64: 'static,
+    {
+        self
     }
 }
 
@@ -244,6 +272,20 @@ impl DiffModule<f64> for FftAntiAlias {
     fn n_bins(&self) -> usize {
         self.n_bins()
     }
+
+    fn as_any(&self) -> &dyn std::any::Any
+    where
+        f64: 'static,
+    {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any
+    where
+        f64: 'static,
+    {
+        self
+    }
 }
 
 /// Complex-to-real inverse FFT with an exponential anti-aliasing envelope.
@@ -335,5 +377,19 @@ impl DiffModule<f64> for IfftAntiAlias {
 
     fn n_bins(&self) -> usize {
         self.n_bins()
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any
+    where
+        f64: 'static,
+    {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any
+    where
+        f64: 'static,
+    {
+        self
     }
 }
