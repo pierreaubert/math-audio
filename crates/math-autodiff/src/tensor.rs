@@ -34,7 +34,7 @@ mod tests {
     fn zeros_creates_correct_shape_and_zero_filled() {
         let t = DiffTensor::<f64>::zeros(ndarray::Ix2(2, 3));
         assert_eq!(t.data.shape(), &[2, 3]);
-        for c in t.data.iter() {
+        for c in &t.data {
             assert_abs_diff_eq!(c.re, 0.0, epsilon = 1e-12);
             assert_abs_diff_eq!(c.im, 0.0, epsilon = 1e-12);
         }

@@ -34,7 +34,7 @@ mod tests {
     fn zeros_creates_correct_shape_and_zero_filled() {
         let g = Gradient::<f64>::zeros(ndarray::Ix2(4, 5));
         assert_eq!(g.data.shape(), &[4, 5]);
-        for c in g.data.iter() {
+        for c in &g.data {
             assert_abs_diff_eq!(c.re, 0.0, epsilon = 1e-12);
             assert_abs_diff_eq!(c.im, 0.0, epsilon = 1e-12);
         }
