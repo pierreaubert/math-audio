@@ -1,6 +1,10 @@
 use approx::{assert_abs_diff_eq, assert_relative_eq};
 use math_audio_autodiff::{
-    gain::Gain, module::DiffModule, recursion::Recursion, tensor::DiffTensor,
+    delay::ParallelDelay,
+    gain::Gain,
+    module::DiffModule,
+    recursion::Recursion,
+    tensor::DiffTensor,
 };
 use ndarray::{Array3, ArrayD, IxDyn};
 use num_complex::Complex;
@@ -136,7 +140,8 @@ fn recursion_gradient_matches_finite_difference() {
     let target = complex_spectrum(&[1, n_bins, n]);
 
     // Analytical gradients.
-    let mut recursion = Recursion::new(Box::new(feedforward.clone()), Box::new(feedback.clone())).unwrap();
+    let mut recursion =
+        Recursion::new(Box::new(feedforward.clone()), Box::new(feedback.clone())).unwrap();
     recursion.zero_grad();
     let output = recursion.forward(&input).unwrap();
     let grad_output_data: Vec<Complex<f64>> = output
@@ -148,9 +153,7 @@ fn recursion_gradient_matches_finite_difference() {
     let grad_output = DiffTensor::from_array(
         ArrayD::from_shape_vec(IxDyn(output.data.shape()), grad_output_data).unwrap(),
     );
-    recursion
-        .backward(&input, &output, &grad_output)
-        .unwrap();
+    recursion.backward(&input, &output, &grad_output).unwrap();
 
     let analytical_feedforward = recursion.feedforward.gradients()[0].clone();
     let analytical_feedback = recursion.feedback.gradients()[0].clone();
@@ -250,5 +253,93 @@ fn recursion_gradient_matches_finite_difference() {
                 relative_error
             );
         }
+    }
+}
+
+#[test]
+fn recursion_gradient_with_complex_transfer_matches_finite_difference() {
+    // Regression guard for the conjugate-transpose bug in Recursion::backward.
+    // Gain has a real-valued frequency response, so use ParallelDelay for the
+    // feedforward path so that H_ff is genuinely complex.
+    let n = 2;
+    let n_bins = NFFT / 2 + 1;
+
+    let mut feedforward = ParallelDelay::new(NFFT, n, 0.0).unwrap();
+    feedforward.param[[0]] = 3.5;
+    feedforward.param[[1]] = 7.25;
+
+    let mut feedback = Gain::new(NFFT, n, n).unwrap();
+    // Small diagonal feedback keeps (I - H_fb) well-conditioned and stable.
+    feedback.param[[0, 0]] = 0.1;
+    feedback.param[[1, 1]] = -0.05;
+
+    let input = complex_spectrum(&[1, n_bins, n]);
+    let target = complex_spectrum(&[1, n_bins, n]);
+
+    let mut recursion =
+        Recursion::new(Box::new(feedforward.clone()), Box::new(feedback.clone())).unwrap();
+    recursion.zero_grad();
+    let output = recursion.forward(&input).unwrap();
+    let grad_output_data: Vec<Complex<f64>> = output
+        .data
+        .iter()
+        .zip(target.data.iter())
+        .map(|(o, t)| 2.0 * (o - t))
+        .collect();
+    let grad_output = DiffTensor::from_array(
+        ArrayD::from_shape_vec(IxDyn(output.data.shape()), grad_output_data).unwrap(),
+    );
+    recursion.backward(&input, &output, &grad_output).unwrap();
+
+    let analytical_feedforward = recursion.feedforward.gradients()[0].clone();
+
+    // Central finite difference on the raw ParallelDelay parameters.
+    let epsilon = 1e-5;
+    for ch in 0..n {
+        let mut param_plus = feedforward.param.clone();
+        param_plus[[ch]] += epsilon;
+        let recursion_plus = Recursion::new(
+            Box::new(ParallelDelay {
+                nfft: feedforward.nfft,
+                n_channels: feedforward.n_channels,
+                tau_min: feedforward.tau_min,
+                param: param_plus,
+                param_grad: ArrayD::zeros(IxDyn(&[n])),
+            }),
+            Box::new(feedback.clone()),
+        )
+        .unwrap();
+        let out_plus = recursion_plus.forward(&input).unwrap();
+        let loss_plus = mse_loss(&out_plus, &target);
+
+        let mut param_minus = feedforward.param.clone();
+        param_minus[[ch]] -= epsilon;
+        let recursion_minus = Recursion::new(
+            Box::new(ParallelDelay {
+                nfft: feedforward.nfft,
+                n_channels: feedforward.n_channels,
+                tau_min: feedforward.tau_min,
+                param: param_minus,
+                param_grad: ArrayD::zeros(IxDyn(&[n])),
+            }),
+            Box::new(feedback.clone()),
+        )
+        .unwrap();
+        let out_minus = recursion_minus.forward(&input).unwrap();
+        let loss_minus = mse_loss(&out_minus, &target);
+
+        let finite_diff = (loss_plus - loss_minus) / (2.0 * epsilon);
+        let analytical_val = analytical_feedforward[[ch]];
+
+        let denom = finite_diff.abs().max(1e-8);
+        let relative_error = (analytical_val - finite_diff).abs() / denom;
+        assert!(
+            relative_error < 1e-4 || (analytical_val - finite_diff).abs() < 1e-6,
+            "feedforward delay[{}]: analytical={} finite_diff={} rel_err={}",
+            ch,
+            analytical_val,
+            finite_diff,
+            relative_error
+        );
     }
 }

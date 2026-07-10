@@ -63,7 +63,7 @@ output[b, f, o] = sum_i H_delay[f, o, i] * input[b, f, i]
 
 Backward pass:
 
-- Parameter gradient: `dL/dτ = Re{ sum_{b,f} (dL/doutput)[b,f] * conj(input[b,f]) * dH/dτ }`.
+- Parameter gradient: `dL/dτ = Re{ sum_{b,f} (dL/doutput)[b,f] * conj(input[b,f]) * conj(dH/dτ) }`.
 - Input gradient: `dL/dinput[b,f] = conj(H[f]) * dL/doutput[b,f]`.
 
 `dH/dτ = -j * (2πf/nfft) * H[f]`.

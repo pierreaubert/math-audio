@@ -59,11 +59,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let target_core = build_fdn_core(&target_delays, 0.3)?;
     let fft = Fft::with_channels(NFFT, 1);
     let magnitude = Magnitude::new(NFFT, 1);
-    let target_shell = Shell::new(Box::new(fft.clone()), target_core, Box::new(magnitude.clone()))?;
+    let target_shell = Shell::new(
+        Box::new(fft.clone()),
+        target_core,
+        Box::new(magnitude.clone()),
+    )?;
 
-    let mut input = DiffTensor::from_array(
-        Array3::<Complex<f64>>::zeros((1, NFFT, 1)).into_dyn(),
-    );
+    let mut input = DiffTensor::from_array(Array3::<Complex<f64>>::zeros((1, NFFT, 1)).into_dyn());
     input.data[[0, 0, 0]] = Complex::new(1.0, 0.0);
     let target = target_shell.forward(&input)?;
 
@@ -84,7 +86,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         let grad = mse_loss_backward(&pred, &target)?;
         shell.backward(&input, &pred, &grad)?;
-        let grads_owned: Vec<ArrayD<f64>> = shell.gradients().iter().map(|g| (*g).clone()).collect();
+        let grads_owned: Vec<ArrayD<f64>> =
+            shell.gradients().iter().map(|g| (*g).clone()).collect();
         let mut params = shell.parameters_mut();
         let grads: Vec<&ArrayD<f64>> = grads_owned.iter().collect();
         sgd.step(&mut params[..], &grads[..])?;
@@ -93,5 +96,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let final_loss = mse_loss(&shell.forward(&input)?, &target)?;
     println!("initial loss = {:.6e}", initial_loss);
     println!("final loss   = {:.6e}", final_loss);
+    if final_loss >= initial_loss {
+        eprintln!("warning: optimization did not reduce the loss");
+    }
     Ok(())
 }

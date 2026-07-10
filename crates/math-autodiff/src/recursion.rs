@@ -72,10 +72,13 @@ fn dmatrix_to_ndarray2(mat: &DMatrix<Complex<f64>>) -> Array2<Complex<f64>> {
 
 fn invert_complex_matrix(
     mat: &Array2<Complex<f64>>,
+    bin: usize,
 ) -> Result<Array2<Complex<f64>>, AutodiffError> {
     let dm = ndarray2_to_dmatrix(mat);
     let inv = dm.try_inverse().ok_or_else(|| {
-        AutodiffError::Message("Recursion: failed to invert (I - H_fb)".to_string())
+        AutodiffError::Message(format!(
+            "Recursion: failed to invert (I - H_fb) at frequency bin {bin}"
+        ))
     })?;
     Ok(dmatrix_to_ndarray2(&inv))
 }
@@ -174,7 +177,7 @@ impl Recursion {
                 }
                 m
             };
-            let a = invert_complex_matrix(&i_min_h_fb)?;
+            let a = invert_complex_matrix(&i_min_h_fb, f)?;
             for r in 0..n_out {
                 for c in 0..n_out {
                     a_arr[[f, r, c]] = a[[r, c]];
@@ -309,7 +312,8 @@ impl DiffModule<f64> for Recursion {
                 }
                 m
             };
-            let a_t = a.t();
+            let a_conj = a.mapv(|x| x.conj());
+            let a_h = a_conj.t();
             let h_ff_f = {
                 let mut m = Array2::zeros((n_out, n_in));
                 for r in 0..n_out {
@@ -329,16 +333,19 @@ impl DiffModule<f64> for Recursion {
                 m
             };
 
-            // dL/dH_ff[f] = A^T @ dL/dH_closed[f]
-            let dl_dh_ff_bin = a_t.dot(&dl_dh_closed_f);
+            // dL/dH_ff[f] = A^H @ dL/dH_closed[f]
+            let dl_dh_ff_bin = a_h.dot(&dl_dh_closed_f);
             for o in 0..n_out {
                 for i in 0..n_in {
                     dl_dh_ff[[f, o, i]] = dl_dh_ff_bin[[o, i]];
                 }
             }
 
-            // dL/dH_fb[f] = A^T @ dL/dH_closed[f] @ H_ff^T @ A^T
-            let dl_dh_fb_bin = a_t.dot(&dl_dh_closed_f).dot(&h_ff_f.t()).dot(&a_t);
+            // dL/dH_fb[f] = A^H @ dL/dH_closed[f] @ H_ff^H @ A^H
+            let dl_dh_fb_bin = a_h
+                .dot(&dl_dh_closed_f)
+                .dot(&h_ff_f.mapv(|x| x.conj()).t())
+                .dot(&a_h);
             for r in 0..n_out {
                 for c in 0..n_out {
                     dl_dh_fb[[f, r, c]] = dl_dh_fb_bin[[r, c]];
