@@ -4,6 +4,7 @@ use ndarray::Array1;
 use num_complex::Complex;
 use realfft::RealFftPlanner;
 
+use crate::error::AutodiffError;
 use crate::module::DiffModule;
 use crate::tensor::DiffTensor;
 
@@ -32,7 +33,7 @@ impl Fft {
 }
 
 impl DiffModule<f64> for Fft {
-    fn forward(&self, input: &DiffTensor<f64>) -> DiffTensor<f64> {
+    fn forward(&self, input: &DiffTensor<f64>) -> Result<DiffTensor<f64>, AutodiffError> {
         let mut planner = RealFftPlanner::<f64>::new();
         let r2c = planner.plan_fft_forward(self.nfft);
 
@@ -42,10 +43,9 @@ impl DiffModule<f64> for Fft {
         }
 
         let mut spectrum = r2c.make_output_vec();
-        r2c.process(&mut input_vec, &mut spectrum)
-            .expect("input/output vectors were sized from the FFT planner");
+        r2c.process(&mut input_vec, &mut spectrum)?;
 
-        DiffTensor::from_array(Array1::from_iter(spectrum))
+        Ok(DiffTensor::from_array(Array1::from_iter(spectrum)))
     }
 
     fn backward(
@@ -53,7 +53,7 @@ impl DiffModule<f64> for Fft {
         _input: &DiffTensor<f64>,
         _output: &DiffTensor<f64>,
         grad_output: &DiffTensor<f64>,
-    ) -> DiffTensor<f64> {
+    ) -> Result<DiffTensor<f64>, AutodiffError> {
         let mut planner = RealFftPlanner::<f64>::new();
         let c2r = planner.plan_fft_inverse(self.nfft);
 
@@ -63,13 +63,12 @@ impl DiffModule<f64> for Fft {
         }
 
         let mut grad_input = c2r.make_output_vec();
-        c2r.process(&mut grad_vec, &mut grad_input)
-            .expect("input/output vectors were sized from the FFT planner");
+        c2r.process(&mut grad_vec, &mut grad_input)?;
 
         let scale = nfft_as_f64(self.nfft);
-        DiffTensor::from_array(Array1::from_iter(
+        Ok(DiffTensor::from_array(Array1::from_iter(
             grad_input.into_iter().map(|r| Complex::new(r / scale, 0.0)),
-        ))
+        )))
     }
 
     fn input_channels(&self) -> usize {
@@ -104,7 +103,7 @@ impl Ifft {
 }
 
 impl DiffModule<f64> for Ifft {
-    fn forward(&self, input: &DiffTensor<f64>) -> DiffTensor<f64> {
+    fn forward(&self, input: &DiffTensor<f64>) -> Result<DiffTensor<f64>, AutodiffError> {
         let mut planner = RealFftPlanner::<f64>::new();
         let c2r = planner.plan_fft_inverse(self.nfft);
 
@@ -114,13 +113,12 @@ impl DiffModule<f64> for Ifft {
         }
 
         let mut output = c2r.make_output_vec();
-        c2r.process(&mut input_vec, &mut output)
-            .expect("input/output vectors were sized from the FFT planner");
+        c2r.process(&mut input_vec, &mut output)?;
 
         let scale = nfft_as_f64(self.nfft);
-        DiffTensor::from_array(Array1::from_iter(
+        Ok(DiffTensor::from_array(Array1::from_iter(
             output.into_iter().map(|r| Complex::new(r / scale, 0.0)),
-        ))
+        )))
     }
 
     fn backward(
@@ -128,7 +126,7 @@ impl DiffModule<f64> for Ifft {
         _input: &DiffTensor<f64>,
         _output: &DiffTensor<f64>,
         grad_output: &DiffTensor<f64>,
-    ) -> DiffTensor<f64> {
+    ) -> Result<DiffTensor<f64>, AutodiffError> {
         let mut planner = RealFftPlanner::<f64>::new();
         let r2c = planner.plan_fft_forward(self.nfft);
 
@@ -138,10 +136,9 @@ impl DiffModule<f64> for Ifft {
         }
 
         let mut spectrum = r2c.make_output_vec();
-        r2c.process(&mut grad_vec, &mut spectrum)
-            .expect("input/output vectors were sized from the FFT planner");
+        r2c.process(&mut grad_vec, &mut spectrum)?;
 
-        DiffTensor::from_array(Array1::from_iter(spectrum))
+        Ok(DiffTensor::from_array(Array1::from_iter(spectrum)))
     }
 
     fn input_channels(&self) -> usize {
@@ -195,7 +192,7 @@ impl FftAntiAlias {
 }
 
 impl DiffModule<f64> for FftAntiAlias {
-    fn forward(&self, input: &DiffTensor<f64>) -> DiffTensor<f64> {
+    fn forward(&self, input: &DiffTensor<f64>) -> Result<DiffTensor<f64>, AutodiffError> {
         let mut planner = RealFftPlanner::<f64>::new();
         let r2c = planner.plan_fft_forward(self.nfft);
 
@@ -205,10 +202,9 @@ impl DiffModule<f64> for FftAntiAlias {
         }
 
         let mut spectrum = r2c.make_output_vec();
-        r2c.process(&mut input_vec, &mut spectrum)
-            .expect("input/output vectors were sized from the FFT planner");
+        r2c.process(&mut input_vec, &mut spectrum)?;
 
-        DiffTensor::from_array(Array1::from_iter(spectrum))
+        Ok(DiffTensor::from_array(Array1::from_iter(spectrum)))
     }
 
     fn backward(
@@ -216,7 +212,7 @@ impl DiffModule<f64> for FftAntiAlias {
         _input: &DiffTensor<f64>,
         _output: &DiffTensor<f64>,
         grad_output: &DiffTensor<f64>,
-    ) -> DiffTensor<f64> {
+    ) -> Result<DiffTensor<f64>, AutodiffError> {
         let mut planner = RealFftPlanner::<f64>::new();
         let c2r = planner.plan_fft_inverse(self.nfft);
 
@@ -226,16 +222,15 @@ impl DiffModule<f64> for FftAntiAlias {
         }
 
         let mut grad_time = c2r.make_output_vec();
-        c2r.process(&mut grad_vec, &mut grad_time)
-            .expect("input/output vectors were sized from the FFT planner");
+        c2r.process(&mut grad_vec, &mut grad_time)?;
 
         let scale = nfft_as_f64(self.nfft);
-        DiffTensor::from_array(Array1::from_iter(
+        Ok(DiffTensor::from_array(Array1::from_iter(
             grad_time
                 .iter()
                 .zip(&self.envelope)
                 .map(|(sample, env)| Complex::new(sample * env / scale, 0.0)),
-        ))
+        )))
     }
 
     fn input_channels(&self) -> usize {
@@ -289,7 +284,7 @@ impl IfftAntiAlias {
 }
 
 impl DiffModule<f64> for IfftAntiAlias {
-    fn forward(&self, input: &DiffTensor<f64>) -> DiffTensor<f64> {
+    fn forward(&self, input: &DiffTensor<f64>) -> Result<DiffTensor<f64>, AutodiffError> {
         let mut planner = RealFftPlanner::<f64>::new();
         let c2r = planner.plan_fft_inverse(self.nfft);
 
@@ -299,16 +294,15 @@ impl DiffModule<f64> for IfftAntiAlias {
         }
 
         let mut output = c2r.make_output_vec();
-        c2r.process(&mut input_vec, &mut output)
-            .expect("input/output vectors were sized from the FFT planner");
+        c2r.process(&mut input_vec, &mut output)?;
 
         let scale = nfft_as_f64(self.nfft);
-        DiffTensor::from_array(Array1::from_iter(
+        Ok(DiffTensor::from_array(Array1::from_iter(
             output
                 .iter()
                 .zip(&self.envelope)
                 .map(|(sample, env)| Complex::new(sample * env / scale, 0.0)),
-        ))
+        )))
     }
 
     fn backward(
@@ -316,7 +310,7 @@ impl DiffModule<f64> for IfftAntiAlias {
         _input: &DiffTensor<f64>,
         _output: &DiffTensor<f64>,
         grad_output: &DiffTensor<f64>,
-    ) -> DiffTensor<f64> {
+    ) -> Result<DiffTensor<f64>, AutodiffError> {
         let mut planner = RealFftPlanner::<f64>::new();
         let r2c = planner.plan_fft_forward(self.nfft);
 
@@ -326,10 +320,9 @@ impl DiffModule<f64> for IfftAntiAlias {
         }
 
         let mut spectrum = r2c.make_output_vec();
-        r2c.process(&mut grad_vec, &mut spectrum)
-            .expect("input/output vectors were sized from the FFT planner");
+        r2c.process(&mut grad_vec, &mut spectrum)?;
 
-        DiffTensor::from_array(Array1::from_iter(spectrum))
+        Ok(DiffTensor::from_array(Array1::from_iter(spectrum)))
     }
 
     fn input_channels(&self) -> usize {

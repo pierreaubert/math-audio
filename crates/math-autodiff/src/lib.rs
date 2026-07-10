@@ -5,6 +5,7 @@
 
 #![warn(clippy::pedantic)]
 
+pub mod error;
 pub mod fft;
 pub mod gain;
 pub mod gradient;
@@ -14,3 +15,5 @@ pub mod module;
 pub mod optim;
 pub mod system;
 pub mod tensor;
+
+pub use error::AutodiffError;
