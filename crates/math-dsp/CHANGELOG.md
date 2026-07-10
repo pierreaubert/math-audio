@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.22] - 2026-07-10
+
+### Fixed
+- `analysis`: Welch, single-FFT, and spectrogram magnitudes are now calibrated
+  as peak-amplitude dBFS independently of FFT/window size; Welch also includes
+  coherently normalized trailing partial frames.
+- `analysis`: lag estimation now correlates the complete unwindowed signals,
+  and cross-correlation envelope searches are restricted to valid positive
+  lags instead of selecting circular aliases.
+- `analysis`: harmonic transfer functions no longer retain an unmatched FFT
+  `1/N` factor, restoring absolute THD levels, and silent sweep references no
+  longer underflow regularization into NaNs.
+- `analysis`: inverse frequency-response transforms now derive their FFT length
+  from input-grid density, and spectrograms include an exact single frame.
+- `stft`: dual analysis/synthesis windows now satisfy the COLA constraint at
+  every hop phase instead of normalizing only the average overlap sum.
+- `signals`: direct and windowed tone extraction now return true peak amplitude,
+  while non-integral tone periods are accumulated before sample-length rounding
+  to minimize leakage.
+
+### Changed
+- `simd::fast_inv_sqrt` now uses exact IEEE-754 square-root/reciprocal semantics
+  instead of the Quake approximation.
+- Clarified dB-domain smoothing, denormal flushing, and Welch amplitude-spectrum
+  contracts.
+
 ## [0.5.20] - 2026-05-30
 
 ### Fixed

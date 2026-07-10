@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.16] - 2026-07-10
+
+### Fixed
+- `Biquad::new` and `Biquad::update_params` now sanitize invalid sample rates,
+  gains, and out-of-band frequencies, keeping fallback coefficients finite and
+  non-degenerate inside the open Nyquist interval.
+- Windowed-sinc bandpass filters are normalized at band center and bandstop
+  filters at DC, giving exact unity gain at their reference passband points.
+- Kirkeby correction transition widths now track FFT-bin resolution and are
+  capped by configured correction-band edges instead of using a fixed 10 Hz.
+
+### Changed
+- Clarified that coefficient interpolation between stable real biquads remains
+  stable for interpolation factors in `[0, 1]`.
+- Corrected Kautz documentation to describe the implemented fixed-pole resonant
+  basis rather than an unimplemented complete orthonormal pair.
+- Corrected `filtfilt` documentation to describe its odd-padding and cumulative
+  per-section steady-state initialization instead of a Gustafsson global solve.
+- Clarified that response-based FIR design accepts negative dB cuts while phase
+  is intentionally selected separately by `FirPhase`.
+
 ## [0.5.14] - 2026-05-30
 
 ### Changed
