@@ -203,18 +203,156 @@ All new modules return `AutodiffError` on:
 - Example:
   - `crates/math-autodiff/examples/fdn_match.rs`: match a target RIR using the FDN topology above.
 
-## 4. Section 2: Extended filter types (roadmap) — Approach B
+## 4. Section 2: Extended filter types — Approach B
 
 **Approach B:** reuse the existing filter implementations and frequency-response utilities in `math-iir-fir` and `math-dsp` rather than re-implementing coefficient equations from scratch inside `math-autodiff`.
 
-Once Section 1 is merged, extend the filter palette to match FLAMO’s broader examples:
+### 4.1 Goals and scope
 
-- `SVF` (State Variable Filter) parameterized by `fc` and `R`, mapping to biquad coefficients.
-- `GEQ` (Graphic EQ) — cascade of peaking filters at ISO center frequencies.
-- `PEQ` (Parametric EQ) — arbitrary peaking/shelving sections.
-- `SOSFilter` — generic second-order sections with arbitrary coefficient parameterization.
+Extend the differentiable filter palette to match FLAMO’s broader examples:
 
-These reuse the existing `sos_frequency_response` engine and the coefficient-gradient pattern already present in `Biquad`.
+1. **`SOSFilter`** — generic, learnable cascade of second-order sections parameterized directly by `b`/`a` coefficients.
+2. **`SVF`** — State Variable Filter parameterized by physical controls (`fc`, `R`, optional gain) and mapped to an equivalent SOS representation for frequency-domain evaluation.
+3. **`GEQ`** — Graphic EQ: a fixed bank of peaking filters at ISO octave center frequencies with learnable per-band gains.
+4. **`PEQ`** — Parametric EQ: a cascade of arbitrary peaking/shelving sections, each with learnable frequency, Q, and gain.
+
+All four modules implement `DiffModule<f64>`, operate on `(batch, n_bins, channels)` complex spectra, and reuse the existing `sos_frequency_response` engine and coefficient-gradient pattern from `Biquad`.
+
+### 4.2 Non-goals
+
+- Sample-level time-domain processing (the modules stay frequency-domain).
+- New filter topologies beyond cascaded SOS (e.g., lattice, wave digital).
+- Automatic filter-structure optimization (e.g., choosing minimum biquad count).
+
+### 4.3 Architecture
+
+#### 4.3.1 `SOSFilter`
+
+The foundational module. Parameters are the raw numerator and denominator coefficients of `K` cascaded SOS sections:
+
+```text
+param shape: (K, 3, N_out, N_in) for b coefficients
+param shape: (K, 3, N_out, N_in) for a coefficients
+```
+
+Forward:
+
+```text
+H[f] = prod_k B_k[f] / A_k[f]
+output[b, f, o] = sum_i H[f, o, i] * input[b, f, i]
+```
+
+`SOSFilter` calls `sos_frequency_response` directly and stores the analytical Jacobian `dH/db` and `dH/da` already computed by `sos_response`. The backward pass is identical in structure to the existing `Biquad` backward but without the extra physical-parameter chain rule.
+
+Backward:
+
+```text
+dL/db_k[t, o, i] = Re{ sum_f (dL/doutput)[b, f, o] * conj(input[b, f, i]) * dH/db_k[t, f, o, i] }
+dL/da_k[t, o, i] = Re{ sum_f (dL/doutput)[b, f, o] * conj(input[b, f, i]) * dH/da_k[t, f, o, i] }
+dL/dinput[b, f, i] = sum_o conj(H[f, o, i]) * (dL/doutput)[b, f, o]
+```
+
+#### 4.3.2 `SVF`
+
+`SVF` is a thin wrapper around `SOSFilter`. It exposes physical parameters (`fc`, `R`, and optionally `gain_db`) and maps them to the equivalent biquad coefficients using the same RBJ-style formulas already present in `math-iir-fir::SvfFilter`. The frequency response of a ZDF SVF is identical to its equivalent direct-form biquad, so reusing `sos_frequency_response` is exact.
+
+Parameters per section:
+
+```text
+fc_raw  -> fc  in (0, fs/2) via sigmoid
+r_raw   -> R   in (0.01, max_R) via softplus + offset
+gain_raw -> gain_db in [-60, 60] (for peak/shelf types)
+```
+
+`SVF` builds the SOS coefficients and their parameter derivatives, then delegates to the same frequency-response/Jacobian engine as `SOSFilter`.
+
+#### 4.3.3 `GEQ`
+
+A `GEQ` is a cascade of fixed-frequency peaking filters. Frequencies are taken from the ISO octave center set already available in `math-iir-fir` / `math-dsp`. Only the per-band gain is learnable.
+
+Parameters:
+
+```text
+param shape: (N_bands, N_channels)
+```
+
+Forward builds each band's peaking biquad at its fixed frequency and Q, scales the numerator by the learned gain, and cascades them via `sos_frequency_response`. Backward uses the stored SOS Jacobians w.r.t. the gain parameter.
+
+#### 4.3.4 `PEQ`
+
+A `PEQ` is a cascade of arbitrary peaking or shelving sections, each with learnable frequency, Q, and gain. It generalizes `GEQ` by making frequency and Q learnable.
+
+Parameters per section:
+
+```text
+fc_raw  -> fc  in (0, fs/2)
+q_raw   -> Q   in (Q_min, Q_max) via softplus + offset
+gain_raw -> gain_db in [-60, 60]
+```
+
+Section type (`Peak`, `Lowshelf`, `Highshelf`) is chosen at construction time. `PEQ` maps raw physical parameters to b/a coefficients, computes `db_dparam` and `da_dparam` exactly as the existing `Biquad` module does, and reuses `sos_frequency_response_jacobian`.
+
+### 4.4 API sketch
+
+```rust
+pub mod iir {
+    pub mod sos {
+        pub struct SosFilter { /* ... */ }
+        pub struct SvFilter { /* ... */ }
+        pub struct GraphicEq { /* ... */ }
+        pub struct ParametricEq { /* ... */ }
+
+        pub enum SvfType { Lowpass, Highpass, Bandpass, Notch, Peak, Lowshelf, Highshelf, Allpass }
+        pub enum PeqBandType { Peak, Lowshelf, Highshelf }
+    }
+}
+```
+
+### 4.5 Data flow
+
+All four modules follow the same pattern as `Biquad`:
+
+```text
+raw param -> physical param -> b/a coefficients -> sos_frequency_response -> H(f) + dH/db + dH/da
+```
+
+The difference is only in how the raw parameters map to coefficients:
+- `SOSFilter`: raw parameters ARE the coefficients.
+- `SVF`: physical `fc`/`R`/`gain` mapped to coefficients.
+- `GEQ`: only gain is learned; frequency/Q fixed.
+- `PEQ`: full physical parameterization per section.
+
+### 4.6 Error handling
+
+All modules return `AutodiffError` for:
+
+- `nfft == 0`
+- Incompatible channel dimensions.
+- Invalid parameter counts/shapes.
+- Frequency/Q out of the allowed physical range after mapping.
+
+### 4.7 Testing strategy
+
+- Unit tests:
+  - `SOSFilter` forward matches a hand-computed single-section response.
+  - `SOSFilter` gradient matches finite differences w.r.t. `b` and `a`.
+  - `SVF` frequency response matches the equivalent `math-iir-fir::SvfFilter` response.
+  - `SVF` gradient matches finite differences.
+  - `GEQ` response matches the cascade of fixed biquads.
+  - `GEQ` gradient matches finite differences w.r.t. per-band gain.
+  - `PEQ` gradient matches finite differences w.r.t. frequency, Q, and gain.
+- Integration tests:
+  - A `Series(SVF, PEQ, GEQ)` chain has finite output and correct finite-difference gradients.
+- Example:
+  - `crates/math-autodiff/examples/peq_match.rs`: match a target magnitude response by optimizing a `PEQ`.
+
+### 4.8 Dependencies
+
+No new external crates. Reuse:
+
+- `math-iir-fir::BiquadFilterType`, `math-iir-fir::SvfFilter`, `math-iir-fir` peaking/shelving coefficient helpers.
+- `math-autodiff::iir::response::{sos_frequency_response, sos_frequency_response_jacobian}`.
+- Existing `Biquad` coefficient-gradient helpers where applicable.
 
 ## 5. Section 3: Trainer / dataset layer (roadmap) — Approach A
 
@@ -246,7 +384,7 @@ This layer stays optional: `DiffModule` + `Sgd` remain usable without it.
 
 ## 8. Success criteria
 
-- `cargo test -p math-autodiff --release` passes with new delay, matrix, and recursion tests.
+- `cargo test -p math-autodiff --release` passes with all new tests.
 - `cargo clippy -p math-autodiff --tests --examples --benches -- -D warnings` is clean.
-- New `examples/fdn_match.rs` runs and reduces loss over optimization.
+- New examples (`fdn_match.rs` for Section 1, `peq_match.rs` for Section 2) run and reduce loss over optimization.
 - Design doc and updated README are committed.
