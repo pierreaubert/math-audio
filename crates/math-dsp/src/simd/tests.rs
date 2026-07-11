@@ -705,9 +705,12 @@ fn test_covariance_with_ranges() {
         // SIMD computation
         let (cov_xx, cov_yy, cov_xy) = compute_covariance_simd(&left, &right, start, end);
 
-        const EPSILON: f32 = 1e-4;
+        // SIMD sums groups of four elements differently than the scalar loop,
+        // so allow a small relative tolerance on top of an absolute floor.
+        const REL_EPSILON: f32 = 1e-4;
+        const ABS_EPSILON: f32 = 1e-5;
         assert!(
-            (cov_xx - expected_xx).abs() < EPSILON,
+            (cov_xx - expected_xx).abs() < REL_EPSILON * expected_xx.abs() + ABS_EPSILON,
             "Range [{}, {}): cov_xx mismatch: {} vs {}",
             start,
             end,
@@ -715,7 +718,7 @@ fn test_covariance_with_ranges() {
             expected_xx
         );
         assert!(
-            (cov_yy - expected_yy).abs() < EPSILON,
+            (cov_yy - expected_yy).abs() < REL_EPSILON * expected_yy.abs() + ABS_EPSILON,
             "Range [{}, {}): cov_yy mismatch: {} vs {}",
             start,
             end,
@@ -723,7 +726,7 @@ fn test_covariance_with_ranges() {
             expected_yy
         );
         assert!(
-            (cov_xy.re - expected_xy.re).abs() < EPSILON,
+            (cov_xy.re - expected_xy.re).abs() < REL_EPSILON * expected_xy.re.abs() + ABS_EPSILON,
             "Range [{}, {}): cov_xy.re mismatch: {} vs {}",
             start,
             end,
@@ -731,7 +734,7 @@ fn test_covariance_with_ranges() {
             expected_xy.re
         );
         assert!(
-            (cov_xy.im - expected_xy.im).abs() < EPSILON,
+            (cov_xy.im - expected_xy.im).abs() < REL_EPSILON * expected_xy.im.abs() + ABS_EPSILON,
             "Range [{}, {}): cov_xy.im mismatch: {} vs {}",
             start,
             end,
@@ -826,30 +829,41 @@ fn test_covariance_unaligned_ranges() {
         // SIMD computation
         let (cov_xx, cov_yy, cov_xy) = compute_covariance_simd(&left, &right, start, end);
 
-        const EPSILON: f32 = 1e-5;
+        // SIMD sums groups of four elements differently than the scalar loop,
+        // so allow a small relative tolerance on top of an absolute floor.
+        const REL_EPSILON: f32 = 1e-4;
+        const ABS_EPSILON: f32 = 1e-5;
         assert!(
-            (cov_xx - expected_xx).abs() < EPSILON,
-            "Range [{}, {}): cov_xx mismatch",
+            (cov_xx - expected_xx).abs() < REL_EPSILON * expected_xx.abs() + ABS_EPSILON,
+            "Range [{}, {}): cov_xx mismatch: {} vs {}",
             start,
-            end
+            end,
+            cov_xx,
+            expected_xx
         );
         assert!(
-            (cov_yy - expected_yy).abs() < EPSILON,
-            "Range [{}, {}): cov_yy mismatch",
+            (cov_yy - expected_yy).abs() < REL_EPSILON * expected_yy.abs() + ABS_EPSILON,
+            "Range [{}, {}): cov_yy mismatch: {} vs {}",
             start,
-            end
+            end,
+            cov_yy,
+            expected_yy
         );
         assert!(
-            (cov_xy.re - expected_xy.re).abs() < EPSILON,
-            "Range [{}, {}): cov_xy.re mismatch",
+            (cov_xy.re - expected_xy.re).abs() < REL_EPSILON * expected_xy.re.abs() + ABS_EPSILON,
+            "Range [{}, {}): cov_xy.re mismatch: {} vs {}",
             start,
-            end
+            end,
+            cov_xy.re,
+            expected_xy.re
         );
         assert!(
-            (cov_xy.im - expected_xy.im).abs() < EPSILON,
-            "Range [{}, {}): cov_xy.im mismatch",
+            (cov_xy.im - expected_xy.im).abs() < REL_EPSILON * expected_xy.im.abs() + ABS_EPSILON,
+            "Range [{}, {}): cov_xy.im mismatch: {} vs {}",
             start,
-            end
+            end,
+            cov_xy.im,
+            expected_xy.im
         );
     }
 }
