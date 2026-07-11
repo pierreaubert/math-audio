@@ -12,7 +12,7 @@ use super::super::types::PenaltyTuple;
 use ndarray::{Array1, Array2, Zip};
 use oxiblas_ndarray::blas::matvec;
 use rand::rngs::StdRng;
-use rand::{Rng, SeedableRng};
+use rand::{RngExt, SeedableRng};
 use std::sync::RwLock;
 use std::time::Instant;
 

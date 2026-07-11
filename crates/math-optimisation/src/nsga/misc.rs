@@ -1,5 +1,5 @@
 use ndarray::Array1;
-use rand::Rng;
+use rand::RngExt;
 use rand::rngs::StdRng;
 
 pub(super) fn random_in_bounds(bounds: &[(f64, f64)], rng: &mut StdRng) -> Array1<f64> {

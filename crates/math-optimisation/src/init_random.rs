@@ -1,5 +1,5 @@
 use ndarray::{Array1, Array2};
-use rand::Rng;
+use rand::{Rng, RngExt};
 
 pub(crate) fn init_random<R: Rng + ?Sized>(
     n: usize,

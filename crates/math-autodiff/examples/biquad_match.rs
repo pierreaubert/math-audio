@@ -17,7 +17,7 @@ use math_audio_autodiff::{
 use math_audio_iir_fir::BiquadFilterType;
 use ndarray::{Array3, Array4};
 use num_complex::Complex;
-use rand::Rng;
+use rand::{Rng, RngExt};
 use rustfft::FftPlanner;
 
 const FS: f64 = 48_000.0;

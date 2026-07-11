@@ -1,5 +1,5 @@
 use super::misc::dominates_or_equal;
-use rand::Rng;
+use rand::RngExt;
 use rand::rngs::StdRng;
 
 pub(super) struct HypervolumeSamples {

@@ -1,5 +1,5 @@
 use ndarray::{Array1, DataMut, Ix1};
-use rand::Rng;
+use rand::{Rng, RngExt};
 use std::f64::consts::PI;
 
 /// Wrapper Local Search (WLS) strategy for local refinement

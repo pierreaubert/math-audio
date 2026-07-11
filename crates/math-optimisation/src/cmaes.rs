@@ -8,7 +8,7 @@
 use nalgebra::{DMatrix, DVector, SymmetricEigen};
 use ndarray::Array1;
 use rand::rngs::StdRng;
-use rand::{Rng, SeedableRng};
+use rand::{Rng, RngExt, SeedableRng};
 use rayon::prelude::*;
 
 use crate::CallbackAction;

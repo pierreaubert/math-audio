@@ -8,7 +8,7 @@ use super::types::max_violation_of;
 use crate::error::{DEError, Result};
 use ndarray::Array1;
 use rand::rngs::StdRng;
-use rand::{Rng, SeedableRng};
+use rand::{Rng, RngExt, SeedableRng};
 
 /// Run ISRES.
 pub fn isres<F>(f: &F, constraints: &[IsresConstraint], config: IsresConfig) -> Result<IsresReport>

@@ -14,7 +14,7 @@ use std::f64::consts::PI;
 
 use ndarray::Array3;
 use num_complex::Complex;
-use rand::Rng;
+use rand::RngExt;
 
 use crate::tensor::DiffTensor;
 

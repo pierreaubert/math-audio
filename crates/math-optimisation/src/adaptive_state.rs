@@ -1,5 +1,5 @@
 use super::adaptive_config::AdaptiveConfig;
-use rand::Rng;
+use rand::{Rng, RngExt};
 
 /// Structures for tracking adaptive parameters
 #[derive(Debug, Clone)]

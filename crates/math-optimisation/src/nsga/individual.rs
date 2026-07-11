@@ -20,7 +20,7 @@ use super::types::ParetoSolution;
 use crate::error::Result;
 use ndarray::Array1;
 use rand::rngs::StdRng;
-use rand::{Rng, SeedableRng};
+use rand::{RngExt, SeedableRng};
 
 /// Run NSGA-II or NSGA-III according to [`NsgaConfig::variant`].
 pub fn nsga<F>(f: &F, config: NsgaConfig) -> Result<NsgaReport>

@@ -1,4 +1,4 @@
-use rand::Rng;
+use rand::{Rng, RngExt};
 
 /// Return `count` distinct indices from `0..pool_size` excluding `exclude`.
 ///

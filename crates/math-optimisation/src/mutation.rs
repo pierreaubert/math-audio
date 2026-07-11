@@ -1,4 +1,4 @@
-use rand::Rng;
+use rand::{Rng, RngExt};
 
 /// Mutation setting: either a fixed factor, a uniform range (dithering), or adaptive.
 #[derive(Debug, Clone, Copy)]

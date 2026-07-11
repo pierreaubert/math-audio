@@ -1,5 +1,5 @@
 use ndarray::{Array1, Array2, Zip};
-use rand::Rng;
+use rand::{Rng, RngExt};
 
 use crate::mutant_rand1::mutant_rand1_into;
 

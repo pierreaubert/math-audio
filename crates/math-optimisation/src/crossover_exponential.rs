@@ -1,5 +1,5 @@
 use ndarray::Array1;
-use rand::Rng;
+use rand::{Rng, RngExt};
 
 #[allow(dead_code)]
 pub(crate) fn exponential_crossover<R: Rng + ?Sized>(

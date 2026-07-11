@@ -4,6 +4,7 @@
 //! Used by SHADE, L-SHADE, and their variants.
 
 use ndarray::Array1;
+use rand::RngExt;
 
 /// External archive storing discarded solutions
 #[derive(Debug, Clone)]
@@ -35,7 +36,6 @@ impl ExternalArchive {
         if self.solutions.len() < self.max_size {
             self.solutions.push(solution);
         } else if self.max_size > 0 {
-            use rand::Rng;
             let mut rng = rand::rng();
             let idx = rng.random_range(0..self.max_size);
             self.solutions[idx] = solution;

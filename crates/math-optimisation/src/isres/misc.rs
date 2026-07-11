@@ -1,4 +1,4 @@
-use rand::Rng;
+use rand::{Rng, RngExt};
 
 /// Standard normal sample via Box-Muller (only the cosine half is used —
 /// the sine half is discarded for simplicity; for ISRES the small loss in

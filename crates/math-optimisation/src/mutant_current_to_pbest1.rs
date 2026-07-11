@@ -5,7 +5,7 @@
 //! plus a difference vector that can include archive solutions.
 
 use ndarray::{Array1, Array2, Zip};
-use rand::Rng;
+use rand::{Rng, RngExt};
 
 use crate::distinct_indices::{distinct_indices, distinct_indices_with_excludes};
 use crate::external_archive::ExternalArchive;

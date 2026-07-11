@@ -1,7 +1,7 @@
 use nalgebra::DMatrix;
 use ndarray::Array1;
 use rand::rngs::StdRng;
-use rand::{Rng, SeedableRng};
+use rand::{RngExt, SeedableRng};
 
 pub(super) fn make_rng(seed: Option<u64>) -> StdRng {
     match seed {
