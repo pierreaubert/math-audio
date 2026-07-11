@@ -1,5 +1,8 @@
 use criterion::{Criterion, criterion_group, criterion_main};
-use math_audio_autodiff::{fft::Fft, iir::biquad::Biquad, module::DiffModule, tensor::DiffTensor};
+use math_audio_autodiff::{
+    fft::Fft, gain::Gain, iir::biquad::Biquad, module::DiffModule, recursion::Recursion,
+    tensor::DiffTensor,
+};
 use math_audio_iir_fir::BiquadFilterType;
 use ndarray::Array3;
 use num_complex::Complex;
@@ -86,11 +89,57 @@ fn biquad_backward_benchmark(c: &mut Criterion) {
     });
 }
 
+fn recursion_fixture(nfft: usize) -> (Recursion, DiffTensor<f64>) {
+    let mut feedforward = Gain::new(nfft, 2, 2).unwrap();
+    let mut feedback = Gain::new(nfft, 2, 2).unwrap();
+    for channel in 0..2 {
+        feedforward.param[[channel, channel]] = 1.0;
+        feedback.param[[channel, channel]] = 0.1;
+    }
+    let recursion = Recursion::new(Box::new(feedforward), Box::new(feedback)).unwrap();
+    let input = DiffTensor::from_array(Array3::from_elem(
+        (1, nfft / 2 + 1, 2),
+        Complex::new(1.0, 0.0),
+    ));
+    (recursion, input)
+}
+
+fn recursion_forward_benchmark(c: &mut Criterion) {
+    const NFFT: usize = 1024;
+    let (recursion, input) = recursion_fixture(NFFT);
+    c.bench_function("recursion forward", |b| {
+        b.iter(|| black_box(recursion.forward(black_box(&input)).unwrap()))
+    });
+}
+
+fn recursion_backward_benchmark(c: &mut Criterion) {
+    const NFFT: usize = 1024;
+    let (mut recursion, input) = recursion_fixture(NFFT);
+    let output = recursion.forward(&input).unwrap();
+    let grad_output = DiffTensor::from_array(output.data.clone());
+    c.bench_function("recursion backward", |b| {
+        b.iter(|| {
+            recursion.zero_grad();
+            black_box(
+                recursion
+                    .backward(
+                        black_box(&input),
+                        black_box(&output),
+                        black_box(&grad_output),
+                    )
+                    .unwrap(),
+            )
+        })
+    });
+}
+
 criterion_group!(
     benches,
     fft_forward_benchmark,
     fft_backward_benchmark,
     biquad_forward_benchmark,
-    biquad_backward_benchmark
+    biquad_backward_benchmark,
+    recursion_forward_benchmark,
+    recursion_backward_benchmark
 );
 criterion_main!(benches);

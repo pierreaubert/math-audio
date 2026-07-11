@@ -31,8 +31,8 @@ use std::f64::consts::{PI, SQRT_2};
 
 use crate::error::AutodiffError;
 use crate::iir::response::{
-    sos_frequency_response, sos_frequency_response_jacobian_parallel,
-    sos_frequency_response_parallel, sos_response,
+    SosFrequencyBasis, sos_coefficient_vjp_with_basis, sos_frequency_response,
+    sos_frequency_response_jacobian_parallel, sos_frequency_response_parallel,
 };
 use crate::module::{DiffModule, validate_spectral_gradient_shape};
 use crate::tensor::DiffTensor;
@@ -671,10 +671,6 @@ impl DiffModule<f64> for Biquad {
 
         let (b, a, db_dparam, da_dparam) = self.build_coeffs_and_grads()?;
         let gamma = self.gamma();
-        let response = sos_response(&b, &a, self.nfft, &gamma);
-        let h = response.h;
-        let dh_db = response.dh_db;
-        let dh_da = response.dh_da;
 
         // Compute dLoss/dH using real parts (MVP assumption: real time-domain signals).
         let mut dl_dh = Array3::zeros((n_bins, n_out, n_in));
@@ -694,6 +690,10 @@ impl DiffModule<f64> for Biquad {
             }
         }
 
+        let basis = SosFrequencyBasis::new(self.nfft, &gamma);
+        let response_vjp = sos_coefficient_vjp_with_basis(&b, &a, &basis, &dl_dh);
+        let h = response_vjp.h;
+
         // Accumulate parameter gradients.
         let mut param_grad = biquad_param_grad_view_mut(&mut self.param_grad)?;
         for section in 0..n_sections {
@@ -704,11 +704,8 @@ impl DiffModule<f64> for Biquad {
                         for tap in 0..3 {
                             let db_dp = db_dparam[[section, tap, param_idx, out_ch, in_ch]];
                             let da_dp = da_dparam[[section, tap, param_idx, out_ch, in_ch]];
-                            for bin in 0..n_bins {
-                                let term = dh_db[[bin, section, tap, out_ch, in_ch]] * db_dp
-                                    + dh_da[[bin, section, tap, out_ch, in_ch]] * da_dp;
-                                accum += (dl_dh[[bin, out_ch, in_ch]].conj() * term).re;
-                            }
+                            accum += response_vjp.db[[section, tap, out_ch, in_ch]] * db_dp
+                                + response_vjp.da[[section, tap, out_ch, in_ch]] * da_dp;
                         }
                         param_grad[[section, param_idx, out_ch, in_ch]] += accum;
                     }

@@ -7,6 +7,8 @@ use ndarray::{ArrayD, IxDyn};
 use num_complex::Complex;
 use realfft::{ComplexToReal, RealFftPlanner, RealToComplex};
 use std::{
+    cell::RefCell,
+    collections::HashMap,
     fmt,
     sync::{Arc, OnceLock},
 };
@@ -108,6 +110,111 @@ impl fmt::Debug for FftPlans {
     }
 }
 
+struct FftBuffers {
+    real: Vec<f64>,
+    complex: Vec<Complex<f64>>,
+}
+
+impl FftBuffers {
+    fn new(nfft: usize) -> Self {
+        Self {
+            real: vec![0.0; nfft],
+            complex: vec![Complex::default(); nfft / 2 + 1],
+        }
+    }
+}
+
+thread_local! {
+    static FFT_BUFFER_CACHE: RefCell<HashMap<usize, FftBuffers>> = RefCell::new(HashMap::new());
+}
+
+fn with_fft_buffers<R>(
+    nfft: usize,
+    operation: impl FnOnce(&mut [f64], &mut [Complex<f64>]) -> R,
+) -> R {
+    FFT_BUFFER_CACHE.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        let buffers = cache.entry(nfft).or_insert_with(|| FftBuffers::new(nfft));
+        operation(&mut buffers.real, &mut buffers.complex)
+    })
+}
+
+fn copy_real_parts(source: &[Complex<f64>], destination: &mut [f64]) {
+    debug_assert_eq!(source.len(), destination.len());
+
+    #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
+    {
+        // SAFETY: both slices have equal length. The kernel processes pairs
+        // within bounds and handles the possible final element scalarly.
+        unsafe { copy_real_parts_neon(source, destination) };
+    }
+
+    #[cfg(not(all(target_arch = "aarch64", target_feature = "neon")))]
+    for (output, input) in destination.iter_mut().zip(source) {
+        *output = input.re;
+    }
+}
+
+#[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
+#[target_feature(enable = "neon")]
+unsafe fn copy_real_parts_neon(source: &[Complex<f64>], destination: &mut [f64]) {
+    use std::arch::aarch64::{vld2q_f64, vst1q_f64};
+
+    let mut index = 0;
+    while index + 2 <= source.len() {
+        // SAFETY: the loop guard leaves two Complex<f64> (four f64 lanes) in
+        // source and two f64 lanes in destination.
+        unsafe {
+            let deinterleaved = vld2q_f64(source.as_ptr().add(index).cast::<f64>());
+            vst1q_f64(destination.as_mut_ptr().add(index), deinterleaved.0);
+        }
+        index += 2;
+    }
+    if index < source.len() {
+        destination[index] = source[index].re;
+    }
+}
+
+fn store_real_as_complex(source: &[f64], destination: &mut [Complex<f64>], scale: f64) {
+    debug_assert_eq!(source.len(), destination.len());
+
+    #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
+    {
+        // SAFETY: both slices have equal length. The kernel processes pairs
+        // within bounds and handles the possible final element scalarly.
+        unsafe { store_real_as_complex_neon(source, destination, scale) };
+    }
+
+    #[cfg(not(all(target_arch = "aarch64", target_feature = "neon")))]
+    for (output, &input) in destination.iter_mut().zip(source) {
+        *output = Complex::new(input * scale, 0.0);
+    }
+}
+
+#[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
+#[target_feature(enable = "neon")]
+unsafe fn store_real_as_complex_neon(source: &[f64], destination: &mut [Complex<f64>], scale: f64) {
+    use std::arch::aarch64::{float64x2x2_t, vdupq_n_f64, vld1q_f64, vmulq_n_f64, vst2q_f64};
+
+    let zero = vdupq_n_f64(0.0);
+    let mut index = 0;
+    while index + 2 <= source.len() {
+        // SAFETY: the loop guard leaves two f64 lanes in source and two
+        // Complex<f64> (four f64 lanes) in destination.
+        unsafe {
+            let real = vmulq_n_f64(vld1q_f64(source.as_ptr().add(index)), scale);
+            vst2q_f64(
+                destination.as_mut_ptr().add(index).cast::<f64>(),
+                float64x2x2_t(real, zero),
+            );
+        }
+        index += 2;
+    }
+    if index < source.len() {
+        destination[index] = Complex::new(source[index] * scale, 0.0);
+    }
+}
+
 /// Real-to-complex FFT differentiable module.
 ///
 /// Processes the second-to-last axis of a tensor as the time dimension. The
@@ -181,15 +288,34 @@ impl DiffModule<f64> for Fft {
 
         for b in 0..batch {
             for c in 0..channels {
-                let mut input_vec = vec![0.0; self.nfft];
-                for t in 0..self.nfft {
-                    input_vec[t] = input_3d[[b, t, c]].re;
-                }
-                let mut spectrum = r2c.make_output_vec();
-                r2c.process(&mut input_vec, &mut spectrum)?;
-                for (bin, value) in spectrum.iter().enumerate() {
-                    output[[b, bin, c]] = *value;
-                }
+                with_fft_buffers(self.nfft, |input_vec, spectrum| {
+                    if channels == 1 {
+                        let start = b * self.nfft;
+                        let source = &input_3d
+                            .as_slice()
+                            .expect("reshaped FFT input must remain contiguous")
+                            [start..start + self.nfft];
+                        copy_real_parts(source, input_vec);
+                    } else {
+                        for t in 0..self.nfft {
+                            input_vec[t] = input_3d[[b, t, c]].re;
+                        }
+                    }
+                    r2c.process(input_vec, spectrum)?;
+                    if channels == 1 {
+                        let start = b * self.n_bins();
+                        output
+                            .as_slice_mut()
+                            .expect("FFT output allocation must be contiguous")
+                            [start..start + self.n_bins()]
+                            .copy_from_slice(spectrum);
+                    } else {
+                        for (bin, value) in spectrum.iter().enumerate() {
+                            output[[b, bin, c]] = *value;
+                        }
+                    }
+                    Ok::<(), AutodiffError>(())
+                })?;
             }
         }
 
@@ -233,23 +359,31 @@ impl DiffModule<f64> for Fft {
 
         for b in 0..batch {
             for c in 0..channels {
-                let mut grad_vec = vec![Complex::new(0.0, 0.0); self.n_bins()];
-                for bin in 0..self.n_bins() {
-                    let sample = grad_3d[[b, bin, c]];
-                    let weight = rfft_adjoint_weight(self.nfft, bin);
-                    grad_vec[bin] = if is_packed_endpoint(self.nfft, bin) {
-                        Complex::new(sample.re, 0.0)
+                with_fft_buffers(self.nfft, |grad_time, grad_vec| {
+                    for bin in 0..self.n_bins() {
+                        let sample = grad_3d[[b, bin, c]];
+                        let weight = rfft_adjoint_weight(self.nfft, bin);
+                        grad_vec[bin] = if is_packed_endpoint(self.nfft, bin) {
+                            Complex::new(sample.re, 0.0)
+                        } else {
+                            sample * weight
+                        };
+                    }
+                    c2r.process(grad_vec, grad_time)?;
+                    if channels == 1 {
+                        let start = b * self.nfft;
+                        let destination = &mut grad_input
+                            .as_slice_mut()
+                            .expect("FFT gradient allocation must be contiguous")
+                            [start..start + self.nfft];
+                        store_real_as_complex(grad_time, destination, 1.0);
                     } else {
-                        sample * weight
-                    };
-                }
-
-                let mut grad_time = c2r.make_output_vec();
-                c2r.process(&mut grad_vec, &mut grad_time)?;
-
-                for t in 0..self.nfft {
-                    grad_input[[b, t, c]] = Complex::new(grad_time[t], 0.0);
-                }
+                        for t in 0..self.nfft {
+                            grad_input[[b, t, c]] = Complex::new(grad_time[t], 0.0);
+                        }
+                    }
+                    Ok::<(), AutodiffError>(())
+                })?;
             }
         }
 
@@ -363,17 +497,35 @@ impl DiffModule<f64> for Ifft {
 
         for b in 0..batch {
             for c in 0..channels {
-                let mut input_vec = vec![Complex::new(0.0, 0.0); self.n_bins()];
-                for bin in 0..self.n_bins() {
-                    input_vec[bin] = input_3d[[b, bin, c]];
-                }
-
-                let mut time = c2r.make_output_vec();
-                c2r.process(&mut input_vec, &mut time)?;
-
-                for t in 0..self.nfft {
-                    output[[b, t, c]] = Complex::new(time[t] / scale, 0.0);
-                }
+                with_fft_buffers(self.nfft, |time, input_vec| {
+                    if channels == 1 {
+                        let start = b * self.n_bins();
+                        input_vec.copy_from_slice(
+                            &input_3d
+                                .as_slice()
+                                .expect("reshaped IFFT input must remain contiguous")
+                                [start..start + self.n_bins()],
+                        );
+                    } else {
+                        for bin in 0..self.n_bins() {
+                            input_vec[bin] = input_3d[[b, bin, c]];
+                        }
+                    }
+                    c2r.process(input_vec, time)?;
+                    if channels == 1 {
+                        let start = b * self.nfft;
+                        let destination = &mut output
+                            .as_slice_mut()
+                            .expect("IFFT output allocation must be contiguous")
+                            [start..start + self.nfft];
+                        store_real_as_complex(time, destination, scale.recip());
+                    } else {
+                        for t in 0..self.nfft {
+                            output[[b, t, c]] = Complex::new(time[t] / scale, 0.0);
+                        }
+                    }
+                    Ok::<(), AutodiffError>(())
+                })?;
             }
         }
 
@@ -416,22 +568,21 @@ impl DiffModule<f64> for Ifft {
 
         for b in 0..batch {
             for c in 0..channels {
-                let mut grad_vec = vec![0.0; self.nfft];
-                for t in 0..self.nfft {
-                    grad_vec[t] = grad_3d[[b, t, c]].re;
-                }
-
-                let mut spectrum = r2c.make_output_vec();
-                r2c.process(&mut grad_vec, &mut spectrum)?;
-
-                for (bin, sample) in spectrum.iter_mut().enumerate() {
-                    let weight = irfft_adjoint_weight(self.nfft, bin);
-                    grad_input[[b, bin, c]] = if is_packed_endpoint(self.nfft, bin) {
-                        Complex::new(sample.re * weight, 0.0)
-                    } else {
-                        *sample * weight
-                    };
-                }
+                with_fft_buffers(self.nfft, |grad_vec, spectrum| {
+                    for t in 0..self.nfft {
+                        grad_vec[t] = grad_3d[[b, t, c]].re;
+                    }
+                    r2c.process(grad_vec, spectrum)?;
+                    for (bin, sample) in spectrum.iter().enumerate() {
+                        let weight = irfft_adjoint_weight(self.nfft, bin);
+                        grad_input[[b, bin, c]] = if is_packed_endpoint(self.nfft, bin) {
+                            Complex::new(sample.re * weight, 0.0)
+                        } else {
+                            *sample * weight
+                        };
+                    }
+                    Ok::<(), AutodiffError>(())
+                })?;
             }
         }
 
@@ -559,15 +710,16 @@ impl DiffModule<f64> for FftAntiAlias {
 
         for b in 0..batch {
             for c in 0..channels {
-                let mut input_vec = vec![0.0; self.nfft];
-                for t in 0..self.nfft {
-                    input_vec[t] = input_3d[[b, t, c]].re * self.envelope[t];
-                }
-                let mut spectrum = r2c.make_output_vec();
-                r2c.process(&mut input_vec, &mut spectrum)?;
-                for (bin, value) in spectrum.iter().enumerate() {
-                    output[[b, bin, c]] = *value;
-                }
+                with_fft_buffers(self.nfft, |input_vec, spectrum| {
+                    for t in 0..self.nfft {
+                        input_vec[t] = input_3d[[b, t, c]].re * self.envelope[t];
+                    }
+                    r2c.process(input_vec, spectrum)?;
+                    for (bin, value) in spectrum.iter().enumerate() {
+                        output[[b, bin, c]] = *value;
+                    }
+                    Ok::<(), AutodiffError>(())
+                })?;
             }
         }
 
@@ -615,23 +767,22 @@ impl DiffModule<f64> for FftAntiAlias {
 
         for b in 0..batch {
             for c in 0..channels {
-                let mut grad_vec = vec![Complex::new(0.0, 0.0); self.n_bins()];
-                for bin in 0..self.n_bins() {
-                    let sample = grad_3d[[b, bin, c]];
-                    let weight = rfft_adjoint_weight(self.nfft, bin);
-                    grad_vec[bin] = if is_packed_endpoint(self.nfft, bin) {
-                        Complex::new(sample.re, 0.0)
-                    } else {
-                        sample * weight
-                    };
-                }
-
-                let mut grad_time = c2r.make_output_vec();
-                c2r.process(&mut grad_vec, &mut grad_time)?;
-
-                for t in 0..self.nfft {
-                    grad_input[[b, t, c]] = Complex::new(grad_time[t] * self.envelope[t], 0.0);
-                }
+                with_fft_buffers(self.nfft, |grad_time, grad_vec| {
+                    for bin in 0..self.n_bins() {
+                        let sample = grad_3d[[b, bin, c]];
+                        let weight = rfft_adjoint_weight(self.nfft, bin);
+                        grad_vec[bin] = if is_packed_endpoint(self.nfft, bin) {
+                            Complex::new(sample.re, 0.0)
+                        } else {
+                            sample * weight
+                        };
+                    }
+                    c2r.process(grad_vec, grad_time)?;
+                    for t in 0..self.nfft {
+                        grad_input[[b, t, c]] = Complex::new(grad_time[t] * self.envelope[t], 0.0);
+                    }
+                    Ok::<(), AutodiffError>(())
+                })?;
             }
         }
 
@@ -759,17 +910,16 @@ impl DiffModule<f64> for IfftAntiAlias {
 
         for b in 0..batch {
             for c in 0..channels {
-                let mut input_vec = vec![Complex::new(0.0, 0.0); self.n_bins()];
-                for bin in 0..self.n_bins() {
-                    input_vec[bin] = input_3d[[b, bin, c]];
-                }
-
-                let mut time = c2r.make_output_vec();
-                c2r.process(&mut input_vec, &mut time)?;
-
-                for t in 0..self.nfft {
-                    output[[b, t, c]] = Complex::new(time[t] * self.envelope[t] / scale, 0.0);
-                }
+                with_fft_buffers(self.nfft, |time, input_vec| {
+                    for bin in 0..self.n_bins() {
+                        input_vec[bin] = input_3d[[b, bin, c]];
+                    }
+                    c2r.process(input_vec, time)?;
+                    for t in 0..self.nfft {
+                        output[[b, t, c]] = Complex::new(time[t] * self.envelope[t] / scale, 0.0);
+                    }
+                    Ok::<(), AutodiffError>(())
+                })?;
             }
         }
 
@@ -816,22 +966,21 @@ impl DiffModule<f64> for IfftAntiAlias {
 
         for b in 0..batch {
             for c in 0..channels {
-                let mut grad_vec = vec![0.0; self.nfft];
-                for t in 0..self.nfft {
-                    grad_vec[t] = grad_3d[[b, t, c]].re * self.envelope[t];
-                }
-
-                let mut spectrum = r2c.make_output_vec();
-                r2c.process(&mut grad_vec, &mut spectrum)?;
-
-                for (bin, sample) in spectrum.iter_mut().enumerate() {
-                    let weight = irfft_adjoint_weight(self.nfft, bin);
-                    grad_input[[b, bin, c]] = if is_packed_endpoint(self.nfft, bin) {
-                        Complex::new(sample.re * weight, 0.0)
-                    } else {
-                        *sample * weight
-                    };
-                }
+                with_fft_buffers(self.nfft, |grad_vec, spectrum| {
+                    for t in 0..self.nfft {
+                        grad_vec[t] = grad_3d[[b, t, c]].re * self.envelope[t];
+                    }
+                    r2c.process(grad_vec, spectrum)?;
+                    for (bin, sample) in spectrum.iter().enumerate() {
+                        let weight = irfft_adjoint_weight(self.nfft, bin);
+                        grad_input[[b, bin, c]] = if is_packed_endpoint(self.nfft, bin) {
+                            Complex::new(sample.re * weight, 0.0)
+                        } else {
+                            *sample * weight
+                        };
+                    }
+                    Ok::<(), AutodiffError>(())
+                })?;
             }
         }
 

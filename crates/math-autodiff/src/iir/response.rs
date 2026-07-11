@@ -1,9 +1,16 @@
 use ndarray::{Array2, Array3, Array4, Array5, ArrayBase, Axis, Data, Ix4};
 use num_complex::Complex;
+use std::{cell::RefCell, collections::HashMap, sync::Arc};
 
 use crate::error::AutodiffError;
 
 const DEFAULT_GAMMA: [f64; 3] = [1.0, 1.0, 1.0];
+type SosBasisKey = (usize, [u64; 3]);
+type SosBasisCache = HashMap<SosBasisKey, Arc<Array2<Complex<f64>>>>;
+
+thread_local! {
+    static SOS_BASIS_CACHE: RefCell<SosBasisCache> = RefCell::new(HashMap::new());
+}
 
 /// Response of a cascade of SOS sections.
 #[derive(Debug, Clone)]
@@ -38,18 +45,42 @@ fn tap_frequency_response(nfft: usize, gamma: &[f64; 3]) -> Array2<Complex<f64>>
     response
 }
 
+/// Parameter-independent frequency basis for three-tap SOS sections.
+#[derive(Debug, Clone)]
+pub(crate) struct SosFrequencyBasis {
+    nfft: usize,
+    response: Arc<Array2<Complex<f64>>>,
+}
+
+impl SosFrequencyBasis {
+    pub(crate) fn new(nfft: usize, gamma: &[f64; 3]) -> Self {
+        let key = (nfft, gamma.map(f64::to_bits));
+        let response = SOS_BASIS_CACHE.with(|cache| {
+            cache
+                .borrow_mut()
+                .entry(key)
+                .or_insert_with(|| Arc::new(tap_frequency_response(nfft, gamma)))
+                .clone()
+        });
+        Self { nfft, response }
+    }
+
+    fn n_bins(&self) -> usize {
+        self.nfft / 2 + 1
+    }
+}
+
 fn sos_frequency_response_impl<S>(
     b: &ArrayBase<S, Ix4>,
     a: &ArrayBase<S, Ix4>,
-    nfft: usize,
-    gamma: &[f64; 3],
+    basis: &SosFrequencyBasis,
 ) -> Array3<Complex<f64>>
 where
     S: Data<Elem = Complex<f64>>,
 {
     let (n_sections, _, n_out, n_in) = b.dim();
-    let n_bins = nfft / 2 + 1;
-    let tap_response = tap_frequency_response(nfft, gamma);
+    let n_bins = basis.n_bins();
+    let tap_response = &basis.response;
     let mut h = Array3::from_elem((n_bins, n_out, n_in), Complex::from(1.0));
 
     for section in 0..n_sections {
@@ -95,24 +126,106 @@ pub fn sos_response(
         a.dim(),
         "sos_response: b and a must have the same shape"
     );
+    let basis = SosFrequencyBasis::new(nfft, gamma);
+    sos_response_with_basis(b, a, &basis)
+}
+
+pub(crate) fn sos_response_with_basis(
+    b: &Array4<Complex<f64>>,
+    a: &Array4<Complex<f64>>,
+    basis: &SosFrequencyBasis,
+) -> SosResponse {
     let b_view = b.view();
     let a_view = a.view();
-    sos_response_impl(&b_view, &a_view, nfft, gamma)
+    sos_response_impl(&b_view, &a_view, basis)
+}
+
+pub(crate) struct SosCoefficientVjp {
+    pub h: Array3<Complex<f64>>,
+    pub db: Array4<f64>,
+    pub da: Array4<f64>,
+}
+
+pub(crate) fn sos_coefficient_vjp_with_basis(
+    b: &Array4<Complex<f64>>,
+    a: &Array4<Complex<f64>>,
+    basis: &SosFrequencyBasis,
+    dl_dh: &Array3<Complex<f64>>,
+) -> SosCoefficientVjp {
+    let (n_sections, _, n_out, n_in) = b.dim();
+    let n_bins = basis.n_bins();
+    debug_assert_eq!(dl_dh.dim(), (n_bins, n_out, n_in));
+
+    let mut h = Array3::from_elem((n_bins, n_out, n_in), Complex::from(1.0));
+    let mut b_response = Array4::zeros((n_sections, n_bins, n_out, n_in));
+    let mut a_response = Array4::zeros((n_sections, n_bins, n_out, n_in));
+
+    for section in 0..n_sections {
+        for bin in 0..n_bins {
+            for out_ch in 0..n_out {
+                for in_ch in 0..n_in {
+                    let mut numerator = Complex::<f64>::default();
+                    let mut denominator = Complex::<f64>::default();
+                    for tap in 0..3 {
+                        let frequency_term = basis.response[[tap, bin]];
+                        numerator += b[[section, tap, out_ch, in_ch]] * frequency_term;
+                        denominator += a[[section, tap, out_ch, in_ch]] * frequency_term;
+                    }
+                    b_response[[section, bin, out_ch, in_ch]] = numerator;
+                    a_response[[section, bin, out_ch, in_ch]] = denominator;
+                    h[[bin, out_ch, in_ch]] *= numerator / denominator;
+                }
+            }
+        }
+    }
+
+    let mut db = Array4::zeros((n_sections, 3, n_out, n_in));
+    let mut da = Array4::zeros((n_sections, 3, n_out, n_in));
+    for section in 0..n_sections {
+        for tap in 0..3 {
+            for out_ch in 0..n_out {
+                for in_ch in 0..n_in {
+                    let mut numerator_gradient = 0.0;
+                    let mut denominator_gradient = 0.0;
+                    for bin in 0..n_bins {
+                        let b_bin = b_response[[section, bin, out_ch, in_ch]];
+                        let a_bin = a_response[[section, bin, out_ch, in_ch]];
+                        let mut other_sections = Complex::new(1.0, 0.0);
+                        for other in 0..n_sections {
+                            if other != section {
+                                other_sections *= b_response[[other, bin, out_ch, in_ch]]
+                                    / a_response[[other, bin, out_ch, in_ch]];
+                            }
+                        }
+                        let frequency_term = basis.response[[tap, bin]];
+                        let derivative_b = other_sections * frequency_term / a_bin;
+                        let derivative_a =
+                            -other_sections * b_bin * frequency_term / (a_bin * a_bin);
+                        let loss_gradient = dl_dh[[bin, out_ch, in_ch]].conj();
+                        numerator_gradient += (loss_gradient * derivative_b).re;
+                        denominator_gradient += (loss_gradient * derivative_a).re;
+                    }
+                    db[[section, tap, out_ch, in_ch]] = numerator_gradient;
+                    da[[section, tap, out_ch, in_ch]] = denominator_gradient;
+                }
+            }
+        }
+    }
+
+    SosCoefficientVjp { h, db, da }
 }
 
 fn sos_response_impl<S>(
     b: &ArrayBase<S, Ix4>,
     a: &ArrayBase<S, Ix4>,
-    nfft: usize,
-    gamma: &[f64; 3],
+    basis: &SosFrequencyBasis,
 ) -> SosResponse
 where
     S: Data<Elem = Complex<f64>>,
 {
     let (n_sections, _, n_out, n_in) = b.dim();
-    let n_bins = nfft / 2 + 1;
-
-    let fft_envelope = tap_frequency_response(nfft, gamma);
+    let n_bins = basis.n_bins();
+    let fft_envelope = &basis.response;
 
     // Compute B_k and A_k for every section, and accumulate H = prod_k B_k/A_k.
     let mut h = Array3::from_elem((n_bins, n_out, n_in), Complex::from(1.0));
@@ -208,9 +321,18 @@ pub fn sos_frequency_response(
 ) -> Result<Array3<Complex<f64>>, AutodiffError> {
     validate_sos_4d_inputs(b, a, nfft)?;
     let gamma = resolve_gamma(gamma);
+    let basis = SosFrequencyBasis::new(nfft, &gamma);
+    Ok(sos_frequency_response_with_basis(b, a, &basis))
+}
+
+pub(crate) fn sos_frequency_response_with_basis(
+    b: &Array4<Complex<f64>>,
+    a: &Array4<Complex<f64>>,
+    basis: &SosFrequencyBasis,
+) -> Array3<Complex<f64>> {
     let b_view = b.view();
     let a_view = a.view();
-    Ok(sos_frequency_response_impl(&b_view, &a_view, nfft, &gamma))
+    sos_frequency_response_impl(&b_view, &a_view, basis)
 }
 
 /// Compute the analytical Jacobian of the SOS frequency response w.r.t. the
@@ -234,9 +356,10 @@ pub fn sos_frequency_response_jacobian(
 ) -> Result<(Array5<Complex<f64>>, Array5<Complex<f64>>), AutodiffError> {
     validate_sos_4d_inputs(b, a, nfft)?;
     let gamma = resolve_gamma(gamma);
+    let basis = SosFrequencyBasis::new(nfft, &gamma);
     let b_view = b.view();
     let a_view = a.view();
-    let resp = sos_response_impl(&b_view, &a_view, nfft, &gamma);
+    let resp = sos_response_impl(&b_view, &a_view, &basis);
     Ok((resp.dh_db, resp.dh_da))
 }
 
@@ -273,7 +396,8 @@ pub fn sos_frequency_response_parallel(
     let a4 = a_view
         .to_shape((n_sections, 3, n_channels, 1))
         .map_err(|e| AutodiffError::Message(e.to_string()))?;
-    let resp = sos_response_impl(&b4, &a4, nfft, &gamma);
+    let basis = SosFrequencyBasis::new(nfft, &gamma);
+    let resp = sos_response_impl(&b4, &a4, &basis);
     Ok(resp.h.index_axis(Axis(2), 0).to_owned())
 }
 
@@ -307,7 +431,8 @@ pub fn sos_frequency_response_jacobian_parallel(
     let a4 = a_view
         .to_shape((n_sections, 3, n_channels, 1))
         .map_err(|e| AutodiffError::Message(e.to_string()))?;
-    let resp = sos_response_impl(&b4, &a4, nfft, &gamma);
+    let basis = SosFrequencyBasis::new(nfft, &gamma);
+    let resp = sos_response_impl(&b4, &a4, &basis);
     Ok((
         resp.dh_db.index_axis(Axis(4), 0).to_owned(),
         resp.dh_da.index_axis(Axis(4), 0).to_owned(),

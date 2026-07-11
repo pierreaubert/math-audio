@@ -53,6 +53,26 @@ fn recursion_forward_is_finite_with_nonzero_feedback() {
 }
 
 #[test]
+fn recursion_response_cache_invalidates_after_parameter_change() {
+    let mut feedforward = Gain::new(NFFT, 1, 1).unwrap();
+    feedforward.param[[0, 0]] = 1.0;
+    let mut feedback = Gain::new(NFFT, 1, 1).unwrap();
+    feedback.param[[0, 0]] = 0.1;
+    let mut recursion = Recursion::new(Box::new(feedforward), Box::new(feedback)).unwrap();
+    let input = DiffTensor::from_array(Array3::from_elem(
+        (1, NFFT / 2 + 1, 1),
+        Complex::new(1.0, 0.0),
+    ));
+
+    let before = recursion.forward(&input).unwrap();
+    recursion.feedback.parameters_mut()[0][[0, 0]] = 0.2;
+    let after = recursion.forward(&input).unwrap();
+
+    assert_abs_diff_eq!(before.data[[0, 0, 0]].re, 1.0 / 0.9, epsilon = 1e-12);
+    assert_abs_diff_eq!(after.data[[0, 0, 0]].re, 1.0 / 0.8, epsilon = 1e-12);
+}
+
+#[test]
 fn recursion_backward_rejects_mismatched_frequency_shape() {
     let feedforward = Gain::new(NFFT, 1, 1).unwrap();
     let feedback = Gain::new(NFFT, 1, 1).unwrap();

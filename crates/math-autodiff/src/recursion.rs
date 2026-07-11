@@ -12,6 +12,11 @@
 use nalgebra::DMatrix;
 use ndarray::{Array2, Array3, ArrayD, Axis, IxDyn};
 use num_complex::Complex;
+use std::{
+    collections::hash_map::DefaultHasher,
+    hash::{Hash, Hasher},
+    sync::{Arc, Mutex},
+};
 
 use crate::error::AutodiffError;
 use crate::module::{DiffModule, validate_spectral_gradient_shape};
@@ -95,6 +100,7 @@ pub struct Recursion {
     pub feedforward: Box<dyn DiffModule<f64>>,
     pub feedback: Box<dyn DiffModule<f64>>,
     n_bins: usize,
+    response_cache: Mutex<Option<(u64, Arc<ClosedLoopResponse>)>>,
 }
 
 impl std::fmt::Debug for Recursion {
@@ -103,6 +109,7 @@ impl std::fmt::Debug for Recursion {
             .field("n_bins", &self.n_bins)
             .field("feedforward", &"<dyn DiffModule>")
             .field("feedback", &"<dyn DiffModule>")
+            .field("response_cache", &"<cached closed-loop response>")
             .finish()
     }
 }
@@ -143,11 +150,52 @@ impl Recursion {
             n_bins: feedforward.n_bins(),
             feedforward,
             feedback,
+            response_cache: Mutex::new(None),
         })
     }
 
     fn n_bins(&self) -> usize {
         self.n_bins
+    }
+
+    fn response_fingerprint(&self) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        self.n_bins.hash(&mut hasher);
+        for parameter in self
+            .feedforward
+            .parameters()
+            .into_iter()
+            .chain(self.feedback.parameters())
+        {
+            parameter.shape().hash(&mut hasher);
+            for &value in parameter {
+                value.to_bits().hash(&mut hasher);
+            }
+        }
+        hasher.finish()
+    }
+
+    fn cached_closed_loop_response(&self) -> Result<Arc<ClosedLoopResponse>, AutodiffError> {
+        let fingerprint = self.response_fingerprint();
+        {
+            let cache = self
+                .response_cache
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Some((cached_fingerprint, response)) = cache.as_ref()
+                && *cached_fingerprint == fingerprint
+            {
+                return Ok(Arc::clone(response));
+            }
+        }
+
+        let response = Arc::new(self.closed_loop_response()?);
+        let mut cache = self
+            .response_cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *cache = Some((fingerprint, Arc::clone(&response)));
+        Ok(response)
     }
 
     #[allow(clippy::type_complexity)]
@@ -224,21 +272,47 @@ impl DiffModule<f64> for Recursion {
             )));
         }
 
-        let (h_closed, _, _, _) = self.closed_loop_response()?;
+        let response = self.cached_closed_loop_response()?;
+        let h_closed = &response.0;
         let n_out = self.feedforward.output_channels();
         let mut output_shape = input_shape.to_vec();
         output_shape[2] = n_out;
         let mut output = ArrayD::zeros(IxDyn(&output_shape));
 
-        for o in 0..n_out {
-            for i in 0..n_in {
+        if input_shape.len() == 3
+            && let Some(input_data) = input.data.as_slice()
+        {
+            let batch = input_shape[0];
+            let output_data = output
+                .as_slice_mut()
+                .expect("new recursion output must be contiguous");
+            for batch_index in 0..batch {
                 for f in 0..nb {
-                    let h = h_closed[[f, o, i]];
-                    let input_slice = input.data.index_axis(Axis(1), f);
-                    let input_bin = input_slice.index_axis(Axis(1), i);
-                    let mut output_slice = output.index_axis_mut(Axis(1), f);
-                    let mut output_bin = output_slice.index_axis_mut(Axis(1), o);
-                    output_bin += &input_bin.mapv(|x| x * h);
+                    for output_channel in 0..n_out {
+                        let mut sum = Complex::default();
+                        for input_channel in 0..n_in {
+                            let input_index = (batch_index * nb + f) * n_in + input_channel;
+                            sum += input_data[input_index]
+                                * h_closed[[f, output_channel, input_channel]];
+                        }
+                        let output_index = (batch_index * nb + f) * n_out + output_channel;
+                        output_data[output_index] = sum;
+                    }
+                }
+            }
+        } else {
+            for o in 0..n_out {
+                for i in 0..n_in {
+                    for f in 0..nb {
+                        let h = h_closed[[f, o, i]];
+                        let input_slice = input.data.index_axis(Axis(1), f);
+                        let input_bin = input_slice.index_axis(Axis(1), i);
+                        let mut output_slice = output.index_axis_mut(Axis(1), f);
+                        let mut output_bin = output_slice.index_axis_mut(Axis(1), o);
+                        for (destination, &source) in output_bin.iter_mut().zip(input_bin.iter()) {
+                            *destination += source * h;
+                        }
+                    }
                 }
             }
         }
@@ -273,7 +347,8 @@ impl DiffModule<f64> for Recursion {
             )));
         }
 
-        let (h_closed, h_ff, h_fb, a_arr) = self.closed_loop_response()?;
+        let response = self.cached_closed_loop_response()?;
+        let (h_closed, h_ff, h_fb, a_arr) = response.as_ref();
 
         // dL/dH_closed[f, o, i] = sum_b grad_output[b, f, o] * conj(input[b, f, i])
         let mut dl_dh_closed = Array3::<Complex<f64>>::zeros((nb, n_out, n_in));
@@ -408,15 +483,42 @@ impl DiffModule<f64> for Recursion {
 
         // dL/dinput[b, f, i] = sum_o conj(H_closed[f, o, i]) * grad_output[b, f, o]
         let mut grad_input = ArrayD::zeros(IxDyn(input_shape));
-        for i in 0..n_in {
-            for o in 0..n_out {
+        if input_shape.len() == 3
+            && let Some(grad_output_data) = grad_output.data.as_slice()
+        {
+            let batch = input_shape[0];
+            let grad_input_data = grad_input
+                .as_slice_mut()
+                .expect("new recursion gradient must be contiguous");
+            for batch_index in 0..batch {
                 for f in 0..nb {
-                    let h_conj = h_closed[[f, o, i]].conj();
-                    let grad_slice = grad_output.data.index_axis(Axis(1), f);
-                    let grad_bin = grad_slice.index_axis(Axis(1), o);
-                    let mut input_grad_slice = grad_input.index_axis_mut(Axis(1), f);
-                    let mut input_grad_bin = input_grad_slice.index_axis_mut(Axis(1), i);
-                    input_grad_bin += &grad_bin.mapv(|g| g * h_conj);
+                    for input_channel in 0..n_in {
+                        let mut sum = Complex::default();
+                        for output_channel in 0..n_out {
+                            let output_index = (batch_index * nb + f) * n_out + output_channel;
+                            sum += grad_output_data[output_index]
+                                * h_closed[[f, output_channel, input_channel]].conj();
+                        }
+                        let input_index = (batch_index * nb + f) * n_in + input_channel;
+                        grad_input_data[input_index] = sum;
+                    }
+                }
+            }
+        } else {
+            for i in 0..n_in {
+                for o in 0..n_out {
+                    for f in 0..nb {
+                        let h_conj = h_closed[[f, o, i]].conj();
+                        let grad_slice = grad_output.data.index_axis(Axis(1), f);
+                        let grad_bin = grad_slice.index_axis(Axis(1), o);
+                        let mut input_grad_slice = grad_input.index_axis_mut(Axis(1), f);
+                        let mut input_grad_bin = input_grad_slice.index_axis_mut(Axis(1), i);
+                        for (destination, &gradient) in
+                            input_grad_bin.iter_mut().zip(grad_bin.iter())
+                        {
+                            *destination += gradient * h_conj;
+                        }
+                    }
                 }
             }
         }
