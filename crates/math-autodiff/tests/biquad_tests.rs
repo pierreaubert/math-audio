@@ -115,7 +115,8 @@ fn biquad_gradient_finite_difference() {
             target_filter.complex_response(f)
         })
         .collect();
-    let target = DiffTensor::from_array(Array3::from_shape_vec((1, n_bins, 1), target_values).unwrap());
+    let target =
+        DiffTensor::from_array(Array3::from_shape_vec((1, n_bins, 1), target_values).unwrap());
 
     let input = complex_spectrum(&[1, n_bins, 1]);
     let output = biquad.forward(&input).expect("forward should succeed");
@@ -125,9 +126,8 @@ fn biquad_gradient_finite_difference() {
         .zip(target.data.iter())
         .map(|(o, t)| 2.0 * (o - t))
         .collect();
-    let grad_output = DiffTensor::from_array(
-        Array3::from_shape_vec((1, n_bins, 1), grad_output_data).unwrap(),
-    );
+    let grad_output =
+        DiffTensor::from_array(Array3::from_shape_vec((1, n_bins, 1), grad_output_data).unwrap());
     biquad.zero_grad();
     let _grad_input = biquad
         .backward(&input, &output, &grad_output)
@@ -155,7 +155,9 @@ fn biquad_gradient_finite_difference() {
                     param_minus[[section, p, out, inp]] -= epsilon;
                     let mut biquad_minus = biquad.clone();
                     biquad_minus.param = param_minus;
-                    let out_minus = biquad_minus.forward(&input).expect("forward should succeed");
+                    let out_minus = biquad_minus
+                        .forward(&input)
+                        .expect("forward should succeed");
                     let loss_minus = mse_loss(&out_minus, &target);
 
                     let finite_diff = (loss_plus - loss_minus) / (2.0 * epsilon);
@@ -186,9 +188,15 @@ fn parallel_biquad_forward_matches_math_iir_fir_response() {
     let n_bins = NFFT / 2 + 1;
     let n_channels = 2;
 
-    let mut biquad =
-        ParallelBiquad::new(NFFT, FS, 1, BiquadFilterType::Highpass, n_channels, ALIAS_DECAY_DB)
-            .expect("valid parallel biquad");
+    let mut biquad = ParallelBiquad::new(
+        NFFT,
+        FS,
+        1,
+        BiquadFilterType::Highpass,
+        n_channels,
+        ALIAS_DECAY_DB,
+    )
+    .expect("valid parallel biquad");
     set_parallel_biquad_param(&mut biquad, fc_hz, 0.0);
 
     let input = ones_spectrum(&[1, n_bins, n_channels]);
@@ -210,9 +218,15 @@ fn parallel_biquad_forward_matches_math_iir_fir_response() {
 fn parallel_biquad_gradient_finite_difference() {
     let n_bins = NFFT / 2 + 1;
     let n_channels = 2;
-    let mut biquad =
-        ParallelBiquad::new(NFFT, FS, 1, BiquadFilterType::Highpass, n_channels, ALIAS_DECAY_DB)
-            .expect("valid parallel biquad");
+    let mut biquad = ParallelBiquad::new(
+        NFFT,
+        FS,
+        1,
+        BiquadFilterType::Highpass,
+        n_channels,
+        ALIAS_DECAY_DB,
+    )
+    .expect("valid parallel biquad");
     set_parallel_biquad_param(&mut biquad, 1_000.0, 3.0);
 
     let target_filter = IirBiquad::new(BiquadFilterType::Highpass, 1_200.0, FS, 0.0, 0.0);
@@ -223,8 +237,9 @@ fn parallel_biquad_gradient_finite_difference() {
             std::iter::repeat_n(h, n_channels)
         })
         .collect();
-    let target =
-        DiffTensor::from_array(Array3::from_shape_vec((1, n_bins, n_channels), target_values).unwrap());
+    let target = DiffTensor::from_array(
+        Array3::from_shape_vec((1, n_bins, n_channels), target_values).unwrap(),
+    );
 
     let input = complex_spectrum(&[1, n_bins, n_channels]);
     let output = biquad.forward(&input).expect("forward should succeed");
@@ -260,7 +275,9 @@ fn parallel_biquad_gradient_finite_difference() {
                 param_minus[[section, p, ch]] -= epsilon;
                 let mut biquad_minus = biquad.clone();
                 biquad_minus.param = param_minus;
-                let out_minus = biquad_minus.forward(&input).expect("forward should succeed");
+                let out_minus = biquad_minus
+                    .forward(&input)
+                    .expect("forward should succeed");
                 let loss_minus = mse_loss(&out_minus, &target);
 
                 let finite_diff = (loss_plus - loss_minus) / (2.0 * epsilon);

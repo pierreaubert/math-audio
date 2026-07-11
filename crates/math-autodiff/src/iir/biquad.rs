@@ -21,11 +21,11 @@
     reason = "format strings are clearer with explicit arguments in error messages"
 )]
 
+use math_audio_iir_fir::BiquadFilterType;
 use ndarray::{
     Array2, Array3, Array4, Array5, ArrayD, ArrayView3, ArrayView4, ArrayViewMut3, ArrayViewMut4,
     Axis, IxDyn,
 };
-use math_audio_iir_fir::BiquadFilterType;
 use num_complex::Complex;
 use std::f64::consts::{LN_10, PI, SQRT_2};
 
@@ -392,9 +392,7 @@ fn parallel_biquad_param_grad_view_mut(
         .view_mut()
         .into_shape_with_order((n_sections, n_params, n_channels))
         .map_err(|e| {
-            AutodiffError::Message(format!(
-                "ParallelBiquad: failed to reshape param_grad: {e}"
-            ))
+            AutodiffError::Message(format!("ParallelBiquad: failed to reshape param_grad: {e}"))
         })
 }
 
@@ -948,10 +946,8 @@ impl ParallelBiquad {
                     b[[section, tap, ch]] = Complex::new(coeffs.b[tap], 0.0);
                     a[[section, tap, ch]] = Complex::new(coeffs.a[tap], 0.0);
                     for param_idx in 0..n_params {
-                        db_dparam[[section, tap, param_idx, ch]] =
-                            coeffs.db_dparam[tap][param_idx];
-                        da_dparam[[section, tap, param_idx, ch]] =
-                            coeffs.da_dparam[tap][param_idx];
+                        db_dparam[[section, tap, param_idx, ch]] = coeffs.db_dparam[tap][param_idx];
+                        da_dparam[[section, tap, param_idx, ch]] = coeffs.da_dparam[tap][param_idx];
                     }
                 }
             }

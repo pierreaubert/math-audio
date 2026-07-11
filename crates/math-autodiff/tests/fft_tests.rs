@@ -38,8 +38,7 @@ fn assert_backward_matches_finite_difference<M: DiffModule<f64>>(
             let is_packed_endpoint = packed_spectrum_input
                 && imaginary
                 && (index == 0
-                    || (output.data.len().is_multiple_of(2)
-                        && index == output.data.len() / 2));
+                    || (output.data.len().is_multiple_of(2) && index == output.data.len() / 2));
             if is_packed_endpoint {
                 assert_abs_diff_eq!(analytical.data[index].im, 0.0, epsilon = 1e-12);
                 continue;
@@ -72,7 +71,9 @@ fn assert_backward_matches_finite_difference<M: DiffModule<f64>>(
                 grad_output,
             );
             let loss_minus = linear_loss(
-                &module.forward(&minus).expect("minus forward should succeed"),
+                &module
+                    .forward(&minus)
+                    .expect("minus forward should succeed"),
                 grad_output,
             );
             let numerical = (loss_plus - loss_minus) / (2.0 * epsilon);
@@ -124,7 +125,9 @@ fn ifft_roundtrip_is_identity() {
     let spectrum = fft.forward(&impulse).expect("FFT forward should succeed");
 
     let ifft = Ifft::new(nfft);
-    let recovered = ifft.forward(&spectrum).expect("IFFT forward should succeed");
+    let recovered = ifft
+        .forward(&spectrum)
+        .expect("IFFT forward should succeed");
 
     assert_eq!(recovered.data.shape(), &[nfft]);
     assert_abs_diff_eq!(recovered.data[0].re, 1.0, epsilon = 1e-9);
@@ -148,7 +151,9 @@ fn fft_antialias_impulse_preserves_dc() {
     let impulse = impulse(nfft);
 
     let fft = FftAntiAlias::new(nfft, 60.0);
-    let spectrum = fft.forward(&impulse).expect("FFT anti-alias forward should succeed");
+    let spectrum = fft
+        .forward(&impulse)
+        .expect("FFT anti-alias forward should succeed");
 
     assert_eq!(spectrum.data.shape(), &[nfft / 2 + 1]);
     assert_abs_diff_eq!(spectrum.data[0].re, 1.0, epsilon = 1e-9);
@@ -160,10 +165,14 @@ fn ifft_antialias_roundtrip_preserves_first_sample() {
     let impulse = impulse(nfft);
 
     let fft = FftAntiAlias::new(nfft, 60.0);
-    let spectrum = fft.forward(&impulse).expect("FFT anti-alias forward should succeed");
+    let spectrum = fft
+        .forward(&impulse)
+        .expect("FFT anti-alias forward should succeed");
 
     let ifft = IfftAntiAlias::new(nfft, 60.0);
-    let recovered = ifft.forward(&spectrum).expect("IFFT anti-alias forward should succeed");
+    let recovered = ifft
+        .forward(&spectrum)
+        .expect("IFFT anti-alias forward should succeed");
 
     assert_eq!(recovered.data.shape(), &[nfft]);
     assert_abs_diff_eq!(recovered.data[0].re, 1.0, epsilon = 1e-9);

@@ -23,8 +23,8 @@ fn sos_response_dc_and_nyquist_gains_are_correct() {
     let h = sos_frequency_response(&b, &a, nfft, Some(&gamma)).unwrap();
 
     let expected_dc = Complex::from(1.0) / Complex::from(1.0 - 0.5 * gamma[1] + 0.25 * gamma[2]);
-    let expected_nyquist = Complex::from(1.0)
-        / Complex::from(1.0 + 0.5 * gamma[1] + 0.25 * gamma[2]);
+    let expected_nyquist =
+        Complex::from(1.0) / Complex::from(1.0 + 0.5 * gamma[1] + 0.25 * gamma[2]);
 
     assert_abs_diff_eq!(resp.h[[0, 0, 0]].re, expected_dc.re, epsilon = 1e-12);
     assert_abs_diff_eq!(resp.h[[0, 0, 0]].im, expected_dc.im, epsilon = 1e-12);
@@ -44,8 +44,16 @@ fn sos_response_dc_and_nyquist_gains_are_correct() {
         epsilon = 1e-12
     );
 
-    assert_abs_diff_eq!(h[[nyquist_bin, 0, 0]].re, expected_nyquist.re, epsilon = 1e-12);
-    assert_abs_diff_eq!(h[[nyquist_bin, 0, 0]].im, expected_nyquist.im, epsilon = 1e-12);
+    assert_abs_diff_eq!(
+        h[[nyquist_bin, 0, 0]].re,
+        expected_nyquist.re,
+        epsilon = 1e-12
+    );
+    assert_abs_diff_eq!(
+        h[[nyquist_bin, 0, 0]].im,
+        expected_nyquist.im,
+        epsilon = 1e-12
+    );
 }
 
 #[test]
@@ -62,8 +70,16 @@ fn sos_frequency_response_uses_identity_gamma_when_none() {
     let h_default = sos_frequency_response(&b, &a, nfft, None).unwrap();
     let h_identity = sos_frequency_response(&b, &a, nfft, Some(&[1.0, 1.0, 1.0])).unwrap();
 
-    assert_abs_diff_eq!(h_default[[0, 0, 0]].re, h_identity[[0, 0, 0]].re, epsilon = 1e-12);
-    assert_abs_diff_eq!(h_default[[0, 0, 0]].im, h_identity[[0, 0, 0]].im, epsilon = 1e-12);
+    assert_abs_diff_eq!(
+        h_default[[0, 0, 0]].re,
+        h_identity[[0, 0, 0]].re,
+        epsilon = 1e-12
+    );
+    assert_abs_diff_eq!(
+        h_default[[0, 0, 0]].im,
+        h_identity[[0, 0, 0]].im,
+        epsilon = 1e-12
+    );
 }
 
 fn build_two_section_coeffs() -> (Array4<Complex<f64>>, Array4<Complex<f64>>) {
@@ -108,8 +124,16 @@ fn sos_response_jacobian_matches_finite_diff_for_b() {
                 let actual_public = dh_db[[bin, section, tap, 0, 0]];
                 assert_abs_diff_eq!(actual.re, expected[[bin, 0, 0]].re, epsilon = 1e-6);
                 assert_abs_diff_eq!(actual.im, expected[[bin, 0, 0]].im, epsilon = 1e-6);
-                assert_abs_diff_eq!(actual_public.re, expected_public[[bin, 0, 0]].re, epsilon = 1e-6);
-                assert_abs_diff_eq!(actual_public.im, expected_public[[bin, 0, 0]].im, epsilon = 1e-6);
+                assert_abs_diff_eq!(
+                    actual_public.re,
+                    expected_public[[bin, 0, 0]].re,
+                    epsilon = 1e-6
+                );
+                assert_abs_diff_eq!(
+                    actual_public.im,
+                    expected_public[[bin, 0, 0]].im,
+                    epsilon = 1e-6
+                );
             }
         }
     }
@@ -140,8 +164,16 @@ fn sos_response_jacobian_matches_finite_diff_for_a() {
                 let actual_public = dh_da[[bin, section, tap, 0, 0]];
                 assert_abs_diff_eq!(actual.re, expected[[bin, 0, 0]].re, epsilon = 1e-6);
                 assert_abs_diff_eq!(actual.im, expected[[bin, 0, 0]].im, epsilon = 1e-6);
-                assert_abs_diff_eq!(actual_public.re, expected_public[[bin, 0, 0]].re, epsilon = 1e-6);
-                assert_abs_diff_eq!(actual_public.im, expected_public[[bin, 0, 0]].im, epsilon = 1e-6);
+                assert_abs_diff_eq!(
+                    actual_public.re,
+                    expected_public[[bin, 0, 0]].re,
+                    epsilon = 1e-6
+                );
+                assert_abs_diff_eq!(
+                    actual_public.im,
+                    expected_public[[bin, 0, 0]].im,
+                    epsilon = 1e-6
+                );
             }
         }
     }
@@ -206,7 +238,8 @@ fn sos_frequency_response_jacobian_parallel_matches_finite_diff() {
 
     let (b, a) = build_two_section_coeffs_3d();
     let h = sos_frequency_response_parallel(&b, &a, nfft, Some(&gamma)).unwrap();
-    let (dh_db, dh_da) = sos_frequency_response_jacobian_parallel(&b, &a, nfft, Some(&gamma)).unwrap();
+    let (dh_db, dh_da) =
+        sos_frequency_response_jacobian_parallel(&b, &a, nfft, Some(&gamma)).unwrap();
 
     for section in 0..2 {
         for tap in 0..3 {

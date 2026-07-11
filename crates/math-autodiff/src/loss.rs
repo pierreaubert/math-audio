@@ -68,7 +68,8 @@ pub fn magnitude_mse_loss(
     target: &DiffTensor<f64>,
 ) -> Result<f64, AutodiffError> {
     validate_loss_inputs(pred, target)?;
-    Ok(pred.data
+    Ok(pred
+        .data
         .iter()
         .zip(target.data.iter())
         .map(|(p, t)| {

@@ -142,10 +142,7 @@ fn sgd_reduces_mse_loss() {
     );
 
     // Target is input multiplied by the target gain.
-    let target_values: Vec<Complex<f64>> = input_values
-        .iter()
-        .map(|x| x * target_gain)
-        .collect();
+    let target_values: Vec<Complex<f64>> = input_values.iter().map(|x| x * target_gain).collect();
     let target = DiffTensor::from_array(
         Array::from_shape_vec(IxDyn(&[1, n_bins, 1]), target_values).unwrap(),
     );
@@ -193,10 +190,7 @@ fn sgd_reduces_mse_loss() {
 #[test]
 fn losses_reject_mismatched_and_empty_tensors() {
     let one = complex_tensor(&[Complex::new(1.0, 0.0)], &[1]);
-    let two = complex_tensor(
-        &[Complex::new(1.0, 0.0), Complex::new(2.0, 0.0)],
-        &[2],
-    );
+    let two = complex_tensor(&[Complex::new(1.0, 0.0), Complex::new(2.0, 0.0)], &[2]);
     let empty = complex_tensor(&[], &[0]);
 
     assert!(mse_loss(&one, &two).is_err());

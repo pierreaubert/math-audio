@@ -31,7 +31,10 @@ fn view2<'a>(param: &'a ArrayD<f64>, name: &str) -> Result<ArrayView2<'a, f64>, 
         .map_err(|e| AutodiffError::Message(format!("{name}: failed to reshape param: {e}")))
 }
 
-fn view2_mut<'a>(param: &'a mut ArrayD<f64>, name: &str) -> Result<ArrayViewMut2<'a, f64>, AutodiffError> {
+fn view2_mut<'a>(
+    param: &'a mut ArrayD<f64>,
+    name: &str,
+) -> Result<ArrayViewMut2<'a, f64>, AutodiffError> {
     let shape = param.shape();
     if shape.len() != 2 {
         return Err(AutodiffError::Message(format!(
@@ -61,7 +64,10 @@ fn view1<'a>(param: &'a ArrayD<f64>, name: &str) -> Result<ArrayView1<'a, f64>, 
         .map_err(|e| AutodiffError::Message(format!("{name}: failed to reshape param: {e}")))
 }
 
-fn view1_mut<'a>(param: &'a mut ArrayD<f64>, name: &str) -> Result<ArrayViewMut1<'a, f64>, AutodiffError> {
+fn view1_mut<'a>(
+    param: &'a mut ArrayD<f64>,
+    name: &str,
+) -> Result<ArrayViewMut1<'a, f64>, AutodiffError> {
     let shape = param.shape();
     if shape.len() != 1 {
         return Err(AutodiffError::Message(format!(

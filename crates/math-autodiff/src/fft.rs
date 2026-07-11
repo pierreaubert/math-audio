@@ -1,4 +1,7 @@
-#![allow(clippy::cast_precision_loss, reason = "FFT sizes are audio buffer lengths that fit exactly in f64 for practical values")]
+#![allow(
+    clippy::cast_precision_loss,
+    reason = "FFT sizes are audio buffer lengths that fit exactly in f64 for practical values"
+)]
 
 use ndarray::{Array1, ArrayD};
 use num_complex::Complex;

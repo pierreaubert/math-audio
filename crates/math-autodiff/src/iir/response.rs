@@ -57,7 +57,8 @@ fn sos_response_impl<S>(
     gamma: &[f64; 3],
 ) -> SosResponse
 where
-    S: Data<Elem = Complex<f64>>, {
+    S: Data<Elem = Complex<f64>>,
+{
     let (n_sections, _, n_out, n_in) = b.dim();
     let n_bins = nfft / 2 + 1;
 

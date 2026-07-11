@@ -71,11 +71,9 @@ fn gain_forward_and_backward() {
     let n_out = 2;
     let n_in = 3;
     let mut gain = Gain::new(NFFT, n_out, n_in).expect("valid gain");
-    gain.param = ArrayD::from_shape_vec(
-        IxDyn(&[n_out, n_in]),
-        vec![0.5, -0.3, 1.2, -0.7, 0.9, 0.1],
-    )
-    .unwrap();
+    gain.param =
+        ArrayD::from_shape_vec(IxDyn(&[n_out, n_in]), vec![0.5, -0.3, 1.2, -0.7, 0.9, 0.1])
+            .unwrap();
 
     let input = random_spectrum(&[1, n_bins, n_in]);
     let output = gain.forward(&input).expect("forward should succeed");
@@ -254,10 +252,12 @@ fn magnitude_backward_ignores_imaginary_upstream_gradient() {
 fn series_two_gains_multiplies() {
     let n_bins = NFFT / 2 + 1;
     let mut gain1 = Gain::new(NFFT, 3, 2).expect("valid gain");
-    gain1.param = ArrayD::from_shape_vec(IxDyn(&[3, 2]), vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]).unwrap();
+    gain1.param =
+        ArrayD::from_shape_vec(IxDyn(&[3, 2]), vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]).unwrap();
 
     let mut gain2 = Gain::new(NFFT, 2, 3).expect("valid gain");
-    gain2.param = ArrayD::from_shape_vec(IxDyn(&[2, 3]), vec![0.5, 1.0, 1.5, 2.0, 2.5, 3.0]).unwrap();
+    gain2.param =
+        ArrayD::from_shape_vec(IxDyn(&[2, 3]), vec![0.5, 1.0, 1.5, 2.0, 2.5, 3.0]).unwrap();
 
     // Expected combined gain matrix: gain2.param * gain1.param.
     let gain1_view = gain1
@@ -299,11 +299,8 @@ fn series_two_gains_multiplies() {
 fn series_gradient_matches_manual() {
     let n_bins = NFFT / 2 + 1;
     let mut gain = Gain::new(NFFT, 3, 2).expect("valid gain");
-    gain.param = ArrayD::from_shape_vec(
-        IxDyn(&[3, 2]),
-        vec![0.5, -0.3, 1.2, -0.7, 0.9, 0.1],
-    )
-    .unwrap();
+    gain.param =
+        ArrayD::from_shape_vec(IxDyn(&[3, 2]), vec![0.5, -0.3, 1.2, -0.7, 0.9, 0.1]).unwrap();
 
     let mut biquad = Biquad::new(NFFT, FS, 1, BiquadFilterType::Lowpass, 3, 3, ALIAS_DECAY_DB)
         .expect("valid biquad");
@@ -344,7 +341,10 @@ fn series_gradient_matches_manual() {
         .backward(&input, &x2_series, &grad_output)
         .expect("series backward");
 
-    assert_eq!(grad_input_manual.data.shape(), grad_input_series.data.shape());
+    assert_eq!(
+        grad_input_manual.data.shape(),
+        grad_input_series.data.shape()
+    );
     for (manual, series) in grad_input_manual
         .data
         .iter()
@@ -363,7 +363,11 @@ fn series_gradient_matches_manual() {
 
     let series_biquad_grad = series.modules()[1].gradients()[0];
     assert_eq!(biquad_manual.param_grad.shape(), series_biquad_grad.shape());
-    for (manual, series) in biquad_manual.param_grad.iter().zip(series_biquad_grad.iter()) {
+    for (manual, series) in biquad_manual
+        .param_grad
+        .iter()
+        .zip(series_biquad_grad.iter())
+    {
         assert_abs_diff_eq!(manual, series, epsilon = 1e-9);
     }
 }
@@ -388,7 +392,11 @@ fn shell_parameters_mut_changes_core() {
 
     {
         let mut params_mut = shell.parameters_mut();
-        assert_eq!(params_mut.len(), 1, "shell should expose exactly the core's parameters");
+        assert_eq!(
+            params_mut.len(),
+            1,
+            "shell should expose exactly the core's parameters"
+        );
         let core_param = &mut params_mut[0];
         assert_eq!(core_param.shape(), &[2, 2]);
         // Scale the first output channel by 2.0.
@@ -410,7 +418,10 @@ fn shell_parameters_mut_changes_core() {
     }
 
     // Ensure the output actually changed from the pre-modification run.
-    assert_ne!(output_before.data[[0, 0, 0]].re, output_after.data[[0, 0, 0]].re);
+    assert_ne!(
+        output_before.data[[0, 0, 0]].re,
+        output_after.data[[0, 0, 0]].re
+    );
 }
 
 #[test]
@@ -424,14 +435,12 @@ fn shell_get_freq_response() {
 
     let magnitude = Magnitude::new(NFFT, 1);
 
-    let shell = Shell::new(
-        Box::new(fft),
-        Box::new(biquad.clone()),
-        Box::new(magnitude),
-    )
-    .expect("valid shell");
+    let shell = Shell::new(Box::new(fft), Box::new(biquad.clone()), Box::new(magnitude))
+        .expect("valid shell");
 
-    let response = shell.get_freq_response().expect("get_freq_response should succeed");
+    let response = shell
+        .get_freq_response()
+        .expect("get_freq_response should succeed");
     assert_eq!(response.data.shape(), &[n_bins, 1, 1]);
 
     // Compare against the biquad's response to a unit spectrum.
