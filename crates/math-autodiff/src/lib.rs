@@ -16,6 +16,7 @@ pub mod matrix;
 pub mod module;
 pub mod optim;
 pub mod recursion;
+pub mod signals;
 pub mod system;
 pub mod tensor;
 

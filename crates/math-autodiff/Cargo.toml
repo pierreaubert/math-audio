@@ -21,6 +21,7 @@ realfft = { workspace = true }
 math-iir-fir = { workspace = true }
 math-dsp = { workspace = true }
 thiserror = { workspace = true }
+rand = { workspace = true }
 
 [[bench]]
 name = "biquad_bench"
