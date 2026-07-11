@@ -840,7 +840,7 @@ fn phasor_coherence_drops_when_one_stream_is_noise() {
     // Mic = clean tone, loopback = uncorrelated white noise →
     // γ² should approach 0. The previous proxy returned 1.0 in
     // this case; the true MSC must be < 0.5.
-    use rand::{Rng, SeedableRng};
+    use rand::{RngExt, SeedableRng};
     let sr = 48_000_u32;
     let clean = gen_steady_tone(30.0, 2.0, 50.0, sr, 0.5);
     let mut rng = rand::rngs::StdRng::seed_from_u64(0xC0FFEE);

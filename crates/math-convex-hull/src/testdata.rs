@@ -4,7 +4,7 @@
 
 use crate::ConvexHullError;
 use crate::types::Vertex;
-use rand::Rng;
+use rand::RngExt;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::Path;

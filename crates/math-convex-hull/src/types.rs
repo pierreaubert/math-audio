@@ -104,7 +104,7 @@ impl Vertex {
 
     /// Add noise for numerical stability
     pub fn add_noise(&self, epsilon: f64) -> Vertex {
-        use rand::Rng;
+        use rand::RngExt;
         let mut rng = rand::rng();
         Vertex {
             x: self.x + epsilon * (rng.random::<f64>() - 0.5),

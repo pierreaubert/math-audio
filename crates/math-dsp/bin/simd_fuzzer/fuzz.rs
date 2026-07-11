@@ -18,7 +18,7 @@ use super::scalar::scalar_scale_add;
 use super::scalar::scalar_window_mul;
 use super::scalar::scalar_window_mul_inplace;
 use math_audio_dsp::simd;
-use rand::Rng;
+use rand::RngExt;
 use rand::rngs::StdRng;
 use rustfft::num_complex::Complex;
 use std::sync::atomic::{AtomicUsize, Ordering};

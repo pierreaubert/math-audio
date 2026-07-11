@@ -1,5 +1,5 @@
 # rust
-/target
+target/
 /docs
 /coverage
 mutants.out
@@ -35,6 +35,7 @@ src/unused.rs
 check_output_*.txt
 .superpowers
 /docs/superpowers
+.rtk
 
 # Logs
 logs
