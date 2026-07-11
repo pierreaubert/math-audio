@@ -56,9 +56,14 @@ fn peq_forward_matches_hand_built_sos() {
     let n_sections = 3;
     let n_channels = 2;
 
-    for band_type in [PeqBandType::Peak, PeqBandType::Lowshelf, PeqBandType::Highshelf] {
-        let mut peq = ParametricEq::new(NFFT, FS, n_sections, n_channels, band_type, ALIAS_DECAY_DB)
-            .expect("valid parametric eq");
+    for band_type in [
+        PeqBandType::Peak,
+        PeqBandType::Lowshelf,
+        PeqBandType::Highshelf,
+    ] {
+        let mut peq =
+            ParametricEq::new(NFFT, FS, n_sections, n_channels, band_type, ALIAS_DECAY_DB)
+                .expect("valid parametric eq");
 
         // Set distinct per-section, per-channel parameters.
         for section in 0..n_sections {
@@ -101,7 +106,9 @@ fn peq_forward_matches_hand_built_sos() {
                 manual.param[[section, 5, ch, ch]] = coeffs.a2;
             }
         }
-        let manual_output = manual.forward(&input).expect("manual forward should succeed");
+        let manual_output = manual
+            .forward(&input)
+            .expect("manual forward should succeed");
 
         for ch in 0..n_channels {
             for bin in [0, 10, 50, 100, 200, n_bins - 1] {
@@ -126,7 +133,11 @@ fn peq_identity_at_unity_gain() {
     let n_bins = NFFT / 2 + 1;
     let n_channels = 2;
 
-    for band_type in [PeqBandType::Peak, PeqBandType::Lowshelf, PeqBandType::Highshelf] {
+    for band_type in [
+        PeqBandType::Peak,
+        PeqBandType::Lowshelf,
+        PeqBandType::Highshelf,
+    ] {
         let peq = ParametricEq::new(NFFT, FS, 4, n_channels, band_type, ALIAS_DECAY_DB)
             .expect("valid parametric eq");
 
@@ -155,9 +166,14 @@ fn peq_gradient_finite_difference() {
     let n_sections = 3;
     let n_channels = 2;
 
-    for band_type in [PeqBandType::Peak, PeqBandType::Lowshelf, PeqBandType::Highshelf] {
-        let mut peq = ParametricEq::new(NFFT, FS, n_sections, n_channels, band_type, ALIAS_DECAY_DB)
-            .expect("valid parametric eq");
+    for band_type in [
+        PeqBandType::Peak,
+        PeqBandType::Lowshelf,
+        PeqBandType::Highshelf,
+    ] {
+        let mut peq =
+            ParametricEq::new(NFFT, FS, n_sections, n_channels, band_type, ALIAS_DECAY_DB)
+                .expect("valid parametric eq");
 
         // Initialize with non-trivial parameters.
         for section in 0..n_sections {
@@ -240,5 +256,3 @@ fn peq_new_rejects_invalid_args() {
     assert!(ParametricEq::new(NFFT, FS, 1, 0, PeqBandType::Peak, ALIAS_DECAY_DB).is_err());
     assert!(ParametricEq::new(NFFT, 0.0, 1, 1, PeqBandType::Peak, ALIAS_DECAY_DB).is_err());
 }
-
-

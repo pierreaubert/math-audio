@@ -21,9 +21,7 @@ use ndarray::{Array3, Array4, ArrayD, Axis, IxDyn};
 use num_complex::Complex;
 
 use crate::error::AutodiffError;
-use crate::iir::response::{
-    sos_frequency_response, sos_frequency_response_jacobian,
-};
+use crate::iir::response::{sos_frequency_response, sos_frequency_response_jacobian};
 use crate::module::DiffModule;
 use crate::tensor::DiffTensor;
 
@@ -184,7 +182,8 @@ impl DiffModule<f64> for SosFilter {
         if n_bins != self.n_bins() {
             return Err(AutodiffError::Message(format!(
                 "SosFilter::backward: expected {} frequency bins, got {}",
-                self.n_bins(), n_bins
+                self.n_bins(),
+                n_bins
             )));
         }
         if n_out != self.n_out {
@@ -223,12 +222,13 @@ impl DiffModule<f64> for SosFilter {
             }
         }
 
-        let mut param_grad = self.param_grad.view_mut().into_shape_with_order((
-            self.n_sections,
-            6,
-            self.n_out,
-            self.n_in,
-        )).map_err(|e| AutodiffError::Message(format!("SosFilter: failed to reshape param_grad: {e}")))?;
+        let mut param_grad = self
+            .param_grad
+            .view_mut()
+            .into_shape_with_order((self.n_sections, 6, self.n_out, self.n_in))
+            .map_err(|e| {
+                AutodiffError::Message(format!("SosFilter: failed to reshape param_grad: {e}"))
+            })?;
 
         for section in 0..self.n_sections {
             for out_ch in 0..n_out {

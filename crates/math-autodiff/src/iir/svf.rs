@@ -129,11 +129,7 @@ fn svf_coefficients(
         SvfType::Highpass => (hp, [a0, a1_un, a2_un]),
         SvfType::Bandpass => (bp, [a0, a1_un, a2_un]),
         SvfType::Notch => {
-            let b = [
-                hp[0] + lp[0],
-                hp[1] + lp[1],
-                hp[2] + lp[2],
-            ];
+            let b = [hp[0] + lp[0], hp[1] + lp[1], hp[2] + lp[2]];
             (b, [a0, a1_un, a2_un])
         }
         SvfType::Allpass => {
@@ -162,7 +158,11 @@ fn svf_coefficients(
             let a2 = a * a;
             let hp_p = [1.0, -2.0, 1.0];
             let bp_p = [g_prime, 0.0, -g_prime];
-            let lp_p = [g_prime * g_prime, 2.0 * g_prime * g_prime, g_prime * g_prime];
+            let lp_p = [
+                g_prime * g_prime,
+                2.0 * g_prime * g_prime,
+                g_prime * g_prime,
+            ];
             // H = HP' + k*a^2*BP' + a^2*LP'.
             let b = [
                 hp_p[0] + k * a2 * bp_p[0] + a2 * lp_p[0],
@@ -179,7 +179,11 @@ fn svf_coefficients(
             let a2 = a * a;
             let hp_p = [1.0, -2.0, 1.0];
             let bp_p = [g_prime, 0.0, -g_prime];
-            let lp_p = [g_prime * g_prime, 2.0 * g_prime * g_prime, g_prime * g_prime];
+            let lp_p = [
+                g_prime * g_prime,
+                2.0 * g_prime * g_prime,
+                g_prime * g_prime,
+            ];
             // H = a^2*HP' + k*a*(a + 1 - a^2)*BP' + LP'.
             let mix_bp = k * a * (a + 1.0 - a2);
             let b = [
@@ -336,7 +340,9 @@ impl SvFilter {
             .param
             .view()
             .into_shape_with_order((1, n_params, self.n_out, self.n_in))
-            .map_err(|e| AutodiffError::Message(format!("SvFilter: failed to reshape param: {e}")))?;
+            .map_err(|e| {
+                AutodiffError::Message(format!("SvFilter: failed to reshape param: {e}"))
+            })?;
 
         let mut b = Array4::zeros((1, 3, self.n_out, self.n_in));
         let mut a = Array4::zeros((1, 3, self.n_out, self.n_in));

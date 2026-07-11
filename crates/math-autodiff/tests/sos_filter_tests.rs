@@ -1,9 +1,5 @@
 use approx::assert_relative_eq;
-use math_audio_autodiff::{
-    iir::sos_filter::SosFilter,
-    module::DiffModule,
-    tensor::DiffTensor,
-};
+use math_audio_autodiff::{iir::sos_filter::SosFilter, module::DiffModule, tensor::DiffTensor};
 use ndarray::{Array3, Array4};
 use num_complex::Complex;
 

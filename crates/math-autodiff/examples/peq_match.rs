@@ -51,7 +51,8 @@ fn set_peq_params(
         .param
         .view_mut()
         .into_shape_with_order((N_SECTIONS, 3, N_CHANNELS))?;
-    for (section, (&fc, (&q, &gain_db))) in fcs.iter().zip(qs.iter().zip(gains_db.iter())).enumerate()
+    for (section, (&fc, (&q, &gain_db))) in
+        fcs.iter().zip(qs.iter().zip(gains_db.iter())).enumerate()
     {
         view[[section, 0, 0]] = fc_to_raw(fc, FS);
         view[[section, 1, 0]] = q_to_raw(q);
@@ -107,11 +108,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         &[0.0, 0.0, 0.0],
     )?;
 
-    let mut model = Series::new(vec![
-        Box::new(fft),
-        Box::new(init_peq),
-        Box::new(magnitude),
-    ])?;
+    let mut model = Series::new(vec![Box::new(fft), Box::new(init_peq), Box::new(magnitude)])?;
 
     let sgd = Sgd::new(LEARNING_RATE);
 
@@ -125,7 +122,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         let grad = mse_loss_backward(&pred, &target)?;
         model.backward(&input, &pred, &grad)?;
-        let grads_owned: Vec<ArrayD<f64>> = model.gradients().iter().map(|g| (*g).clone()).collect();
+        let grads_owned: Vec<ArrayD<f64>> =
+            model.gradients().iter().map(|g| (*g).clone()).collect();
         let mut params = model.parameters_mut();
         let grads: Vec<&ArrayD<f64>> = grads_owned.iter().collect();
         sgd.step(&mut params[..], &grads[..])?;

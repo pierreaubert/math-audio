@@ -87,11 +87,9 @@ fn delay_gradient_matches_finite_difference() {
     let n_out = 2;
     let n_in = 3;
     let mut delay = Delay::new(NFFT, n_out, n_in, 0.0).unwrap();
-    delay.param = ArrayD::from_shape_vec(
-        IxDyn(&[n_out, n_in]),
-        vec![0.2, -0.5, 1.0, -0.7, 0.9, 0.1],
-    )
-    .unwrap();
+    delay.param =
+        ArrayD::from_shape_vec(IxDyn(&[n_out, n_in]), vec![0.2, -0.5, 1.0, -0.7, 0.9, 0.1])
+            .unwrap();
 
     let input = random_spectrum(&[1, n_bins, n_in]);
     let output = delay.forward(&input).expect("forward should succeed");

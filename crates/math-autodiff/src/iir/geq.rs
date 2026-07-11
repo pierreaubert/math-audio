@@ -134,12 +134,7 @@ impl GraphicEq {
     /// off-diagonal couplings are set to a zero-response section
     /// (`b = [0, 0, 0]`, `a = [1, 0, 0]`) so that the cascade response stays
     /// finite and the output channel matrix remains diagonal.
-    fn fill_sos_param(
-        param: &mut ArrayD<f64>,
-        frequencies: &[f64],
-        gains: &ArrayD<f64>,
-        fs: f64,
-    ) {
+    fn fill_sos_param(param: &mut ArrayD<f64>, frequencies: &[f64], gains: &ArrayD<f64>, fs: f64) {
         let n_bands = frequencies.len();
         let n_channels = gains.shape()[1];
         param.fill(0.0);
@@ -164,7 +159,12 @@ impl GraphicEq {
 
     /// Rebuild the inner SOS coefficients from the current gain parameters.
     fn rebuild_inner(&mut self) {
-        Self::fill_sos_param(&mut self.inner.param, &self.frequencies, &self.param, self.fs);
+        Self::fill_sos_param(
+            &mut self.inner.param,
+            &self.frequencies,
+            &self.param,
+            self.fs,
+        );
     }
 
     /// Build a fresh inner SOS filter reflecting the current parameters.

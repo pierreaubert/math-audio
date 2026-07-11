@@ -72,28 +72,25 @@ fn svf_forward_matches_hand_built_sos() {
         (SvfType::Lowshelf, 1_000.0, 1.0 / 0.707, 6.0),
         (SvfType::Highshelf, 1_000.0, 1.0 / 0.707, 6.0),
     ] {
-        let mut svf = SvFilter::new(NFFT, FS, 1, 1, filter_type, ALIAS_DECAY_DB)
-            .expect("valid svf filter");
+        let mut svf =
+            SvFilter::new(NFFT, FS, 1, 1, filter_type, ALIAS_DECAY_DB).expect("valid svf filter");
         set_svf_param(&mut svf, fc_hz, R, gain_db);
 
         let input = ones_spectrum(&[1, n_bins, 1]);
         let svf_output = svf.forward(&input).expect("svf forward should succeed");
 
         // Build an equivalent SOS filter using the SVF's computed biquad coefficients.
-        let mut sos_filter = math_audio_autodiff::iir::sos_filter::SosFilter::new(
-            NFFT,
-            1,
-            1,
-            1,
-            ALIAS_DECAY_DB,
-        )
-        .expect("valid sos filter");
+        let mut sos_filter =
+            math_audio_autodiff::iir::sos_filter::SosFilter::new(NFFT, 1, 1, 1, ALIAS_DECAY_DB)
+                .expect("valid sos filter");
         let (b, a) = svf.coefficients();
         for tap in 0..3 {
             sos_filter.param[[0, tap, 0, 0]] = b[tap];
             sos_filter.param[[0, 3 + tap, 0, 0]] = a[tap];
         }
-        let sos_output = sos_filter.forward(&input).expect("sos forward should succeed");
+        let sos_output = sos_filter
+            .forward(&input)
+            .expect("sos forward should succeed");
 
         for bin in [0, 10, 50, 100, 200, n_bins - 1] {
             assert!(
@@ -110,8 +107,8 @@ fn svf_forward_matches_hand_built_sos() {
 #[test]
 fn svf_gradient_finite_difference_lowpass() {
     let n_bins = NFFT / 2 + 1;
-    let mut filter = SvFilter::new(NFFT, FS, 1, 1, SvfType::Lowpass, ALIAS_DECAY_DB)
-        .expect("valid svf filter");
+    let mut filter =
+        SvFilter::new(NFFT, FS, 1, 1, SvfType::Lowpass, ALIAS_DECAY_DB).expect("valid svf filter");
     set_svf_param(&mut filter, 1_000.0, 1.0 / 0.707, 0.0);
 
     let target = DiffTensor::from_array(
@@ -148,7 +145,9 @@ fn svf_gradient_finite_difference_lowpass() {
         param_minus[[0, p, 0, 0]] -= epsilon;
         let mut filter_minus = filter.clone();
         filter_minus.param = param_minus;
-        let out_minus = filter_minus.forward(&input).expect("forward should succeed");
+        let out_minus = filter_minus
+            .forward(&input)
+            .expect("forward should succeed");
         let loss_minus = mse_loss(&out_minus, &target);
 
         let finite_diff = (loss_plus - loss_minus) / (2.0 * epsilon);
@@ -170,8 +169,8 @@ fn svf_gradient_finite_difference_lowpass() {
 #[test]
 fn svf_gradient_finite_difference_peak() {
     let n_bins = NFFT / 2 + 1;
-    let mut filter = SvFilter::new(NFFT, FS, 1, 1, SvfType::Peak, ALIAS_DECAY_DB)
-        .expect("valid svf filter");
+    let mut filter =
+        SvFilter::new(NFFT, FS, 1, 1, SvfType::Peak, ALIAS_DECAY_DB).expect("valid svf filter");
     set_svf_param(&mut filter, 1_000.0, 1.0 / 2.0, 6.0);
 
     let target = DiffTensor::from_array(
@@ -208,7 +207,9 @@ fn svf_gradient_finite_difference_peak() {
         param_minus[[0, p, 0, 0]] -= epsilon;
         let mut filter_minus = filter.clone();
         filter_minus.param = param_minus;
-        let out_minus = filter_minus.forward(&input).expect("forward should succeed");
+        let out_minus = filter_minus
+            .forward(&input)
+            .expect("forward should succeed");
         let loss_minus = mse_loss(&out_minus, &target);
 
         let finite_diff = (loss_plus - loss_minus) / (2.0 * epsilon);

@@ -270,7 +270,14 @@ fn assert_backward_matches_finite_difference_3d<M: DiffModule<f64>>(
     let shape: Vec<usize> = input.data.shape().to_vec();
     assert_eq!(shape.len(), 3);
     let (batch, mid, channels) = (shape[0], shape[1], shape[2]);
-    assert_eq!(mid, if is_spectrum_input { nfft / 2 + 1 } else { nfft });
+    assert_eq!(
+        mid,
+        if is_spectrum_input {
+            nfft / 2 + 1
+        } else {
+            nfft
+        }
+    );
 
     for b in 0..batch {
         for k in 0..mid {
@@ -303,7 +310,9 @@ fn assert_backward_matches_finite_difference_3d<M: DiffModule<f64>>(
                         grad_output,
                     );
                     let loss_minus = linear_loss(
-                        &module.forward(&minus).expect("minus forward should succeed"),
+                        &module
+                            .forward(&minus)
+                            .expect("minus forward should succeed"),
                         grad_output,
                     );
                     let numerical = (loss_plus - loss_minus) / (2.0 * epsilon);
@@ -331,14 +340,24 @@ fn multi_channel_fft_roundtrip_is_identity() {
     assert_eq!(spectrum.data.shape(), &[batch, nfft / 2 + 1, channels]);
 
     let ifft = Ifft::with_channels(nfft, channels);
-    let recovered = ifft.forward(&spectrum).expect("IFFT forward should succeed");
+    let recovered = ifft
+        .forward(&spectrum)
+        .expect("IFFT forward should succeed");
     assert_eq!(recovered.data.shape(), &[batch, nfft, channels]);
 
     for b in 0..batch {
         for c in 0..channels {
-            assert_abs_diff_eq!(recovered.data[[b, 0, c]].re, input.data[[b, 0, c]].re, epsilon = 1e-9);
+            assert_abs_diff_eq!(
+                recovered.data[[b, 0, c]].re,
+                input.data[[b, 0, c]].re,
+                epsilon = 1e-9
+            );
             for t in 1..nfft {
-                assert_abs_diff_eq!(recovered.data[[b, t, c]].re, input.data[[b, t, c]].re, epsilon = 1e-9);
+                assert_abs_diff_eq!(
+                    recovered.data[[b, t, c]].re,
+                    input.data[[b, t, c]].re,
+                    epsilon = 1e-9
+                );
             }
         }
     }

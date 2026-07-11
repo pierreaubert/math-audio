@@ -210,7 +210,9 @@ impl DiffModule<f64> for Fft {
 
         let grad_input = grad_input
             .into_shape_with_order(IxDyn(&output_shape_for(grad_shape, self.nfft)))
-            .map_err(|e| AutodiffError::Message(format!("Fft: failed to reshape grad_input: {e}")))?;
+            .map_err(|e| {
+                AutodiffError::Message(format!("Fft: failed to reshape grad_input: {e}"))
+            })?;
 
         Ok(DiffTensor::from_array(grad_input))
     }
@@ -377,7 +379,9 @@ impl DiffModule<f64> for Ifft {
 
         let grad_input = grad_input
             .into_shape_with_order(IxDyn(&output_shape_for(grad_shape, self.n_bins())))
-            .map_err(|e| AutodiffError::Message(format!("Ifft: failed to reshape grad_input: {e}")))?;
+            .map_err(|e| {
+                AutodiffError::Message(format!("Ifft: failed to reshape grad_input: {e}"))
+            })?;
 
         Ok(DiffTensor::from_array(grad_input))
     }
@@ -478,7 +482,9 @@ impl DiffModule<f64> for FftAntiAlias {
             .data
             .view()
             .into_shape_with_order((batch, time, channels))
-            .map_err(|e| AutodiffError::Message(format!("FftAntiAlias: failed to reshape input: {e}")))?;
+            .map_err(|e| {
+                AutodiffError::Message(format!("FftAntiAlias: failed to reshape input: {e}"))
+            })?;
         let mut output = ArrayD::zeros(IxDyn(&[batch, self.n_bins(), channels]));
 
         for b in 0..batch {
@@ -497,7 +503,9 @@ impl DiffModule<f64> for FftAntiAlias {
 
         let output = output
             .into_shape_with_order(IxDyn(&output_shape_for(input_shape, self.n_bins())))
-            .map_err(|e| AutodiffError::Message(format!("FftAntiAlias: failed to reshape output: {e}")))?;
+            .map_err(|e| {
+                AutodiffError::Message(format!("FftAntiAlias: failed to reshape output: {e}"))
+            })?;
 
         Ok(DiffTensor::from_array(output))
     }
@@ -531,7 +539,9 @@ impl DiffModule<f64> for FftAntiAlias {
             .data
             .view()
             .into_shape_with_order((batch, n_bins, channels))
-            .map_err(|e| AutodiffError::Message(format!("FftAntiAlias: failed to reshape grad: {e}")))?;
+            .map_err(|e| {
+                AutodiffError::Message(format!("FftAntiAlias: failed to reshape grad: {e}"))
+            })?;
         let mut grad_input = ArrayD::zeros(IxDyn(&[batch, self.nfft, channels]));
 
         for b in 0..batch {
@@ -558,7 +568,9 @@ impl DiffModule<f64> for FftAntiAlias {
 
         let grad_input = grad_input
             .into_shape_with_order(IxDyn(&output_shape_for(grad_shape, self.nfft)))
-            .map_err(|e| AutodiffError::Message(format!("FftAntiAlias: failed to reshape grad_input: {e}")))?;
+            .map_err(|e| {
+                AutodiffError::Message(format!("FftAntiAlias: failed to reshape grad_input: {e}"))
+            })?;
 
         Ok(DiffTensor::from_array(grad_input))
     }
@@ -660,7 +672,9 @@ impl DiffModule<f64> for IfftAntiAlias {
             .data
             .view()
             .into_shape_with_order((batch, n_bins, channels))
-            .map_err(|e| AutodiffError::Message(format!("IfftAntiAlias: failed to reshape input: {e}")))?;
+            .map_err(|e| {
+                AutodiffError::Message(format!("IfftAntiAlias: failed to reshape input: {e}"))
+            })?;
         let mut output = ArrayD::zeros(IxDyn(&[batch, self.nfft, channels]));
         let scale = nfft_as_f64(self.nfft);
 
@@ -682,7 +696,9 @@ impl DiffModule<f64> for IfftAntiAlias {
 
         let output = output
             .into_shape_with_order(IxDyn(&output_shape_for(input_shape, self.nfft)))
-            .map_err(|e| AutodiffError::Message(format!("IfftAntiAlias: failed to reshape output: {e}")))?;
+            .map_err(|e| {
+                AutodiffError::Message(format!("IfftAntiAlias: failed to reshape output: {e}"))
+            })?;
 
         Ok(DiffTensor::from_array(output))
     }
@@ -715,7 +731,9 @@ impl DiffModule<f64> for IfftAntiAlias {
             .data
             .view()
             .into_shape_with_order((batch, time, channels))
-            .map_err(|e| AutodiffError::Message(format!("IfftAntiAlias: failed to reshape grad: {e}")))?;
+            .map_err(|e| {
+                AutodiffError::Message(format!("IfftAntiAlias: failed to reshape grad: {e}"))
+            })?;
         let mut grad_input = ArrayD::zeros(IxDyn(&[batch, self.n_bins(), channels]));
 
         for b in 0..batch {
@@ -741,7 +759,9 @@ impl DiffModule<f64> for IfftAntiAlias {
 
         let grad_input = grad_input
             .into_shape_with_order(IxDyn(&output_shape_for(grad_shape, self.n_bins())))
-            .map_err(|e| AutodiffError::Message(format!("IfftAntiAlias: failed to reshape grad_input: {e}")))?;
+            .map_err(|e| {
+                AutodiffError::Message(format!("IfftAntiAlias: failed to reshape grad_input: {e}"))
+            })?;
 
         Ok(DiffTensor::from_array(grad_input))
     }

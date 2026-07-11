@@ -11,8 +11,7 @@
 #![allow(
     clippy::uninlined_format_args,
     reason = "format strings are clearer with explicit arguments in error messages"
-)
-]
+)]
 
 use ndarray::{ArrayD, IxDyn};
 
@@ -94,11 +93,7 @@ fn raw_to_q(q_raw: f64) -> f64 {
 /// Derivative of [`raw_to_q`] w.r.t. the raw Q parameter.
 fn raw_to_q_derivative(q_raw: f64) -> f64 {
     let q = q_raw.exp();
-    if q <= Q_MIN || q >= Q_MAX {
-        0.0
-    } else {
-        q
-    }
+    if q <= Q_MIN || q >= Q_MAX { 0.0 } else { q }
 }
 
 /// Map a raw gain parameter to a physical gain in dB.

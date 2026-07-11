@@ -1,10 +1,6 @@
 use approx::{assert_abs_diff_eq, assert_relative_eq};
 use math_audio_autodiff::{
-    delay::ParallelDelay,
-    gain::Gain,
-    module::DiffModule,
-    recursion::Recursion,
-    tensor::DiffTensor,
+    delay::ParallelDelay, gain::Gain, module::DiffModule, recursion::Recursion, tensor::DiffTensor,
 };
 use ndarray::{Array3, ArrayD, IxDyn};
 use num_complex::Complex;
