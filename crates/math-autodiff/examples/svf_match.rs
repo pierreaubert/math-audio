@@ -69,7 +69,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         SvfType::Peak,
         ALIAS_DECAY_DB,
     )?;
-    set_svf_params(&mut init_svf, 700.0, 1.0 / 1.0, 2.0);
+    set_svf_params(&mut init_svf, 700.0, 1.0, 2.0);
 
     let mut model = Series::new(vec![Box::new(fft), Box::new(init_svf), Box::new(magnitude)])?;
 

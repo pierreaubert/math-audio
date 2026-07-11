@@ -22,7 +22,7 @@ differentiation framework is required.
 | `iir::geq` | Graphic EQ with fixed ISO frequencies and learnable per-band gains. |
 | `iir::peq` | Parametric EQ with learnable frequency, Q, and gain per section. |
 | `system` | `Series`, `Parallel`, and `Shell` compositions. |
-| `signals` | Signal generators: impulse, step, noise, sine sweep, wav file loader. |
+| `signals` | Signal generators: impulse, sine, linear sweep, uniform white noise, exponential decay, velvet noise. |
 | `loss` | MSE loss and backward helper. |
 | `optim` | Simple SGD optimizer. |
 

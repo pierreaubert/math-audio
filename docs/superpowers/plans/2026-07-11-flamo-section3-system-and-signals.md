@@ -90,7 +90,7 @@ pub fn signal_gallery(
 - `Impulse`: first sample is 1.0, rest 0.0.
 - `Sine`: `sin(2π * freq_hz * n / fs)`.
 - `Sweep`: linear chirp from `f0_hz` to `f1_hz` using `scipy.signal.chirp` equivalent (`sin(2π * (f0 + (f1-f0) * t / (2*T)) * t)`).
-- `WhiteNoise`: independent `Normal(0, 1)` samples using `rand`.
+- `WhiteNoise`: independent uniform `[-1, 1)` samples using `rand`.
 - `ExpDecay`: `exp(-rate * n / fs)`.
 - `VelvetNoise`: Poisson-spaced impulses with random signs at average spacing `fs/density`, first impulse at sample 0, clamped to bounds.
 
