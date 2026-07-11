@@ -13,19 +13,28 @@ use ndarray::{ArrayD, ArrayView2, ArrayViewMut2, Axis, IxDyn};
 use num_complex::Complex;
 
 use crate::error::AutodiffError;
-use crate::module::DiffModule;
+use crate::module::{DiffModule, validate_spectral_gradient_shape};
 use crate::tensor::DiffTensor;
 
 /// Softplus mapping raw parameters to positive delay samples.
 #[inline]
 fn softplus(x: f64) -> f64 {
-    (1.0 + x.exp()).ln()
+    if x > 0.0 {
+        x + (-x).exp().ln_1p()
+    } else {
+        x.exp().ln_1p()
+    }
 }
 
 /// Derivative of softplus.
 #[inline]
 fn softplus_derivative(x: f64) -> f64 {
-    1.0 / (1.0 + (-x).exp())
+    if x >= 0.0 {
+        1.0 / (1.0 + (-x).exp())
+    } else {
+        let exp_x = x.exp();
+        exp_x / (1.0 + exp_x)
+    }
 }
 
 /// Map a raw delay parameter to a positive delay in samples.
@@ -34,7 +43,16 @@ fn softplus_derivative(x: f64) -> f64 {
 /// minimum (often zero) delay.
 #[inline]
 fn raw_to_tau(raw: f64, tau_min: f64) -> f64 {
-    softplus(raw) - softplus(0.0) + tau_min
+    tau_min + (softplus(raw) - softplus(0.0)).max(0.0)
+}
+
+#[inline]
+fn raw_to_tau_derivative(raw: f64) -> f64 {
+    if raw < 0.0 {
+        0.0
+    } else {
+        softplus_derivative(raw)
+    }
 }
 
 /// Build the complex delay frequency response for one delay value.
@@ -115,6 +133,16 @@ impl Delay {
                 "Delay: nfft must be greater than 0".to_string(),
             ));
         }
+        if n_out == 0 || n_in == 0 {
+            return Err(AutodiffError::Message(
+                "Delay: channel counts must be greater than 0".to_string(),
+            ));
+        }
+        if !tau_min.is_finite() {
+            return Err(AutodiffError::Message(
+                "Delay: tau_min must be finite".to_string(),
+            ));
+        }
         Ok(Self {
             nfft,
             n_out,
@@ -185,18 +213,12 @@ impl DiffModule<f64> for Delay {
     ) -> Result<DiffTensor<f64>, AutodiffError> {
         let input_shape = input.data.shape();
         let grad_shape = grad_output.data.shape();
-        if input_shape.len() < 3 || grad_shape.len() < 3 {
-            return Err(AutodiffError::Message(
-                "Delay::backward: input and grad_output must have at least 3 dimensions"
-                    .to_string(),
-            ));
-        }
+        validate_spectral_gradient_shape("Delay::backward", input_shape, grad_shape, self.n_out)?;
         let n_bins = input_shape[1];
         let n_in = input_shape[2];
-        if grad_shape[1] != n_bins || grad_shape[2] != self.n_out {
+        if n_bins != self.n_bins() || n_in != self.n_in {
             return Err(AutodiffError::Message(format!(
-                "Delay::backward: grad_output shape {:?} incompatible with (..., {}, {})",
-                grad_shape, n_bins, self.n_out
+                "Delay::backward: input shape {input_shape:?} is incompatible with the module"
             )));
         }
 
@@ -210,7 +232,7 @@ impl DiffModule<f64> for Delay {
             for in_ch in 0..n_in {
                 let raw = param[[out_ch, in_ch]];
                 let tau = raw_to_tau(raw, self.tau_min);
-                let dtau_draw = softplus_derivative(raw);
+                let dtau_draw = raw_to_tau_derivative(raw);
                 let h = delay_response(tau, self.nfft)?;
 
                 for (bin, &h_val) in h.iter().enumerate() {
@@ -283,6 +305,16 @@ impl ParallelDelay {
         if nfft == 0 {
             return Err(AutodiffError::Message(
                 "ParallelDelay: nfft must be greater than 0".to_string(),
+            ));
+        }
+        if n_channels == 0 {
+            return Err(AutodiffError::Message(
+                "ParallelDelay: n_channels must be greater than 0".to_string(),
+            ));
+        }
+        if !tau_min.is_finite() {
+            return Err(AutodiffError::Message(
+                "ParallelDelay: tau_min must be finite".to_string(),
             ));
         }
         Ok(Self {
@@ -365,7 +397,7 @@ impl DiffModule<f64> for ParallelDelay {
         for ch in 0..n_channels {
             let raw = self.param[[ch]];
             let tau = raw_to_tau(raw, self.tau_min);
-            let dtau_draw = softplus_derivative(raw);
+            let dtau_draw = raw_to_tau_derivative(raw);
             let h = delay_response(tau, self.nfft)?;
 
             for (bin, &h_val) in h.iter().enumerate() {

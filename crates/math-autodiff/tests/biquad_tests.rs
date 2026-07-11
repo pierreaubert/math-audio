@@ -101,6 +101,72 @@ fn biquad_forward_matches_math_iir_fir_response() {
 }
 
 #[test]
+fn biquad_default_gain_is_trainable_unity() {
+    let n_bins = NFFT / 2 + 1;
+    let biquad = Biquad::new(NFFT, FS, 1, BiquadFilterType::Lowpass, 1, 1, ALIAS_DECAY_DB)
+        .expect("valid biquad");
+    let input = ones_spectrum(&[1, n_bins, 1]);
+    let output = biquad.forward(&input).expect("forward should succeed");
+    assert_abs_diff_eq!(output.data[[0, 0, 0]].norm(), 1.0, epsilon = 1e-9);
+}
+
+#[test]
+fn biquad_zero_linear_gain_has_a_nonzero_gradient() {
+    let n_bins = NFFT / 2 + 1;
+    let mut biquad =
+        Biquad::new(NFFT, FS, 1, BiquadFilterType::Lowpass, 1, 1, ALIAS_DECAY_DB).unwrap();
+    biquad.param[[0, 0, 0, 0]] = fc_raw_from_hz(1_000.0, FS);
+    biquad.param[[0, 1, 0, 0]] = 0.0;
+    let input = ones_spectrum(&[1, n_bins, 1]);
+    let output = biquad.forward(&input).unwrap();
+    let grad_output = ones_spectrum(&[1, n_bins, 1]);
+    biquad.backward(&input, &output, &grad_output).unwrap();
+    assert!(biquad.param_grad[[0, 1, 0, 0]].abs() > 1.0);
+}
+
+#[test]
+fn bandpass_gradient_is_correct_when_cutoffs_are_reversed() {
+    let n_bins = NFFT / 2 + 1;
+    let mut biquad = Biquad::new(
+        NFFT,
+        FS,
+        1,
+        BiquadFilterType::Bandpass,
+        1,
+        1,
+        ALIAS_DECAY_DB,
+    )
+    .expect("valid bandpass");
+    biquad.param[[0, 0, 0, 0]] = fc_raw_from_hz(5_000.0, FS);
+    biquad.param[[0, 1, 0, 0]] = fc_raw_from_hz(800.0, FS);
+    biquad.param[[0, 2, 0, 0]] = gain_raw_from_db(0.0);
+
+    let input = complex_spectrum(&[1, n_bins, 1]);
+    let output = biquad.forward(&input).unwrap();
+    let grad_output = DiffTensor::from_array(output.data.clone() * 2.0);
+    biquad.zero_grad();
+    biquad.backward(&input, &output, &grad_output).unwrap();
+    let analytical = biquad.param_grad[[0, 0, 0, 0]];
+
+    let eps = 1e-6;
+    let mut plus = biquad.clone();
+    plus.param[[0, 0, 0, 0]] += eps;
+    let plus_output = plus.forward(&input).unwrap();
+    let plus_loss = plus_output.data.iter().map(Complex::norm_sqr).sum::<f64>();
+    let mut minus = biquad.clone();
+    minus.param[[0, 0, 0, 0]] -= eps;
+    let minus_output = minus.forward(&input).unwrap();
+    let minus_loss = minus_output.data.iter().map(Complex::norm_sqr).sum::<f64>();
+    let numerical = (plus_loss - minus_loss) / (2.0 * eps);
+
+    let scale = numerical.abs().max(1.0);
+    assert!(
+        (analytical - numerical).abs() / scale < 1e-5,
+        "analytical={analytical}, numerical={numerical}"
+    );
+}
+
+#[test]
 fn biquad_gradient_finite_difference() {
     let n_bins = NFFT / 2 + 1;
     let mut biquad = Biquad::new(NFFT, FS, 1, BiquadFilterType::Lowpass, 1, 1, ALIAS_DECAY_DB)

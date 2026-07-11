@@ -66,6 +66,17 @@ fn velvet_noise_has_expected_impulse_count() {
 }
 
 #[test]
+#[should_panic(expected = "must not exceed the sample rate")]
+fn velvet_noise_rejects_super_nyquist_density() {
+    let _ = signal_gallery(
+        SignalType::VelvetNoise { density: 96_000.0 },
+        128,
+        1,
+        48_000.0,
+    );
+}
+
+#[test]
 fn white_noise_is_non_zero_and_bounded() {
     let signal = signal_gallery(SignalType::WhiteNoise, N_SAMPLES, N_CHANNELS, FS);
     for sample in signal.data.iter() {

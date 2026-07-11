@@ -256,3 +256,46 @@ fn peq_new_rejects_invalid_args() {
     assert!(ParametricEq::new(NFFT, FS, 1, 0, PeqBandType::Peak, ALIAS_DECAY_DB).is_err());
     assert!(ParametricEq::new(NFFT, 0.0, 1, 1, PeqBandType::Peak, ALIAS_DECAY_DB).is_err());
 }
+
+#[test]
+fn peq_gradient_remains_accurate_near_the_top_of_the_audio_band() {
+    let n_bins = NFFT / 2 + 1;
+    let mut peq = ParametricEq::new(NFFT, FS, 1, 1, PeqBandType::Peak, ALIAS_DECAY_DB).unwrap();
+    peq.param[[0, 0, 0]] = fc_raw_from_hz(20_000.0, FS);
+    peq.param[[0, 1, 0]] = q_raw_from_q(19.0);
+    peq.param[[0, 2, 0]] = 12.0;
+    let input = complex_spectrum(&[1, n_bins, 1]);
+    let output = peq.forward(&input).unwrap();
+    let grad_output = DiffTensor::from_array(output.data.clone() * 2.0);
+    peq.zero_grad();
+    peq.backward(&input, &output, &grad_output).unwrap();
+
+    let eps = 1e-5;
+    for p in 0..3 {
+        let mut plus = peq.clone();
+        plus.param[[0, p, 0]] += eps;
+        let plus_loss = plus
+            .forward(&input)
+            .unwrap()
+            .data
+            .iter()
+            .map(Complex::norm_sqr)
+            .sum::<f64>();
+        let mut minus = peq.clone();
+        minus.param[[0, p, 0]] -= eps;
+        let minus_loss = minus
+            .forward(&input)
+            .unwrap()
+            .data
+            .iter()
+            .map(Complex::norm_sqr)
+            .sum::<f64>();
+        let numerical = (plus_loss - minus_loss) / (2.0 * eps);
+        let analytical = peq.param_grad[[0, p, 0]];
+        let scale = numerical.abs().max(1.0);
+        assert!(
+            (analytical - numerical).abs() / scale < 2e-5,
+            "p={p}: analytical={analytical}, numerical={numerical}"
+        );
+    }
+}

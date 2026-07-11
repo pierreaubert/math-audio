@@ -17,7 +17,7 @@ use ndarray::{ArrayD, IxDyn};
 
 use crate::error::AutodiffError;
 use crate::iir::sos_filter::SosFilter;
-use crate::module::DiffModule;
+use crate::module::{DiffModule, validate_spectral_gradient_shape};
 use crate::tensor::DiffTensor;
 
 /// Minimum allowed quality factor.
@@ -139,13 +139,19 @@ fn compute_peq_coeffs_with_grads(
     fs: f64,
     band_type: PeqBandType,
 ) -> SectionCoeffs {
-    let eps = 1e-5;
     let (b, a) = compute_peq_coeffs(fc, q, gain_db, fs, band_type);
     let mut coeffs = SectionCoeffs::zeros();
     coeffs.b = b;
     coeffs.a = a;
 
     for p in 0..3 {
+        let value = match p {
+            0 => fc,
+            1 => q,
+            2 => gain_db,
+            _ => unreachable!(),
+        };
+        let eps = f64::EPSILON.cbrt() * value.abs().max(1.0);
         let (fc_plus, q_plus, gain_plus) = match p {
             0 => (fc + eps, q, gain_db),
             1 => (fc, q + eps, gain_db),
@@ -364,6 +370,12 @@ impl DiffModule<f64> for ParametricEq {
         let input_shape = input.data.shape();
         let grad_shape = grad_output.data.shape();
         let output_shape = output.data.shape();
+        validate_spectral_gradient_shape(
+            "ParametricEq::backward",
+            input_shape,
+            grad_shape,
+            self.n_channels,
+        )?;
         if grad_shape != output_shape {
             return Err(AutodiffError::Message(format!(
                 "ParametricEq::backward: grad_output shape {:?} does not match output shape {:?}",

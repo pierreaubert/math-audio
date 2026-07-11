@@ -22,7 +22,7 @@ use num_complex::Complex;
 
 use crate::error::AutodiffError;
 use crate::iir::response::{sos_frequency_response, sos_frequency_response_jacobian};
-use crate::module::DiffModule;
+use crate::module::{DiffModule, validate_spectral_gradient_shape};
 use crate::tensor::DiffTensor;
 
 /// Split the packed SOS parameter tensor into separate b and a coefficient tensors.
@@ -70,7 +70,8 @@ pub struct SosFilter {
 }
 
 impl SosFilter {
-    /// Create a new SOS filter module with zero-initialized coefficients and gradients.
+    /// Create a finite zero-response SOS filter with unit denominator leading
+    /// coefficients and zero-initialized gradients.
     ///
     /// # Errors
     ///
@@ -102,13 +103,26 @@ impl SosFilter {
                 "SosFilter: n_in must be greater than 0".to_string(),
             ));
         }
+        if !alias_decay_db.is_finite() {
+            return Err(AutodiffError::Message(
+                "SosFilter: alias_decay_db must be finite".to_string(),
+            ));
+        }
+        let mut param = ArrayD::zeros(IxDyn(&[n_sections, 6, n_out, n_in]));
+        for section in 0..n_sections {
+            for out_ch in 0..n_out {
+                for in_ch in 0..n_in {
+                    param[[section, 3, out_ch, in_ch]] = 1.0;
+                }
+            }
+        }
         Ok(Self {
             nfft,
             n_sections,
             n_out,
             n_in,
             alias_decay_db,
-            param: ArrayD::zeros(IxDyn(&[n_sections, 6, n_out, n_in])),
+            param,
             param_grad: ArrayD::zeros(IxDyn(&[n_sections, 6, n_out, n_in])),
         })
     }
@@ -180,12 +194,12 @@ impl DiffModule<f64> for SosFilter {
     ) -> Result<DiffTensor<f64>, AutodiffError> {
         let input_shape = input.data.shape();
         let grad_shape = grad_output.data.shape();
-        if input_shape.len() < 3 || grad_shape.len() < 3 {
-            return Err(AutodiffError::Message(
-                "SosFilter::backward: input and grad_output must have at least 3 dimensions"
-                    .to_string(),
-            ));
-        }
+        validate_spectral_gradient_shape(
+            "SosFilter::backward",
+            input_shape,
+            grad_shape,
+            self.n_out,
+        )?;
         let n_bins = input_shape[1];
         let n_in = input_shape[2];
         let n_out = grad_shape[2];
@@ -250,16 +264,8 @@ impl DiffModule<f64> for SosFilter {
                             let term = dl_dh[[bin, out_ch, in_ch]].conj();
                             let db_term = term * dh_db[[bin, section, tap, out_ch, in_ch]];
                             let da_term = term * dh_da[[bin, section, tap, out_ch, in_ch]];
-                            // Non-finite Jacobian terms occur at frequencies where the
-                            // numerator/denominator response is exactly zero (e.g. lowpass
-                            // at Nyquist); their contribution is skipped because the loss
-                            // gradient at those bins is also zero for practical targets.
-                            if db_term.is_finite() {
-                                accum_b += db_term.re;
-                            }
-                            if da_term.is_finite() {
-                                accum_a += da_term.re;
-                            }
+                            accum_b += db_term.re;
+                            accum_a += da_term.re;
                         }
                         param_grad[[section, tap, out_ch, in_ch]] += accum_b;
                         param_grad[[section, 3 + tap, out_ch, in_ch]] += accum_a;

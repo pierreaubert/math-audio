@@ -44,6 +44,39 @@ fn parallel_delay_forward_matches_phase_rotation() {
 }
 
 #[test]
+fn delay_mapping_is_bounded_and_finite() {
+    let n_bins = NFFT / 2 + 1;
+    let input = DiffTensor::from_array(
+        Array3::<Complex<f64>>::from_elem((1, n_bins, 1), Complex::new(1.0, 0.0)).into_dyn(),
+    );
+    for raw in [-1_000.0, -2.0, 0.0] {
+        let mut delay = ParallelDelay::new(NFFT, 1, 0.0).unwrap();
+        delay.param[[0]] = raw;
+        let output = delay.forward(&input).unwrap();
+        assert!(output.data.iter().all(|value| value.is_finite()));
+        // A non-negative delay has a non-positive phase at the first bin.
+        assert!(
+            output.data[[0, 1, 0]].im <= 1e-12,
+            "raw={raw} mapped below tau_min"
+        );
+    }
+    let mut delay = ParallelDelay::new(NFFT, 1, 0.0).unwrap();
+    delay.param[[0]] = 1_000.0;
+    let output = delay.forward(&input).unwrap();
+    assert!(output.data.iter().all(|value| value.is_finite()));
+}
+
+#[test]
+fn delay_backward_rejects_mismatched_batch_shape() {
+    let n_bins = NFFT / 2 + 1;
+    let mut delay = Delay::new(NFFT, 1, 1, 0.0).unwrap();
+    let input = random_spectrum(&[2, n_bins, 1]);
+    let output = delay.forward(&input).unwrap();
+    let grad = random_spectrum(&[1, n_bins, 1]);
+    assert!(delay.backward(&input, &output, &grad).is_err());
+}
+
+#[test]
 fn parallel_delay_gradient_matches_finite_difference() {
     let n_bins = NFFT / 2 + 1;
     let mut delay = ParallelDelay::new(NFFT, 1, 0.0).unwrap();

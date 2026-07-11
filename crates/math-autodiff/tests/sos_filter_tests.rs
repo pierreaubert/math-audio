@@ -6,6 +6,34 @@ use num_complex::Complex;
 const NFFT: usize = 512;
 
 #[test]
+fn new_sos_filter_is_a_finite_zero_response() {
+    let n_bins = NFFT / 2 + 1;
+    let filter = SosFilter::new(NFFT, 2, 2, 2, 0.0).unwrap();
+    let input = DiffTensor::from_array(
+        Array3::<Complex<f64>>::from_elem((1, n_bins, 2), Complex::new(1.0, 0.5)).into_dyn(),
+    );
+    let output = filter.forward(&input).unwrap();
+    assert!(output.data.iter().all(|value| value.is_finite()));
+    assert!(output.data.iter().all(|value| value.norm() == 0.0));
+}
+
+#[test]
+fn zero_numerator_has_nonzero_trainable_gradient() {
+    let n_bins = NFFT / 2 + 1;
+    let mut filter = SosFilter::new(NFFT, 1, 1, 1, 0.0).unwrap();
+    let input = DiffTensor::from_array(
+        Array3::<Complex<f64>>::from_elem((1, n_bins, 1), Complex::new(1.0, 0.0)).into_dyn(),
+    );
+    let output = filter.forward(&input).unwrap();
+    let grad = DiffTensor::from_array(
+        Array3::<Complex<f64>>::from_elem((1, n_bins, 1), Complex::new(1.0, 0.0)).into_dyn(),
+    );
+    filter.backward(&input, &output, &grad).unwrap();
+    assert!(filter.param_grad[[0, 0, 0, 0]].is_finite());
+    assert!(filter.param_grad[[0, 0, 0, 0]].abs() > 1.0);
+}
+
+#[test]
 fn sos_filter_forward_matches_single_section() {
     let n_bins = NFFT / 2 + 1;
     let mut filter = SosFilter::new(NFFT, 1, 1, 1, 0.0).unwrap();

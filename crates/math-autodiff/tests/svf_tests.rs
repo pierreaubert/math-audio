@@ -107,6 +107,15 @@ fn svf_forward_matches_hand_built_sos() {
 }
 
 #[test]
+fn svf_default_parameters_are_inside_the_trainable_region() {
+    let filter =
+        SvFilter::new(NFFT, FS, 1, 1, SvfType::Lowpass, ALIAS_DECAY_DB).expect("valid svf");
+    assert!(filter.param[[0, 0, 0, 0]] > 1.0);
+    assert!(filter.param[[0, 0, 0, 0]] < FS * 0.499);
+    assert!(filter.param[[0, 1, 0, 0]] > 1e-6);
+}
+
+#[test]
 fn svf_gradient_finite_difference_lowpass() {
     let n_bins = NFFT / 2 + 1;
     let mut filter =
@@ -339,5 +348,45 @@ fn svf_forward_matches_math_iir_fir_process() {
                 expected
             );
         }
+    }
+}
+
+#[test]
+fn svf_gradient_remains_accurate_near_the_top_of_the_audio_band() {
+    let n_bins = NFFT / 2 + 1;
+    let mut filter = SvFilter::new(NFFT, FS, 1, 1, SvfType::Peak, ALIAS_DECAY_DB).unwrap();
+    set_svf_param(&mut filter, 20_000.0, 0.05, 12.0);
+    let input = complex_spectrum(&[1, n_bins, 1]);
+    let output = filter.forward(&input).unwrap();
+    let grad_output = DiffTensor::from_array(output.data.clone() * 2.0);
+    filter.zero_grad();
+    filter.backward(&input, &output, &grad_output).unwrap();
+
+    for (p, eps) in [(0, 1e-2), (1, 1e-6), (2, 1e-5)] {
+        let mut plus = filter.clone();
+        plus.param[[0, p, 0, 0]] += eps;
+        let plus_loss = plus
+            .forward(&input)
+            .unwrap()
+            .data
+            .iter()
+            .map(Complex::norm_sqr)
+            .sum::<f64>();
+        let mut minus = filter.clone();
+        minus.param[[0, p, 0, 0]] -= eps;
+        let minus_loss = minus
+            .forward(&input)
+            .unwrap()
+            .data
+            .iter()
+            .map(Complex::norm_sqr)
+            .sum::<f64>();
+        let numerical = (plus_loss - minus_loss) / (2.0 * eps);
+        let analytical = filter.param_grad[[0, p, 0, 0]];
+        let scale = numerical.abs().max(1.0);
+        assert!(
+            (analytical - numerical).abs() / scale < 2e-5,
+            "p={p}: analytical={analytical}, numerical={numerical}"
+        );
     }
 }

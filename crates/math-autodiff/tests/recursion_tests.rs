@@ -53,6 +53,18 @@ fn recursion_forward_is_finite_with_nonzero_feedback() {
 }
 
 #[test]
+fn recursion_backward_rejects_mismatched_frequency_shape() {
+    let feedforward = Gain::new(NFFT, 1, 1).unwrap();
+    let feedback = Gain::new(NFFT, 1, 1).unwrap();
+    let mut recursion = Recursion::new(Box::new(feedforward), Box::new(feedback)).unwrap();
+    let n_bins = NFFT / 2 + 1;
+    let input = complex_spectrum(&[1, n_bins, 1]);
+    let output = recursion.forward(&input).unwrap();
+    let grad = complex_spectrum(&[1, n_bins - 1, 1]);
+    assert!(recursion.backward(&input, &output, &grad).is_err());
+}
+
+#[test]
 fn recursion_with_zero_feedback_reduces_to_feedforward() {
     // If feedback H_fb = 0, Recursion forward equals feedforward forward,
     // and the parameter gradient must equal the feedforward-only gradient.

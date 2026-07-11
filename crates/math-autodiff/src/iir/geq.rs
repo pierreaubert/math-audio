@@ -9,34 +9,61 @@ use ndarray::{ArrayD, IxDyn};
 
 use crate::error::AutodiffError;
 use crate::iir::sos_filter::SosFilter;
-use crate::module::DiffModule;
+use crate::module::{DiffModule, validate_spectral_gradient_shape};
 use crate::tensor::DiffTensor;
 
 /// Default quality factor for the peaking biquad sections.
 pub const DEFAULT_Q: f64 = 1.0 / std::f64::consts::SQRT_2;
+const MIN_LINEAR_GAIN: f64 = 1e-3;
+const MAX_LINEAR_GAIN: f64 = 1e3;
 
 /// ISO octave center frequencies from 31.25 Hz to 16 kHz.
 const ISO_CENTER_FREQUENCIES: [f64; 10] = [
     31.25, 62.5, 125.0, 250.0, 500.0, 1_000.0, 2_000.0, 4_000.0, 8_000.0, 16_000.0,
 ];
 
-/// Build normalized biquad coefficients for a 0 dB peaking filter at `fc`.
-///
-/// The returned `(b, a)` are normalized so that `a[0] == 1.0`. The numerator
-/// can be scaled by a linear gain to obtain the final graphic-EQ section.
-fn peak_coefficients(fc: f64, q: f64, fs: f64) -> ([f64; 3], [f64; 3]) {
-    let coeffs =
-        math_audio_iir_fir::Biquad::new(math_audio_iir_fir::BiquadFilterType::Peak, fc, fs, q, 0.0)
-            .coefficients();
+/// Build normalized peaking-biquad coefficients whose centre gain is given as
+/// a positive linear amplitude.
+fn peak_coefficients(fc: f64, q: f64, fs: f64, linear_gain: f64) -> ([f64; 3], [f64; 3]) {
+    let gain_db = 20.0 * linear_gain.clamp(MIN_LINEAR_GAIN, MAX_LINEAR_GAIN).log10();
+    let coeffs = math_audio_iir_fir::Biquad::new(
+        math_audio_iir_fir::BiquadFilterType::Peak,
+        fc,
+        fs,
+        q,
+        gain_db,
+    )
+    .coefficients();
     (
         [coeffs.b0, coeffs.b1, coeffs.b2],
         [1.0, coeffs.a1, coeffs.a2],
     )
 }
 
+fn peak_coefficient_gain_derivatives(
+    fc: f64,
+    q: f64,
+    fs: f64,
+    linear_gain: f64,
+) -> ([f64; 3], [f64; 3]) {
+    if !(MIN_LINEAR_GAIN..MAX_LINEAR_GAIN).contains(&linear_gain) {
+        return ([0.0; 3], [0.0; 3]);
+    }
+    let step = f64::EPSILON.cbrt() * linear_gain.abs().max(1.0);
+    let (b_plus, a_plus) = peak_coefficients(fc, q, fs, linear_gain + step);
+    let (b_minus, a_minus) = peak_coefficients(fc, q, fs, linear_gain - step);
+    let mut db = [0.0; 3];
+    let mut da = [0.0; 3];
+    for tap in 0..3 {
+        db[tap] = (b_plus[tap] - b_minus[tap]) / (2.0 * step);
+        da[tap] = (a_plus[tap] - a_minus[tap]) / (2.0 * step);
+    }
+    (db, da)
+}
+
 /// Fixed-frequency bank of peaking biquads at ISO octave center frequencies.
 ///
-/// Each band/channel has a single learnable linear gain. The underlying
+/// Each band/channel has a single learnable positive linear centre gain. The underlying
 /// cascade is a [`SosFilter`] whose coefficients are rebuilt from the gain
 /// parameters on every forward/backward pass.
 #[derive(Debug, Clone)]
@@ -146,11 +173,11 @@ impl GraphicEq {
             }
         }
         for (band, &fc) in frequencies.iter().enumerate() {
-            let (b_peak, a) = peak_coefficients(fc, DEFAULT_Q, fs);
             for ch in 0..n_channels {
                 let gain = gains[[band, ch]];
+                let (b_peak, a) = peak_coefficients(fc, DEFAULT_Q, fs, gain);
                 for (tap, &b_tap) in b_peak.iter().enumerate() {
-                    param[[band, tap, ch, ch]] = gain * b_tap;
+                    param[[band, tap, ch, ch]] = b_tap;
                     param[[band, 3 + tap, ch, ch]] = a[tap];
                 }
             }
@@ -179,11 +206,16 @@ impl GraphicEq {
     /// Map the inner SOS coefficient gradients back to per-band gain gradients.
     fn map_inner_grad(&mut self) {
         for (band, &fc) in self.frequencies.iter().enumerate() {
-            let (b_peak, _a) = peak_coefficients(fc, DEFAULT_Q, self.fs);
             for ch in 0..self.n_channels {
+                let gain = self.param[[band, ch]];
+                let (numerator_gain_derivative, denominator_gain_derivative) =
+                    peak_coefficient_gain_derivatives(fc, DEFAULT_Q, self.fs, gain);
                 let mut accum = 0.0;
-                for (tap, &b_tap) in b_peak.iter().enumerate() {
-                    accum += self.inner.param_grad[[band, tap, ch, ch]] * b_tap;
+                for tap in 0..3 {
+                    accum +=
+                        self.inner.param_grad[[band, tap, ch, ch]] * numerator_gain_derivative[tap];
+                    accum += self.inner.param_grad[[band, 3 + tap, ch, ch]]
+                        * denominator_gain_derivative[tap];
                 }
                 self.param_grad[[band, ch]] += accum;
             }
@@ -229,6 +261,12 @@ impl DiffModule<f64> for GraphicEq {
         let input_shape = input.data.shape();
         let grad_shape = grad_output.data.shape();
         let output_shape = output.data.shape();
+        validate_spectral_gradient_shape(
+            "GraphicEq::backward",
+            input_shape,
+            grad_shape,
+            self.n_channels,
+        )?;
         if grad_shape != output_shape {
             return Err(AutodiffError::Message(format!(
                 "GraphicEq::backward: grad_output shape {:?} does not match output shape {:?}",

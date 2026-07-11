@@ -17,6 +17,11 @@ const fn nfft_as_f64(nfft: usize) -> f64 {
     nfft as f64
 }
 
+const fn validate_fft_config(nfft: usize, channels: usize) {
+    assert!(nfft > 0, "FFT: nfft must be greater than 0");
+    assert!(channels > 0, "FFT: channels must be greater than 0");
+}
+
 /// Return whether a packed real-FFT bin has no negative-frequency partner.
 #[inline]
 const fn is_packed_endpoint(nfft: usize, bin: usize) -> bool {
@@ -81,7 +86,8 @@ fn output_shape_for(input_shape: &[usize], n_bins: usize) -> Vec<usize> {
 ///
 /// Processes the second-to-last axis of a tensor as the time dimension. The
 /// last axis is the channel dimension. Rank-1 input is treated as a single
-/// channel.
+/// channel. Only the real component of each time-domain sample is transformed;
+/// the imaginary component is intentionally ignored.
 #[derive(Debug, Clone)]
 pub struct Fft {
     pub nfft: usize,
@@ -92,12 +98,14 @@ impl Fft {
     /// Create a new single-channel FFT module.
     #[must_use]
     pub const fn new(nfft: usize) -> Self {
+        validate_fft_config(nfft, 1);
         Self { nfft, channels: 1 }
     }
 
     /// Create a new FFT module for `channels` parallel channels.
     #[must_use]
     pub const fn with_channels(nfft: usize, channels: usize) -> Self {
+        validate_fft_config(nfft, channels);
         Self { nfft, channels }
     }
 
@@ -259,12 +267,14 @@ impl Ifft {
     /// Create a new single-channel inverse FFT module.
     #[must_use]
     pub const fn new(nfft: usize) -> Self {
+        validate_fft_config(nfft, 1);
         Self { nfft, channels: 1 }
     }
 
     /// Create a new inverse FFT module for `channels` parallel channels.
     #[must_use]
     pub const fn with_channels(nfft: usize, channels: usize) -> Self {
+        validate_fft_config(nfft, channels);
         Self { nfft, channels }
     }
 
@@ -414,6 +424,8 @@ impl DiffModule<f64> for Ifft {
 }
 
 /// Real-to-complex FFT with an exponential anti-aliasing envelope.
+///
+/// Only the real component of each time-domain sample is transformed.
 #[derive(Debug, Clone)]
 pub struct FftAntiAlias {
     pub nfft: usize,
@@ -433,8 +445,17 @@ impl FftAntiAlias {
     }
 
     /// Create a new anti-aliased FFT module for `channels` parallel channels.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the FFT size or channel count is zero, or if the decay is not finite.
     #[must_use]
     pub fn with_channels(nfft: usize, channels: usize, alias_decay_db: f64) -> Self {
+        validate_fft_config(nfft, channels);
+        assert!(
+            alias_decay_db.is_finite(),
+            "FftAntiAlias: alias_decay_db must be finite"
+        );
         let gamma = 10_f64.powf(-alias_decay_db.abs() / (20.0 * nfft_as_f64(nfft)));
 
         let mut envelope = Vec::with_capacity(nfft);
@@ -622,8 +643,17 @@ impl IfftAntiAlias {
     }
 
     /// Create a new anti-aliased inverse FFT module for `channels` parallel channels.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the FFT size or channel count is zero, or if the decay is not finite.
     #[must_use]
     pub fn with_channels(nfft: usize, channels: usize, alias_decay_db: f64) -> Self {
+        validate_fft_config(nfft, channels);
+        assert!(
+            alias_decay_db.is_finite(),
+            "IfftAntiAlias: alias_decay_db must be finite"
+        );
         let gamma = 10_f64.powf(-alias_decay_db.abs() / (20.0 * nfft_as_f64(nfft)));
 
         let mut envelope = Vec::with_capacity(nfft);

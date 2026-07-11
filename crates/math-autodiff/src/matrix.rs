@@ -14,7 +14,7 @@ use ndarray::{Array2, ArrayD, ArrayView2, ArrayViewMut2, Axis, IxDyn};
 use num_complex::Complex;
 
 use crate::error::AutodiffError;
-use crate::module::DiffModule;
+use crate::module::{DiffModule, validate_spectral_gradient_shape};
 use crate::tensor::DiffTensor;
 
 fn view2<'a>(param: &'a ArrayD<f64>, name: &str) -> Result<ArrayView2<'a, f64>, AutodiffError> {
@@ -148,6 +148,11 @@ impl Matrix {
                 "Matrix: nfft must be greater than 0".to_string(),
             ));
         }
+        if n_out == 0 || n_in == 0 {
+            return Err(AutodiffError::Message(
+                "Matrix: channel counts must be greater than 0".to_string(),
+            ));
+        }
         let param_shape = match matrix_type {
             MatrixType::Dense => vec![n_out, n_in],
             MatrixType::Orthogonal => {
@@ -242,18 +247,7 @@ impl DiffModule<f64> for Matrix {
     ) -> Result<DiffTensor<f64>, AutodiffError> {
         let input_shape = input.data.shape();
         let grad_shape = grad_output.data.shape();
-        if input_shape.len() < 3 || grad_shape.len() < 3 {
-            return Err(AutodiffError::Message(
-                "Matrix::backward: input and grad_output must have at least 3 dimensions"
-                    .to_string(),
-            ));
-        }
-        if input_shape.len() != grad_shape.len() {
-            return Err(AutodiffError::Message(format!(
-                "Matrix::backward: input and grad_output must have same rank, got {:?} and {:?}",
-                input_shape, grad_shape
-            )));
-        }
+        validate_spectral_gradient_shape("Matrix::backward", input_shape, grad_shape, self.n_out)?;
         let n_bins = input_shape[1];
         if input_shape[2] != self.n_in {
             return Err(AutodiffError::Message(format!(
@@ -267,17 +261,11 @@ impl DiffModule<f64> for Matrix {
                 grad_shape, n_bins, self.n_out
             )));
         }
-        for (dim, (&g, &inp)) in grad_shape[..grad_shape.len() - 2]
-            .iter()
-            .zip(input_shape[..input_shape.len() - 2].iter())
-            .enumerate()
-        {
-            if g != inp {
-                return Err(AutodiffError::Message(format!(
-                    "Matrix::backward: batch dimension {} mismatch: grad_output {:?} vs input {:?}",
-                    dim, grad_shape, input_shape
-                )));
-            }
+        if n_bins != self.n_bins() {
+            return Err(AutodiffError::Message(format!(
+                "Matrix::backward: expected {} bins, got {n_bins}",
+                self.n_bins()
+            )));
         }
 
         let m = self.build_matrix()?;
@@ -295,9 +283,9 @@ impl DiffModule<f64> for Matrix {
                 let dl_dm = compute_dl_dm(grad_output, input, self.n_out, self.n_in);
                 // Numerical Jacobian of M w.r.t. raw parameters.
                 let v = view2(&self.param, "Matrix")?;
-                let eps = 1e-7;
                 for i in 0..self.n_out {
                     for j in 0..self.n_in {
+                        let eps = f64::EPSILON.cbrt() * v[[i, j]].abs().max(1.0);
                         let mut v_plus = v.to_owned();
                         v_plus[[i, j]] += eps;
                         let m_plus = matrix_exp_skew_view(&v_plus.view());

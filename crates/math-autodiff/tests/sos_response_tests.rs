@@ -297,6 +297,31 @@ fn sos_frequency_response_errors_on_bad_tap_axis() {
 }
 
 #[test]
+fn sos_jacobian_is_finite_at_zero_numerator() {
+    let nfft = 64;
+    let b = Array4::<Complex<f64>>::zeros((1, 3, 1, 1));
+    let mut a = Array4::<Complex<f64>>::zeros((1, 3, 1, 1));
+    a[[0, 0, 0, 0]] = Complex::new(1.0, 0.0);
+
+    let (dh_db, dh_da) = sos_frequency_response_jacobian(&b, &a, nfft, None).unwrap();
+    for value in &dh_db {
+        assert!(value.is_finite(), "non-finite numerator Jacobian: {value}");
+    }
+    for value in &dh_da {
+        assert!(
+            value.is_finite(),
+            "non-finite denominator Jacobian: {value}"
+        );
+    }
+
+    // With A(z)=1 and B(z)=0, dH/db0 is exactly one at every bin.
+    for bin in 0..=nfft / 2 {
+        assert_abs_diff_eq!(dh_db[[bin, 0, 0, 0, 0]].re, 1.0, epsilon = 1e-12);
+        assert_abs_diff_eq!(dh_db[[bin, 0, 0, 0, 0]].im, 0.0, epsilon = 1e-12);
+    }
+}
+
+#[test]
 fn sos_frequency_response_parallel_errors_on_bad_tap_axis() {
     let b = Array3::zeros((1, 4, 1));
     let a = Array3::zeros((1, 4, 1));

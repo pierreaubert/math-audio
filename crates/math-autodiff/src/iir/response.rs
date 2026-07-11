@@ -125,14 +125,20 @@ where
                 let envelope_bin = fft_envelope[[tap, bin]];
                 for out_ch in 0..n_out {
                     for in_ch in 0..n_in {
-                        let h_bin = h[[bin, out_ch, in_ch]];
                         let b_bin = b_response[[section, bin, out_ch, in_ch]];
                         let a_bin = a_response[[section, bin, out_ch, in_ch]];
+                        let mut other_sections = Complex::new(1.0, 0.0);
+                        for other in 0..n_sections {
+                            if other != section {
+                                other_sections *= b_response[[other, bin, out_ch, in_ch]]
+                                    / a_response[[other, bin, out_ch, in_ch]];
+                            }
+                        }
 
                         jacobian_b[[bin, section, tap, out_ch, in_ch]] =
-                            h_bin / b_bin * envelope_bin;
+                            other_sections * envelope_bin / a_bin;
                         jacobian_a[[bin, section, tap, out_ch, in_ch]] =
-                            -(h_bin / a_bin) * envelope_bin;
+                            -other_sections * b_bin * envelope_bin / (a_bin * a_bin);
                     }
                 }
             }

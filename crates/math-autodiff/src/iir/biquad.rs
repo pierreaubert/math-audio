@@ -27,14 +27,14 @@ use ndarray::{
     Axis, IxDyn,
 };
 use num_complex::Complex;
-use std::f64::consts::{LN_10, PI, SQRT_2};
+use std::f64::consts::{PI, SQRT_2};
 
 use crate::error::AutodiffError;
 use crate::iir::response::{
     sos_frequency_response, sos_frequency_response_jacobian,
     sos_frequency_response_jacobian_parallel, sos_frequency_response_parallel,
 };
-use crate::module::DiffModule;
+use crate::module::{DiffModule, validate_spectral_gradient_shape};
 use crate::tensor::DiffTensor;
 
 /// Sigmoid activation mapping raw parameters to the `(0, 1)` interval.
@@ -47,39 +47,6 @@ fn sigmoid(x: f64) -> f64 {
 #[inline]
 fn sigmoid_derivative_from_output(s: f64) -> f64 {
     s * (1.0 - s)
-}
-
-/// Map a raw gain parameter to a dB value clamped to `[-60, 60]`.
-fn raw_gain_to_db(gain_raw: f64) -> f64 {
-    let abs_gain = gain_raw.abs();
-    let gain_db = if abs_gain > 0.0 {
-        20.0 * abs_gain.log10()
-    } else {
-        f64::NEG_INFINITY
-    };
-    gain_db.clamp(-60.0, 60.0)
-}
-
-/// Derivative of [`raw_gain_to_db`] w.r.t. the raw gain parameter.
-fn raw_gain_to_db_derivative(gain_raw: f64) -> f64 {
-    let abs_gain = gain_raw.abs();
-    let gain_db = if abs_gain > 0.0 {
-        20.0 * abs_gain.log10()
-    } else {
-        f64::NEG_INFINITY
-    };
-    if gain_db <= -60.0 || gain_db >= 60.0 {
-        0.0
-    } else {
-        20.0 / (gain_raw * LN_10)
-    }
-}
-
-/// Convert a dB gain to a linear gain and its derivative.
-fn db_to_linear_with_derivative(gain_db: f64) -> (f64, f64) {
-    let gain_lin = 10.0_f64.powf(gain_db / 20.0);
-    let derivative = gain_lin * LN_10 / 20.0;
-    (gain_lin, derivative)
 }
 
 /// Number of tunable parameters for a given filter type.
@@ -117,7 +84,7 @@ impl SectionCoeffs {
 
 /// Compute normalized RBJ lowpass or highpass coefficients and physical
 /// parameter gradients.
-fn compute_lowpass_highpass(fc: f64, gain_db: f64, fs: f64, highpass: bool) -> SectionCoeffs {
+fn compute_lowpass_highpass(fc: f64, gain: f64, fs: f64, highpass: bool) -> SectionCoeffs {
     let omega = 2.0 * PI * fc / fs;
     let sn = omega.sin();
     let cs = omega.cos();
@@ -157,12 +124,10 @@ fn compute_lowpass_highpass(fc: f64, gain_db: f64, fs: f64, highpass: bool) -> S
     let da1_dfc = -2.0 * dcs_dfc;
     let da2_dfc = -dalpha_dfc;
 
-    let (gain_lin, dgain_lin_dgain_db) = db_to_linear_with_derivative(gain_db);
-
     // Apply gain to numerator.
-    let b0_g = b0 * gain_lin;
-    let b1_g = b1 * gain_lin;
-    let b2_g = b2 * gain_lin;
+    let b0_g = b0 * gain;
+    let b1_g = b1 * gain;
+    let b2_g = b2 * gain;
 
     // Normalize by a0.
     let a0_sq = a0 * a0;
@@ -173,16 +138,16 @@ fn compute_lowpass_highpass(fc: f64, gain_db: f64, fs: f64, highpass: bool) -> S
     let a2_n = a2 / a0;
 
     // Gradients after gain application.
-    let db0_g_dfc = db0_dfc * gain_lin;
-    let db1_g_dfc = db1_dfc * gain_lin;
-    let db2_g_dfc = db2_dfc * gain_lin;
+    let db0_g_dfc = db0_dfc * gain;
+    let db1_g_dfc = db1_dfc * gain;
+    let db2_g_dfc = db2_dfc * gain;
     let da0_g_dfc = da0_dfc;
     let da1_g_dfc = da1_dfc;
     let da2_g_dfc = da2_dfc;
 
-    let db0_g_dgain = b0 * dgain_lin_dgain_db;
-    let db1_g_dgain = b1 * dgain_lin_dgain_db;
-    let db2_g_dgain = b2 * dgain_lin_dgain_db;
+    let db0_g_dgain = b0;
+    let db1_g_dgain = b1;
+    let db2_g_dgain = b2;
 
     // Gradients after normalization.
     let db0_n_dfc = (db0_g_dfc * a0 - b0_g * da0_g_dfc) / a0_sq;
@@ -214,7 +179,7 @@ fn compute_lowpass_highpass(fc: f64, gain_db: f64, fs: f64, highpass: bool) -> S
 /// Compute normalized RBJ bandpass coefficients and physical parameter
 /// gradients.
 #[allow(clippy::similar_names)]
-fn compute_bandpass(fc1: f64, fc2: f64, gain_db: f64, fs: f64) -> SectionCoeffs {
+fn compute_bandpass(fc1: f64, fc2: f64, gain: f64, fs: f64) -> SectionCoeffs {
     let omega1 = 2.0 * PI * fc1 / fs;
     let omega2 = 2.0 * PI * fc2 / fs;
     let omega_c = (omega1 + omega2) / 2.0;
@@ -232,12 +197,10 @@ fn compute_bandpass(fc1: f64, fc2: f64, gain_db: f64, fs: f64) -> SectionCoeffs 
     let a1 = -2.0 * cs_c;
     let a2 = 1.0 - alpha;
 
-    let (gain_lin, dgain_lin_dgain_db) = db_to_linear_with_derivative(gain_db);
-
     // Apply gain to numerator.
-    let b0_g = b0 * gain_lin;
-    let b1_g = b1 * gain_lin;
-    let b2_g = b2 * gain_lin;
+    let b0_g = b0 * gain;
+    let b1_g = b1 * gain;
+    let b2_g = b2 * gain;
 
     // Normalize by a0.
     let a0_sq = a0 * a0;
@@ -283,20 +246,20 @@ fn compute_bandpass(fc1: f64, fc2: f64, gain_db: f64, fs: f64) -> SectionCoeffs 
     let da2_dfc2 = -dalpha_dfc2;
 
     // After gain.
-    let db0_g_dfc1 = db0_dfc1 * gain_lin;
-    let db2_g_dfc1 = db2_dfc1 * gain_lin;
+    let db0_g_dfc1 = db0_dfc1 * gain;
+    let db2_g_dfc1 = db2_dfc1 * gain;
     let da0_g_dfc1 = da0_dfc1;
     let da1_g_dfc1 = da1_dfc1;
     let da2_g_dfc1 = da2_dfc1;
 
-    let db0_g_dfc2 = db0_dfc2 * gain_lin;
-    let db2_g_dfc2 = db2_dfc2 * gain_lin;
+    let db0_g_dfc2 = db0_dfc2 * gain;
+    let db2_g_dfc2 = db2_dfc2 * gain;
     let da0_g_dfc2 = da0_dfc2;
     let da1_g_dfc2 = da1_dfc2;
     let da2_g_dfc2 = da2_dfc2;
 
-    let db0_g_dgain = b0 * dgain_lin_dgain_db;
-    let db2_g_dgain = -b0 * dgain_lin_dgain_db;
+    let db0_g_dgain = b0;
+    let db2_g_dgain = -b0;
 
     // After normalization.
     let db0_n_dfc1 = (db0_g_dfc1 * a0 - b0_g * da0_g_dfc1) / a0_sq;
@@ -416,7 +379,7 @@ pub struct Biquad {
 }
 
 impl Biquad {
-    /// Create a new biquad module with zero-initialized parameters and gradients.
+    /// Create a new biquad module with trainable unity gain and zero gradients.
     ///
     /// # Errors
     ///
@@ -435,13 +398,48 @@ impl Biquad {
                 "Biquad: nfft must be greater than 0".to_string(),
             ));
         }
+        if fs <= 0.0 || !fs.is_finite() {
+            return Err(AutodiffError::Message(
+                "Biquad: fs must be positive and finite".to_string(),
+            ));
+        }
+        if n_sections == 0 || n_out == 0 || n_in == 0 {
+            return Err(AutodiffError::Message(
+                "Biquad: section and channel counts must be greater than 0".to_string(),
+            ));
+        }
+        if !alias_decay_db.is_finite() {
+            return Err(AutodiffError::Message(
+                "Biquad: alias_decay_db must be finite".to_string(),
+            ));
+        }
+        if !matches!(
+            filter_type,
+            BiquadFilterType::Lowpass | BiquadFilterType::Highpass | BiquadFilterType::Bandpass
+        ) {
+            return Err(AutodiffError::Message(format!(
+                "Biquad: unsupported filter type {filter_type:?}"
+            )));
+        }
         let n_params = n_params_for(filter_type);
+        let mut param = ArrayD::zeros(IxDyn(&[n_sections, n_params, n_out, n_in]));
+        let gain_index = n_params - 1;
+        for section in 0..n_sections {
+            for out_ch in 0..n_out {
+                for in_ch in 0..n_in {
+                    param[[section, gain_index, out_ch, in_ch]] = 1.0;
+                    if filter_type == BiquadFilterType::Bandpass {
+                        param[[section, 0, out_ch, in_ch]] = -(3.0_f64).ln();
+                    }
+                }
+            }
+        }
         Ok(Self {
             nfft,
             fs,
             n_sections,
             filter_type,
-            param: ArrayD::zeros(IxDyn(&[n_sections, n_params, n_out, n_in])),
+            param,
             param_grad: ArrayD::zeros(IxDyn(&[n_sections, n_params, n_out, n_in])),
             alias_decay_db,
         })
@@ -487,19 +485,16 @@ impl Biquad {
                             let gain_raw = param[[section, 1, out_ch, in_ch]];
                             let fc_norm = sigmoid(fc_raw);
                             let fc = fc_norm * half_fs;
-                            let gain_db = raw_gain_to_db(gain_raw);
                             let mut c = compute_lowpass_highpass(
                                 fc,
-                                gain_db,
+                                gain_raw,
                                 self.fs,
                                 self.filter_type == BiquadFilterType::Highpass,
                             );
                             let dfc_dfc_raw = sigmoid_derivative_from_output(fc_norm) * half_fs;
-                            let dgain_db_dgain_raw = raw_gain_to_db_derivative(gain_raw);
                             for tap in 0..3 {
                                 c.db_dparam[tap][0] *= dfc_dfc_raw;
                                 c.da_dparam[tap][0] *= dfc_dfc_raw;
-                                c.db_dparam[tap][1] *= dgain_db_dgain_raw;
                             }
                             c
                         }
@@ -516,39 +511,27 @@ impl Biquad {
                             };
                             let fc1 = fc_low_norm * half_fs;
                             let fc2 = fc_high_norm * half_fs;
-                            let gain_db = raw_gain_to_db(gain_raw);
-                            let mut c = compute_bandpass(fc1, fc2, gain_db, self.fs);
+                            let mut c = compute_bandpass(fc1, fc2, gain_raw, self.fs);
 
-                            let dfc1_norm_dfc1_raw = sigmoid_derivative_from_output(fc1_norm);
-                            let dfc2_norm_dfc2_raw = sigmoid_derivative_from_output(fc2_norm);
-                            let dfc1_norm_dfc2_raw = if swapped {
-                                sigmoid_derivative_from_output(fc2_norm)
-                            } else {
-                                0.0
-                            };
-                            let dfc2_norm_dfc1_raw = if swapped {
-                                sigmoid_derivative_from_output(fc1_norm)
-                            } else {
-                                0.0
-                            };
-                            let dgain_db_dgain_raw = raw_gain_to_db_derivative(gain_raw);
+                            let dfc1_raw = sigmoid_derivative_from_output(fc1_norm) * half_fs;
+                            let dfc2_raw = sigmoid_derivative_from_output(fc2_norm) * half_fs;
 
                             for tap in 0..3 {
                                 let db_df1 = c.db_dparam[tap][0];
                                 let db_df2 = c.db_dparam[tap][1];
                                 let db_dg = c.db_dparam[tap][2];
-                                c.db_dparam[tap][0] = db_df1 * dfc1_norm_dfc1_raw * half_fs
-                                    + db_df2 * dfc2_norm_dfc1_raw * half_fs;
-                                c.db_dparam[tap][1] = db_df1 * dfc1_norm_dfc2_raw * half_fs
-                                    + db_df2 * dfc2_norm_dfc2_raw * half_fs;
-                                c.db_dparam[tap][2] = db_dg * dgain_db_dgain_raw;
+                                c.db_dparam[tap][0] =
+                                    if swapped { db_df2 } else { db_df1 } * dfc1_raw;
+                                c.db_dparam[tap][1] =
+                                    if swapped { db_df1 } else { db_df2 } * dfc2_raw;
+                                c.db_dparam[tap][2] = db_dg;
 
                                 let da_df1 = c.da_dparam[tap][0];
                                 let da_df2 = c.da_dparam[tap][1];
-                                c.da_dparam[tap][0] = da_df1 * dfc1_norm_dfc1_raw * half_fs
-                                    + da_df2 * dfc2_norm_dfc1_raw * half_fs;
-                                c.da_dparam[tap][1] = da_df1 * dfc1_norm_dfc2_raw * half_fs
-                                    + da_df2 * dfc2_norm_dfc2_raw * half_fs;
+                                c.da_dparam[tap][0] =
+                                    if swapped { da_df2 } else { da_df1 } * dfc1_raw;
+                                c.da_dparam[tap][1] =
+                                    if swapped { da_df1 } else { da_df2 } * dfc2_raw;
                             }
                             c
                         }
@@ -669,6 +652,7 @@ impl DiffModule<f64> for Biquad {
         let n_params = param_shape[1];
         let n_out = param_shape[2];
         let n_in_stored = param_shape[3];
+        validate_spectral_gradient_shape("Biquad::backward", input_shape, grad_shape, n_out)?;
         if n_bins != self.n_bins() {
             return Err(AutodiffError::Message(format!(
                 "Biquad::backward: expected {} frequency bins, got {}",
@@ -706,10 +690,7 @@ impl DiffModule<f64> for Biquad {
             }
         }
 
-        // Accumulate parameter gradients. Non-finite Jacobian terms occur at
-        // frequencies where the numerator/denominator response is exactly zero
-        // (e.g. lowpass at Nyquist); their contribution is skipped because the
-        // loss gradient at those bins is also zero for practical targets.
+        // Accumulate parameter gradients.
         let mut param_grad = biquad_param_grad_view_mut(&mut self.param_grad)?;
         for section in 0..n_sections {
             for out_ch in 0..n_out {
@@ -722,9 +703,7 @@ impl DiffModule<f64> for Biquad {
                             for bin in 0..n_bins {
                                 let term = dh_db[[bin, section, tap, out_ch, in_ch]] * db_dp
                                     + dh_da[[bin, section, tap, out_ch, in_ch]] * da_dp;
-                                if term.is_finite() {
-                                    accum += (dl_dh[[bin, out_ch, in_ch]].conj() * term).re;
-                                }
+                                accum += (dl_dh[[bin, out_ch, in_ch]].conj() * term).re;
                             }
                         }
                         param_grad[[section, param_idx, out_ch, in_ch]] += accum;
@@ -800,7 +779,7 @@ pub struct ParallelBiquad {
 }
 
 impl ParallelBiquad {
-    /// Create a new parallel biquad module with zero-initialized parameters and
+    /// Create a new parallel biquad module with trainable unity gain and zero
     /// gradients.
     ///
     /// # Errors
@@ -819,13 +798,46 @@ impl ParallelBiquad {
                 "ParallelBiquad: nfft must be greater than 0".to_string(),
             ));
         }
+        if fs <= 0.0 || !fs.is_finite() {
+            return Err(AutodiffError::Message(
+                "ParallelBiquad: fs must be positive and finite".to_string(),
+            ));
+        }
+        if n_sections == 0 || n_channels == 0 {
+            return Err(AutodiffError::Message(
+                "ParallelBiquad: section and channel counts must be greater than 0".to_string(),
+            ));
+        }
+        if !alias_decay_db.is_finite() {
+            return Err(AutodiffError::Message(
+                "ParallelBiquad: alias_decay_db must be finite".to_string(),
+            ));
+        }
+        if !matches!(
+            filter_type,
+            BiquadFilterType::Lowpass | BiquadFilterType::Highpass | BiquadFilterType::Bandpass
+        ) {
+            return Err(AutodiffError::Message(format!(
+                "ParallelBiquad: unsupported filter type {filter_type:?}"
+            )));
+        }
         let n_params = n_params_for(filter_type);
+        let mut param = ArrayD::zeros(IxDyn(&[n_sections, n_params, n_channels]));
+        let gain_index = n_params - 1;
+        for section in 0..n_sections {
+            for ch in 0..n_channels {
+                param[[section, gain_index, ch]] = 1.0;
+                if filter_type == BiquadFilterType::Bandpass {
+                    param[[section, 0, ch]] = -(3.0_f64).ln();
+                }
+            }
+        }
         Ok(Self {
             nfft,
             fs,
             n_sections,
             filter_type,
-            param: ArrayD::zeros(IxDyn(&[n_sections, n_params, n_channels])),
+            param,
             param_grad: ArrayD::zeros(IxDyn(&[n_sections, n_params, n_channels])),
             alias_decay_db,
         })
@@ -870,19 +882,16 @@ impl ParallelBiquad {
                         let gain_raw = param[[section, 1, ch]];
                         let fc_norm = sigmoid(fc_raw);
                         let fc = fc_norm * half_fs;
-                        let gain_db = raw_gain_to_db(gain_raw);
                         let mut c = compute_lowpass_highpass(
                             fc,
-                            gain_db,
+                            gain_raw,
                             self.fs,
                             self.filter_type == BiquadFilterType::Highpass,
                         );
                         let dfc_dfc_raw = sigmoid_derivative_from_output(fc_norm) * half_fs;
-                        let dgain_db_dgain_raw = raw_gain_to_db_derivative(gain_raw);
                         for tap in 0..3 {
                             c.db_dparam[tap][0] *= dfc_dfc_raw;
                             c.da_dparam[tap][0] *= dfc_dfc_raw;
-                            c.db_dparam[tap][1] *= dgain_db_dgain_raw;
                         }
                         c
                     }
@@ -899,39 +908,23 @@ impl ParallelBiquad {
                         };
                         let fc1 = fc_low_norm * half_fs;
                         let fc2 = fc_high_norm * half_fs;
-                        let gain_db = raw_gain_to_db(gain_raw);
-                        let mut c = compute_bandpass(fc1, fc2, gain_db, self.fs);
+                        let mut c = compute_bandpass(fc1, fc2, gain_raw, self.fs);
 
-                        let dfc1_norm_dfc1_raw = sigmoid_derivative_from_output(fc1_norm);
-                        let dfc2_norm_dfc2_raw = sigmoid_derivative_from_output(fc2_norm);
-                        let dfc1_norm_dfc2_raw = if swapped {
-                            sigmoid_derivative_from_output(fc2_norm)
-                        } else {
-                            0.0
-                        };
-                        let dfc2_norm_dfc1_raw = if swapped {
-                            sigmoid_derivative_from_output(fc1_norm)
-                        } else {
-                            0.0
-                        };
-                        let dgain_db_dgain_raw = raw_gain_to_db_derivative(gain_raw);
+                        let dfc1_raw = sigmoid_derivative_from_output(fc1_norm) * half_fs;
+                        let dfc2_raw = sigmoid_derivative_from_output(fc2_norm) * half_fs;
 
                         for tap in 0..3 {
                             let db_df1 = c.db_dparam[tap][0];
                             let db_df2 = c.db_dparam[tap][1];
                             let db_dg = c.db_dparam[tap][2];
-                            c.db_dparam[tap][0] = db_df1 * dfc1_norm_dfc1_raw * half_fs
-                                + db_df2 * dfc2_norm_dfc1_raw * half_fs;
-                            c.db_dparam[tap][1] = db_df1 * dfc1_norm_dfc2_raw * half_fs
-                                + db_df2 * dfc2_norm_dfc2_raw * half_fs;
-                            c.db_dparam[tap][2] = db_dg * dgain_db_dgain_raw;
+                            c.db_dparam[tap][0] = if swapped { db_df2 } else { db_df1 } * dfc1_raw;
+                            c.db_dparam[tap][1] = if swapped { db_df1 } else { db_df2 } * dfc2_raw;
+                            c.db_dparam[tap][2] = db_dg;
 
                             let da_df1 = c.da_dparam[tap][0];
                             let da_df2 = c.da_dparam[tap][1];
-                            c.da_dparam[tap][0] = da_df1 * dfc1_norm_dfc1_raw * half_fs
-                                + da_df2 * dfc2_norm_dfc1_raw * half_fs;
-                            c.da_dparam[tap][1] = da_df1 * dfc1_norm_dfc2_raw * half_fs
-                                + da_df2 * dfc2_norm_dfc2_raw * half_fs;
+                            c.da_dparam[tap][0] = if swapped { da_df2 } else { da_df1 } * dfc1_raw;
+                            c.da_dparam[tap][1] = if swapped { da_df1 } else { da_df2 } * dfc2_raw;
                         }
                         c
                     }
@@ -1042,6 +1035,12 @@ impl DiffModule<f64> for ParallelBiquad {
         let n_sections = param_shape[0];
         let n_params = param_shape[1];
         let n_channels_stored = param_shape[2];
+        validate_spectral_gradient_shape(
+            "ParallelBiquad::backward",
+            input_shape,
+            grad_shape,
+            n_channels_stored,
+        )?;
         if n_bins != self.n_bins() {
             return Err(AutodiffError::Message(format!(
                 "ParallelBiquad::backward: expected {} frequency bins, got {}",
@@ -1078,8 +1077,7 @@ impl DiffModule<f64> for ParallelBiquad {
             }
         }
 
-        // Accumulate parameter gradients. See `Biquad::backward` for the
-        // non-finite Jacobian handling rationale.
+        // Accumulate parameter gradients.
         let mut param_grad = parallel_biquad_param_grad_view_mut(&mut self.param_grad)?;
         for section in 0..n_sections {
             for ch in 0..n_channels {
@@ -1091,9 +1089,7 @@ impl DiffModule<f64> for ParallelBiquad {
                         for bin in 0..n_bins {
                             let term = dh_db[[bin, section, tap, ch]] * db_dp
                                 + dh_da[[bin, section, tap, ch]] * da_dp;
-                            if term.is_finite() {
-                                accum += (dl_dh[[bin, ch]].conj() * term).re;
-                            }
+                            accum += (dl_dh[[bin, ch]].conj() * term).re;
                         }
                     }
                     param_grad[[section, param_idx, ch]] += accum;

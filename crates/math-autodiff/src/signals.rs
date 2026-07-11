@@ -56,7 +56,7 @@ pub enum SignalType {
 ///
 /// # Panics
 ///
-/// Panics if `n_samples` or `n_channels` is zero.
+/// Panics if dimensions or signal parameters are invalid or non-finite.
 #[must_use]
 pub fn signal_gallery(
     signal_type: SignalType,
@@ -72,7 +72,10 @@ pub fn signal_gallery(
         n_channels > 0,
         "signal_gallery: n_channels must be greater than 0"
     );
-    assert!(fs > 0.0, "signal_gallery: fs must be greater than 0");
+    assert!(
+        fs > 0.0 && fs.is_finite(),
+        "signal_gallery: fs must be positive and finite"
+    );
 
     let mut data = Array3::<Complex<f64>>::zeros((1, n_samples, n_channels));
 
@@ -83,6 +86,10 @@ pub fn signal_gallery(
             }
         }
         SignalType::Sine { freq_hz } => {
+            assert!(
+                freq_hz.is_finite(),
+                "signal_gallery: sine frequency must be finite"
+            );
             let omega = 2.0 * PI * freq_hz / fs;
             for n in 0..n_samples {
                 let sample = Complex::new((omega * n as f64).sin(), 0.0);
@@ -92,6 +99,10 @@ pub fn signal_gallery(
             }
         }
         SignalType::Sweep { f0_hz, f1_hz } => {
+            assert!(
+                f0_hz.is_finite() && f1_hz.is_finite(),
+                "signal_gallery: sweep frequencies must be finite"
+            );
             let duration = n_samples as f64 / fs;
             for n in 0..n_samples {
                 let t = n as f64 / fs;
@@ -113,6 +124,10 @@ pub fn signal_gallery(
             }
         }
         SignalType::ExpDecay { rate } => {
+            assert!(
+                rate >= 0.0 && rate.is_finite(),
+                "signal_gallery: decay rate must be non-negative and finite"
+            );
             for n in 0..n_samples {
                 let sample = Complex::new((-rate * n as f64 / fs).exp(), 0.0);
                 for ch in 0..n_channels {
@@ -122,8 +137,12 @@ pub fn signal_gallery(
         }
         SignalType::VelvetNoise { density } => {
             assert!(
-                density > 0.0,
-                "signal_gallery: velvet noise density must be positive"
+                density > 0.0 && density.is_finite(),
+                "signal_gallery: velvet noise density must be positive and finite"
+            );
+            assert!(
+                density <= fs,
+                "signal_gallery: velvet noise density must not exceed the sample rate"
             );
             let td = fs / density; // average spacing in samples
             let num_impulses = (n_samples as f64 / td).floor() as usize;

@@ -6,7 +6,7 @@ use math_audio_autodiff::module::DiffModule;
 use math_audio_autodiff::system::{Parallel, Series, Shell};
 use math_audio_autodiff::tensor::DiffTensor;
 use math_audio_iir_fir::BiquadFilterType;
-use ndarray::{Array1, ArrayD, Axis, IxDyn};
+use ndarray::{Array1, Array3, ArrayD, Axis, IxDyn};
 use num_complex::Complex;
 
 const FS: f64 = 48_000.0;
@@ -246,6 +246,23 @@ fn magnitude_backward_ignores_imaginary_upstream_gradient() {
         assert_abs_diff_eq!(actual.re, expected.re, epsilon = 1e-12);
         assert_abs_diff_eq!(actual.im, expected.im, epsilon = 1e-12);
     }
+}
+
+#[test]
+fn magnitude_backward_preserves_tiny_nonzero_derivative() {
+    let nfft = 2;
+    let input = DiffTensor::from_array(
+        Array3::from_shape_vec(
+            (1, 2, 1),
+            vec![Complex::new(1e-15, 0.0), Complex::new(0.0, 0.0)],
+        )
+        .unwrap(),
+    );
+    let mut magnitude = Magnitude::new(nfft, 1);
+    let output = magnitude.forward(&input).unwrap();
+    let grad_output = ones_spectrum(&[1, 2, 1]);
+    let grad = magnitude.backward(&input, &output, &grad_output).unwrap();
+    assert_abs_diff_eq!(grad.data[[0, 0, 0]].re, 1.0, epsilon = 1e-12);
 }
 
 #[test]

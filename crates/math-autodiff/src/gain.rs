@@ -13,7 +13,7 @@ use ndarray::{ArrayD, ArrayView1, ArrayView2, ArrayViewMut1, ArrayViewMut2, Axis
 use num_complex::Complex;
 
 use crate::error::AutodiffError;
-use crate::module::DiffModule;
+use crate::module::{DiffModule, validate_spectral_gradient_shape};
 use crate::tensor::DiffTensor;
 
 fn view2<'a>(param: &'a ArrayD<f64>, name: &str) -> Result<ArrayView2<'a, f64>, AutodiffError> {
@@ -106,6 +106,11 @@ impl Gain {
                 "Gain: nfft must be greater than 0".to_string(),
             ));
         }
+        if n_out == 0 || n_in == 0 {
+            return Err(AutodiffError::Message(
+                "Gain: channel counts must be greater than 0".to_string(),
+            ));
+        }
         Ok(Self {
             nfft,
             param: ArrayD::zeros(IxDyn(&[n_out, n_in])),
@@ -181,6 +186,7 @@ impl DiffModule<f64> for Gain {
 
         let input_shape = input.data.shape();
         let grad_shape = grad_output.data.shape();
+        validate_spectral_gradient_shape("Gain::backward", input_shape, grad_shape, n_out)?;
         if input_shape.len() < 3 {
             return Err(AutodiffError::Message(format!(
                 "Gain::backward: input must have at least 3 dimensions, got {:?}",
@@ -290,6 +296,11 @@ impl ParallelGain {
         if nfft == 0 {
             return Err(AutodiffError::Message(
                 "ParallelGain: nfft must be greater than 0".to_string(),
+            ));
+        }
+        if n_channels == 0 {
+            return Err(AutodiffError::Message(
+                "ParallelGain: n_channels must be greater than 0".to_string(),
             ));
         }
         Ok(Self {
@@ -452,8 +463,17 @@ pub struct Magnitude {
 
 impl Magnitude {
     /// Create a new magnitude module.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the FFT size or channel count is zero.
     #[must_use]
     pub const fn new(nfft: usize, n_channels: usize) -> Self {
+        assert!(nfft > 0, "Magnitude: nfft must be greater than 0");
+        assert!(
+            n_channels > 0,
+            "Magnitude: n_channels must be greater than 0"
+        );
         Self { nfft, n_channels }
     }
 
@@ -515,7 +535,7 @@ impl DiffModule<f64> for Magnitude {
 
         let grad_input = input.data.mapv(|x| {
             let norm = x.norm();
-            if norm > 1e-12 {
+            if norm > 0.0 {
                 x / norm
             } else {
                 Complex::new(0.0, 0.0)

@@ -3,6 +3,33 @@ use ndarray::ArrayD;
 use crate::error::AutodiffError;
 use crate::tensor::DiffTensor;
 
+pub(crate) fn validate_spectral_gradient_shape(
+    name: &str,
+    input_shape: &[usize],
+    grad_shape: &[usize],
+    output_channels: usize,
+) -> Result<(), AutodiffError> {
+    if input_shape.len() < 3 || grad_shape.len() != input_shape.len() {
+        return Err(AutodiffError::Message(format!(
+            "{name}: input and grad_output must have the same rank of at least 3, got {input_shape:?} and {grad_shape:?}"
+        )));
+    }
+    if grad_shape[2] != output_channels {
+        return Err(AutodiffError::Message(format!(
+            "{name}: expected {output_channels} output channels, got {}",
+            grad_shape[2]
+        )));
+    }
+    for axis in 0..input_shape.len() {
+        if axis != 2 && input_shape[axis] != grad_shape[axis] {
+            return Err(AutodiffError::Message(format!(
+                "{name}: input shape {input_shape:?} and grad_output shape {grad_shape:?} differ at axis {axis}"
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// A differentiable frequency-domain audio module.
 pub trait DiffModule<T> {
     /// Forward pass: compute output spectrum from input spectrum.

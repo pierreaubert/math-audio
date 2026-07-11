@@ -57,6 +57,27 @@ fn geq_identity_at_unity_gain() {
 }
 
 #[test]
+fn geq_band_gain_is_frequency_selective() {
+    const LARGE_NFFT: usize = 8192;
+    let n_bins = LARGE_NFFT / 2 + 1;
+    let mut geq = GraphicEq::new(LARGE_NFFT, FS, 6, 1, ALIAS_DECAY_DB).expect("valid graphic eq");
+
+    // The sixth ISO band is centred at 1 kHz. A linear gain of two should
+    // boost that band by about 6 dB without applying the same gain at DC.
+    geq.param[[5, 0]] = 2.0;
+    let input = DiffTensor::from_array(
+        Array3::<Complex<f64>>::from_elem((1, n_bins, 1), Complex::new(1.0, 0.0)).into_dyn(),
+    );
+    let output = geq.forward(&input).expect("forward should succeed");
+    let centre_bin = (1_000.0 * LARGE_NFFT as f64 / FS).round() as usize;
+    let centre = output.data[[0, centre_bin, 0]].norm();
+    let dc = output.data[[0, 0, 0]].norm();
+
+    assert!(centre > 1.8, "expected a centre boost, got {centre}");
+    assert!(dc < 1.1, "band gain leaked to DC: {dc}");
+}
+
+#[test]
 fn geq_forward_matches_hand_built_sos() {
     let n_bins = NFFT / 2 + 1;
     let n_bands = 10;
@@ -87,12 +108,14 @@ fn geq_forward_matches_hand_built_sos() {
         }
     }
     for (band, &fc) in geq.frequencies.iter().enumerate() {
-        let coeffs = IirBiquad::new(BiquadFilterType::Peak, fc, FS, DEFAULT_Q, 0.0).coefficients();
         for ch in 0..n_channels {
             let gain = geq.param[[band, ch]];
-            manual.param[[band, 0, ch, ch]] = gain * coeffs.b0;
-            manual.param[[band, 1, ch, ch]] = gain * coeffs.b1;
-            manual.param[[band, 2, ch, ch]] = gain * coeffs.b2;
+            let gain_db = 20.0 * gain.log10();
+            let coeffs =
+                IirBiquad::new(BiquadFilterType::Peak, fc, FS, DEFAULT_Q, gain_db).coefficients();
+            manual.param[[band, 0, ch, ch]] = coeffs.b0;
+            manual.param[[band, 1, ch, ch]] = coeffs.b1;
+            manual.param[[band, 2, ch, ch]] = coeffs.b2;
             manual.param[[band, 3, ch, ch]] = 1.0;
             manual.param[[band, 4, ch, ch]] = coeffs.a1;
             manual.param[[band, 5, ch, ch]] = coeffs.a2;

@@ -14,7 +14,7 @@ use ndarray::{Array2, Array3, ArrayD, Axis, IxDyn};
 use num_complex::Complex;
 
 use crate::error::AutodiffError;
-use crate::module::DiffModule;
+use crate::module::{DiffModule, validate_spectral_gradient_shape};
 use crate::tensor::DiffTensor;
 
 /// Build an identity spectrum of shape `(n_in, n_bins, n_in)`.
@@ -255,15 +255,10 @@ impl DiffModule<f64> for Recursion {
     ) -> Result<DiffTensor<f64>, AutodiffError> {
         let input_shape = input.data.shape();
         let grad_shape = grad_output.data.shape();
-        if input_shape.len() < 3 || grad_shape.len() < 3 {
-            return Err(AutodiffError::Message(
-                "Recursion::backward: input and grad_output must have at least 3 dimensions"
-                    .to_string(),
-            ));
-        }
+        let n_out = self.feedforward.output_channels();
+        validate_spectral_gradient_shape("Recursion::backward", input_shape, grad_shape, n_out)?;
         let nb = input_shape[1];
         let n_in = input_shape[2];
-        let n_out = self.feedforward.output_channels();
         if nb != self.n_bins() {
             return Err(AutodiffError::Message(format!(
                 "Recursion::backward: expected {} bins, got {}",
@@ -271,10 +266,10 @@ impl DiffModule<f64> for Recursion {
                 nb
             )));
         }
-        if grad_shape[2] != n_out {
+        if n_in != self.feedforward.input_channels() {
             return Err(AutodiffError::Message(format!(
-                "Recursion::backward: expected {} output channels, got {}",
-                n_out, grad_shape[2]
+                "Recursion::backward: expected {} input channels, got {n_in}",
+                self.feedforward.input_channels()
             )));
         }
 

@@ -2,7 +2,7 @@ use approx::assert_abs_diff_eq;
 use math_audio_autodiff::fft::{Fft, FftAntiAlias, Ifft, IfftAntiAlias};
 use math_audio_autodiff::module::DiffModule;
 use math_audio_autodiff::tensor::DiffTensor;
-use ndarray::Array1;
+use ndarray::{Array1, Array3};
 use num_complex::Complex;
 
 fn impulse(nfft: usize) -> DiffTensor<f64> {
@@ -114,6 +114,31 @@ fn fft_roundtrip_is_identity() {
     let fft = Fft::new(nfft);
     let spectrum = fft.forward(&impulse).expect("FFT forward should succeed");
     assert_abs_diff_eq!(spectrum.data[0].re, 1.0, epsilon = 1e-9);
+}
+
+#[test]
+#[should_panic(expected = "nfft must be greater than 0")]
+fn fft_rejects_zero_size_at_construction() {
+    let _ = Fft::new(0);
+}
+
+#[test]
+fn fft_explicitly_ignores_imaginary_time_domain_input() {
+    let mut data = Array3::<Complex<f64>>::zeros((1, 8, 1));
+    data[[0, 0, 0]].im = 1.0;
+    let input = DiffTensor::from_array(data.into_dyn());
+    let fft = Fft::new(8);
+    let output = fft.forward(&input).unwrap();
+    assert!(output.data.iter().all(|sample| sample.norm() == 0.0));
+}
+
+#[test]
+fn ifft_rejects_imaginary_packed_endpoints() {
+    let mut spectrum = Array1::<Complex<f64>>::zeros(5);
+    spectrum[0].im = 1.0;
+    let input = DiffTensor::from_array(spectrum);
+    let ifft = Ifft::new(8);
+    assert!(ifft.forward(&input).is_err());
 }
 
 #[test]

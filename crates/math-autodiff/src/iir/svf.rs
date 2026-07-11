@@ -27,7 +27,7 @@ use std::f64::consts::PI;
 
 use crate::error::AutodiffError;
 use crate::iir::sos_filter::SosFilter;
-use crate::module::DiffModule;
+use crate::module::{DiffModule, validate_spectral_gradient_shape};
 use crate::tensor::DiffTensor;
 
 /// SVF filter type.
@@ -215,14 +215,19 @@ fn svf_coefficients_with_gradients(
     filter_type: SvfType,
 ) -> SvfCoeffs {
     let n_params = filter_type.n_params();
-    let eps = 1e-7;
-
     let (b, a) = svf_coefficients(fc, R, gain_db, fs, filter_type);
     let mut coeffs = SvfCoeffs::zeros();
     coeffs.b = b;
     coeffs.a = a;
 
     for p in 0..n_params {
+        let value = match p {
+            0 => fc,
+            1 => R,
+            2 => gain_db,
+            _ => unreachable!(),
+        };
+        let eps = f64::EPSILON.cbrt() * value.abs().max(1.0);
         let (fc_plus, R_plus, gain_plus) = match p {
             0 => (fc + eps, R, gain_db),
             1 => (fc, R + eps, gain_db),
@@ -265,7 +270,7 @@ pub struct SvFilter {
 }
 
 impl SvFilter {
-    /// Create a new SVF filter module with zero-initialized parameters and gradients.
+    /// Create a new SVF filter module with trainable interior defaults and zero gradients.
     ///
     /// # Errors
     ///
@@ -289,6 +294,11 @@ impl SvFilter {
                 "SvFilter: fs must be finite and greater than 0".to_string(),
             ));
         }
+        if fs * 0.499 <= 1.0 {
+            return Err(AutodiffError::Message(
+                "SvFilter: fs is too small for a valid cutoff interval".to_string(),
+            ));
+        }
         if n_out == 0 {
             return Err(AutodiffError::Message(
                 "SvFilter: n_out must be greater than 0".to_string(),
@@ -300,7 +310,14 @@ impl SvFilter {
             ));
         }
         let n_params = filter_type.n_params();
-        let param = ArrayD::zeros(IxDyn(&[1, n_params, n_out, n_in]));
+        let mut param = ArrayD::zeros(IxDyn(&[1, n_params, n_out, n_in]));
+        let default_fc = 1_000.0_f64.min((1.0 + fs * 0.499) * 0.5);
+        for out_ch in 0..n_out {
+            for in_ch in 0..n_in {
+                param[[0, 0, out_ch, in_ch]] = default_fc;
+                param[[0, 1, out_ch, in_ch]] = std::f64::consts::SQRT_2;
+            }
+        }
         let param_grad = ArrayD::zeros(IxDyn(&[1, n_params, n_out, n_in]));
         let inner = SosFilter::new(nfft, 1, n_out, n_in, alias_decay_db)?;
 
@@ -457,6 +474,12 @@ impl DiffModule<f64> for SvFilter {
         let input_shape = input.data.shape();
         let grad_shape = grad_output.data.shape();
         let output_shape = output.data.shape();
+        validate_spectral_gradient_shape(
+            "SvFilter::backward",
+            input_shape,
+            grad_shape,
+            self.n_out,
+        )?;
         if grad_shape != output_shape {
             return Err(AutodiffError::Message(format!(
                 "SvFilter::backward: grad_output shape {:?} does not match output shape {:?}",

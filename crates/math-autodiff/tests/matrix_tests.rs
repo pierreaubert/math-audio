@@ -117,3 +117,52 @@ fn orthogonal_matrix_gradient_matches_finite_difference() {
         }
     }
 }
+
+#[test]
+fn orthogonal_matrix_gradient_is_accurate_for_large_parameters() {
+    let n_bins = NFFT / 2 + 1;
+    let mut matrix = Matrix::new(NFFT, 2, 2, MatrixType::Orthogonal).unwrap();
+    matrix.param[[0, 1]] = 50.0;
+    matrix.param[[1, 0]] = -20.0;
+    let input = DiffTensor::from_array(
+        Array3::<Complex<f64>>::from_elem((1, n_bins, 2), Complex::new(0.7, -0.2)).into_dyn(),
+    );
+    let mut target_data = Array3::<Complex<f64>>::from_elem((1, n_bins, 2), Complex::new(0.1, 0.3));
+    for bin in 0..n_bins {
+        target_data[[0, bin, 1]] = Complex::new(-0.4, 0.2);
+    }
+    let target = DiffTensor::from_array(target_data.into_dyn());
+    let output = matrix.forward(&input).unwrap();
+    let grad_output = DiffTensor::from_array((&output.data - &target.data) * 2.0);
+    matrix.zero_grad();
+    matrix.backward(&input, &output, &grad_output).unwrap();
+
+    let eps = 1e-4;
+    for (i, j) in [(0, 1), (1, 0)] {
+        let mut plus = matrix.clone();
+        plus.param[[i, j]] += eps;
+        let plus_output = plus.forward(&input).unwrap();
+        let plus_loss = plus_output
+            .data
+            .iter()
+            .zip(target.data.iter())
+            .map(|(actual, expected)| (actual - expected).norm_sqr())
+            .sum::<f64>();
+        let mut minus = matrix.clone();
+        minus.param[[i, j]] -= eps;
+        let minus_output = minus.forward(&input).unwrap();
+        let minus_loss = minus_output
+            .data
+            .iter()
+            .zip(target.data.iter())
+            .map(|(actual, expected)| (actual - expected).norm_sqr())
+            .sum::<f64>();
+        let numerical = (plus_loss - minus_loss) / (2.0 * eps);
+        assert_relative_eq!(
+            matrix.param_grad[[i, j]],
+            numerical,
+            epsilon = 1e-5,
+            max_relative = 1e-5
+        );
+    }
+}
