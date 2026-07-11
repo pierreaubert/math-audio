@@ -204,16 +204,20 @@ fn sgd_rejects_incompatible_gradients_before_updating() {
     let wrong_count: Vec<ArrayD<f64>> = Vec::new();
     let wrong_count_refs: Vec<&ArrayD<f64>> = wrong_count.iter().collect();
     let mut params_refs: Vec<&mut ArrayD<f64>> = params.iter_mut().collect();
-    assert!(optimizer
-        .step(&mut params_refs[..], &wrong_count_refs[..])
-        .is_err());
+    assert!(
+        optimizer
+            .step(&mut params_refs[..], &wrong_count_refs[..])
+            .is_err()
+    );
     assert_eq!(params[0], original);
 
     let wrong_shape = [ArrayD::zeros(IxDyn(&[1]))];
     let wrong_shape_refs: Vec<&ArrayD<f64>> = wrong_shape.iter().collect();
     let mut params_refs: Vec<&mut ArrayD<f64>> = params.iter_mut().collect();
-    assert!(optimizer
-        .step(&mut params_refs[..], &wrong_shape_refs[..])
-        .is_err());
+    assert!(
+        optimizer
+            .step(&mut params_refs[..], &wrong_shape_refs[..])
+            .is_err()
+    );
     assert_eq!(params[0], original);
 }

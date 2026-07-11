@@ -17,6 +17,10 @@ differentiation framework is required.
 | `matrix` | Learnable real matrices: dense (`Dense`) and orthogonal (`Orthogonal`) parameterizations. |
 | `recursion` | Closed-loop composition (`Recursion`) for feedback systems such as FDNs. |
 | `iir::biquad` | Differentiable RBJ biquad filter. |
+| `iir::sos_filter` | Generic learnable cascade of second-order sections. |
+| `iir::svf` | State Variable Filter parameterized by `fc`/`R`/`gain`. |
+| `iir::geq` | Graphic EQ with fixed ISO frequencies and learnable per-band gains. |
+| `iir::peq` | Parametric EQ with learnable frequency, Q, and gain per section. |
 | `system` | `Series` and `Shell` compositions. |
 | `loss` | MSE loss and backward helper. |
 | `optim` | Simple SGD optimizer. |
@@ -42,6 +46,13 @@ A second example, `biquad_match`, fits a single biquad section:
 
 ```bash
 cargo run --release -p math-autodiff --example biquad_match
+```
+
+A third example, `peq_match`, fits a parametric EQ cascade to a target
+magnitude response:
+
+```bash
+cargo run --release -p math-autodiff --example peq_match
 ```
 
 ## Benchmarks

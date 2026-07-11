@@ -104,7 +104,12 @@ impl Delay {
     /// # Errors
     ///
     /// Returns an error if `nfft` is zero.
-    pub fn new(nfft: usize, n_out: usize, n_in: usize, tau_min: f64) -> Result<Self, AutodiffError> {
+    pub fn new(
+        nfft: usize,
+        n_out: usize,
+        n_in: usize,
+        tau_min: f64,
+    ) -> Result<Self, AutodiffError> {
         if nfft == 0 {
             return Err(AutodiffError::Message(
                 "Delay: nfft must be greater than 0".to_string(),
@@ -139,7 +144,8 @@ impl DiffModule<f64> for Delay {
         if n_bins != self.n_bins() {
             return Err(AutodiffError::Message(format!(
                 "Delay::forward: expected {} frequency bins, got {}",
-                self.n_bins(), n_bins
+                self.n_bins(),
+                n_bins
             )));
         }
         if n_in != self.n_in {
@@ -181,7 +187,8 @@ impl DiffModule<f64> for Delay {
         let grad_shape = grad_output.data.shape();
         if input_shape.len() < 3 || grad_shape.len() < 3 {
             return Err(AutodiffError::Message(
-                "Delay::backward: input and grad_output must have at least 3 dimensions".to_string(),
+                "Delay::backward: input and grad_output must have at least 3 dimensions"
+                    .to_string(),
             ));
         }
         let n_bins = input_shape[1];
@@ -233,13 +240,27 @@ impl DiffModule<f64> for Delay {
         Ok(DiffTensor::from_array(grad_input))
     }
 
-    fn input_channels(&self) -> usize { self.n_in }
-    fn output_channels(&self) -> usize { self.n_out }
-    fn n_bins(&self) -> usize { self.n_bins() }
-    fn parameters(&self) -> Vec<&ArrayD<f64>> { vec![&self.param] }
-    fn parameters_mut(&mut self) -> Vec<&mut ArrayD<f64>> { vec![&mut self.param] }
-    fn gradients(&self) -> Vec<&ArrayD<f64>> { vec![&self.param_grad] }
-    fn zero_grad(&mut self) { self.param_grad.fill(0.0); }
+    fn input_channels(&self) -> usize {
+        self.n_in
+    }
+    fn output_channels(&self) -> usize {
+        self.n_out
+    }
+    fn n_bins(&self) -> usize {
+        self.n_bins()
+    }
+    fn parameters(&self) -> Vec<&ArrayD<f64>> {
+        vec![&self.param]
+    }
+    fn parameters_mut(&mut self) -> Vec<&mut ArrayD<f64>> {
+        vec![&mut self.param]
+    }
+    fn gradients(&self) -> Vec<&ArrayD<f64>> {
+        vec![&self.param_grad]
+    }
+    fn zero_grad(&mut self) {
+        self.param_grad.fill(0.0);
+    }
 }
 
 /// Diagonal per-channel frequency-domain delay.
@@ -273,7 +294,9 @@ impl ParallelDelay {
         })
     }
 
-    fn n_bins(&self) -> usize { self.nfft / 2 + 1 }
+    fn n_bins(&self) -> usize {
+        self.nfft / 2 + 1
+    }
 }
 
 impl DiffModule<f64> for ParallelDelay {
@@ -290,7 +313,8 @@ impl DiffModule<f64> for ParallelDelay {
         if n_bins != self.n_bins() {
             return Err(AutodiffError::Message(format!(
                 "ParallelDelay::forward: expected {} frequency bins, got {}",
-                self.n_bins(), n_bins
+                self.n_bins(),
+                n_bins
             )));
         }
         if n_channels != self.n_channels {
@@ -368,11 +392,25 @@ impl DiffModule<f64> for ParallelDelay {
         Ok(DiffTensor::from_array(grad_input))
     }
 
-    fn input_channels(&self) -> usize { self.n_channels }
-    fn output_channels(&self) -> usize { self.n_channels }
-    fn n_bins(&self) -> usize { self.n_bins() }
-    fn parameters(&self) -> Vec<&ArrayD<f64>> { vec![&self.param] }
-    fn parameters_mut(&mut self) -> Vec<&mut ArrayD<f64>> { vec![&mut self.param] }
-    fn gradients(&self) -> Vec<&ArrayD<f64>> { vec![&self.param_grad] }
-    fn zero_grad(&mut self) { self.param_grad.fill(0.0); }
+    fn input_channels(&self) -> usize {
+        self.n_channels
+    }
+    fn output_channels(&self) -> usize {
+        self.n_channels
+    }
+    fn n_bins(&self) -> usize {
+        self.n_bins()
+    }
+    fn parameters(&self) -> Vec<&ArrayD<f64>> {
+        vec![&self.param]
+    }
+    fn parameters_mut(&mut self) -> Vec<&mut ArrayD<f64>> {
+        vec![&mut self.param]
+    }
+    fn gradients(&self) -> Vec<&ArrayD<f64>> {
+        vec![&self.param_grad]
+    }
+    fn zero_grad(&mut self) {
+        self.param_grad.fill(0.0);
+    }
 }

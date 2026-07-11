@@ -36,11 +36,7 @@ fn highpass_coeffs(fc: f64, gain_db: f64) -> ([f64; 3], [f64; 3]) {
     let cs = omega.cos();
     let alpha = sn / 2.0 * std::f64::consts::SQRT_2;
 
-    let mut b = [
-        (1.0 + cs) / 2.0,
-        -(1.0 + cs),
-        (1.0 + cs) / 2.0,
-    ];
+    let mut b = [(1.0 + cs) / 2.0, -(1.0 + cs), (1.0 + cs) / 2.0];
     let a = [1.0 + alpha, -2.0 * cs, 1.0 - alpha];
 
     let gain_lin = 10.0_f64.powf(gain_db / 20.0);
@@ -50,7 +46,10 @@ fn highpass_coeffs(fc: f64, gain_db: f64) -> ([f64; 3], [f64; 3]) {
 
     // Normalize by a0.
     let a0 = a[0];
-    ([b[0] / a0, b[1] / a0, b[2] / a0], [1.0, a[1] / a0, a[2] / a0])
+    (
+        [b[0] / a0, b[1] / a0, b[2] / a0],
+        [1.0, a[1] / a0, a[2] / a0],
+    )
 }
 
 /// Compute the complex frequency response of a cascade of highpass sections.
@@ -106,8 +105,8 @@ fn target_response<R: Rng>(rng: &mut R) -> Array3<Complex<f64>> {
         for bin in 0..n_bins {
             for out in 0..OUT_CH {
                 for inp in 0..IN_CH {
-                    h[[bin, out, inp]] *= b_response[[section, bin, out, inp]]
-                        / a_response[[section, bin, out, inp]];
+                    h[[bin, out, inp]] *=
+                        b_response[[section, bin, out, inp]] / a_response[[section, bin, out, inp]];
                 }
             }
         }
@@ -188,7 +187,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         let grad = mse_loss_backward(&pred, &target)?;
         shell.backward(&input, &pred, &grad)?;
-        let grads_owned: Vec<ndarray::ArrayD<f64>> = shell.gradients().iter().map(|g| (*g).clone()).collect();
+        let grads_owned: Vec<ndarray::ArrayD<f64>> =
+            shell.gradients().iter().map(|g| (*g).clone()).collect();
         let mut params = shell.parameters_mut();
         let grads: Vec<&ndarray::ArrayD<f64>> = grads_owned.iter().collect();
         sgd.step(&mut params[..], &grads[..])?;
