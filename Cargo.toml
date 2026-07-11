@@ -43,7 +43,7 @@ criterion = "0.8.1"
 
 # Optimization and math
 ndarray = { version = "0.17", default-features = false, features = ["rayon", "serde"] }
-nalgebra = { version = "0.33", default-features = false, features = ["std"] }
+nalgebra = { version = "0.35", default-features = false, features = ["std"] }
 oxiblas-ndarray = { version = "0.2.1" }
 rand = "0.9.2"
 num-complex = "0.4"
