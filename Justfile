@@ -58,6 +58,7 @@ bench: bench-math
 bench-math:
 	cargo run --release --bin benchmark-convergence -p math-optimisation
 	cargo run --release --bin biquad-bench -p math-iir-fir
+	cargo bench --release -p math-autodiff --bench biquad_bench
 
 # ----------------------------------------------------------------------
 # CLEAN
@@ -94,7 +95,15 @@ update-pre-commit:
 
 examples: examples-math
 
-examples-math: examples-iir examples-optimisation examples-testfunctions
+examples-math: examples-autodiff examples-iir examples-optimisation examples-testfunctions
+
+examples-autodiff:
+	cargo run --release --example biquad_match -p math-autodiff
+	cargo run --release --example fdn_direct_match -p math-autodiff
+	cargo run --release --example fdn_match -p math-autodiff
+	cargo run --release --example geq_match -p math-autodiff
+	cargo run --release --example peq_match -p math-autodiff
+	cargo run --release --example svf_match -p math-autodiff
 
 examples-iir:
 	cargo run --release --example format_demo -p math-iir-fir
@@ -111,8 +120,8 @@ examples-optimisation:
 	cargo run --release --example optde_parallel -p math-optimisation
 
 examples-testfunctions:
-	cargo run --release --example test_hartman-4d -p math-test-functions
-	cargo run --release --example test_new-sfu-functions -p math-test-functions
+	cargo run --release --example test_hartman_4d -p math-test-functions
+	cargo run --release --example test_new_sfu_functions -p math-test-functions
 
 # ----------------------------------------------------------------------
 # Install rustup
@@ -209,6 +218,7 @@ publish-math:
 	cd crates/math-rir && cargo publish
 	cd crates/math-delaunay && cargo publish
 	cd crates/math-convex-hull && cargo publish
+	cd crates/math-autodiff && cargo publish
 
 # ----------------------------------------------------------------------
 # QA

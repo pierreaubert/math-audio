@@ -21,7 +21,7 @@ use ndarray::{Array3, Array4, ArrayD, Axis, IxDyn};
 use num_complex::Complex;
 
 use crate::error::AutodiffError;
-use crate::iir::response::{sos_frequency_response, sos_frequency_response_jacobian};
+use crate::iir::response::{sos_frequency_response, sos_response};
 use crate::module::{DiffModule, validate_spectral_gradient_shape};
 use crate::tensor::DiffTensor;
 
@@ -178,7 +178,9 @@ impl DiffModule<f64> for SosFilter {
                     let input_bin = input_slice.index_axis(Axis(1), in_ch);
                     let mut output_slice = output.index_axis_mut(Axis(1), bin);
                     let mut output_bin = output_slice.index_axis_mut(Axis(1), out_ch);
-                    output_bin += &input_bin.mapv(|x| x * h_val);
+                    for (destination, &source) in output_bin.iter_mut().zip(input_bin.iter()) {
+                        *destination += source * h_val;
+                    }
                 }
             }
         }
@@ -225,8 +227,10 @@ impl DiffModule<f64> for SosFilter {
 
         let (b, a) = split_param(&self.param)?;
         let gamma = self.gamma();
-        let h = sos_frequency_response(&b, &a, self.nfft, Some(&gamma))?;
-        let (dh_db, dh_da) = sos_frequency_response_jacobian(&b, &a, self.nfft, Some(&gamma))?;
+        let response = sos_response(&b, &a, self.nfft, &gamma);
+        let h = response.h;
+        let dh_db = response.dh_db;
+        let dh_da = response.dh_da;
 
         // dL/dH[bin, out, in] = sum_b grad_output[b, bin, out] * conj(input[b, bin, in])
         let mut dl_dh = Array3::<Complex<f64>>::zeros((n_bins, n_out, n_in));
@@ -283,7 +287,9 @@ impl DiffModule<f64> for SosFilter {
                     let grad_bin = grad_slice.index_axis(Axis(1), out_ch);
                     let mut input_grad_slice = grad_input.index_axis_mut(Axis(1), bin);
                     let mut input_grad_bin = input_grad_slice.index_axis_mut(Axis(1), in_ch);
-                    input_grad_bin += &grad_bin.mapv(|g| g * h_conj);
+                    for (destination, &gradient) in input_grad_bin.iter_mut().zip(grad_bin.iter()) {
+                        *destination += gradient * h_conj;
+                    }
                 }
             }
         }

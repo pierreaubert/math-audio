@@ -24,6 +24,7 @@ just ntest            # Run with nextest (parallel, no-fail-fast)
 # Run single test
 cargo test -p math-dsp test_name
 cargo test -p math-iir-fir test_name -- --nocapture
+cargo test -p math-autodiff test_name
 
 # QA suites
 just qa               # Run math QA suite
@@ -43,6 +44,7 @@ cargo clippy --workspace  # Lint (strict clippy enabled in workspace)
 | `math-convex-hull` | 3D convex hull (Quickhull) |
 | `math-delaunay` | 2D Delaunay triangulation and Voronoi diagrams |
 | `math-dsp` | DSP utilities: signal generation, FFT analysis, loudness, dynamics, etc. |
+| `math-autodiff` | Frequency-domain differentiable audio DSP with analytical gradients |
 | `math-iir-fir` | IIR/FIR filters, biquads, PEQ, crossovers, EqualizerAPO export |
 | `math-optimisation` | Non-linear optimisation: DE, Levenberg-Marquardt, COBYLA, ISRES, CMA-ES |
 | `math-rir` | Room Impulse Response analysis: SSIR segmentation, ISO 3382 metrics |
@@ -54,7 +56,18 @@ cargo clippy --workspace  # Lint (strict clippy enabled in workspace)
 math-dsp → math-iir-fir
 math-rir → math-iir-fir
 math-optimisation → math-test-functions
+math-autodiff → math-dsp, math-iir-fir
 ```
+
+### Differentiable DSP Architecture (math-autodiff/src/)
+
+- `fft`: Real FFT/IFFT modules and anti-aliasing envelopes with adjoint gradients.
+- `gain`, `delay`, `matrix`: Differentiable LTI building blocks for channel mixing,
+  magnitude, phase delay, and orthogonal/dense matrices.
+- `iir/`: Biquad, SOS, PEQ, graphic EQ, SVF, and frequency-response Jacobians.
+- `recursion`, `system`: Feedback, series, parallel, and shell compositions.
+- `loss`, `optim`, `signals`, `tensor`: Losses, SGD, experiment signals, and
+  complex tensor support.
 
 ### DSP Architecture (math-dsp/src/)
 

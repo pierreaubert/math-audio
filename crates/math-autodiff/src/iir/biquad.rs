@@ -31,8 +31,8 @@ use std::f64::consts::{PI, SQRT_2};
 
 use crate::error::AutodiffError;
 use crate::iir::response::{
-    sos_frequency_response, sos_frequency_response_jacobian,
-    sos_frequency_response_jacobian_parallel, sos_frequency_response_parallel,
+    sos_frequency_response, sos_frequency_response_jacobian_parallel,
+    sos_frequency_response_parallel, sos_response,
 };
 use crate::module::{DiffModule, validate_spectral_gradient_shape};
 use crate::tensor::DiffTensor;
@@ -610,7 +610,9 @@ impl DiffModule<f64> for Biquad {
                     let h_val = h[[bin, out_ch, in_ch]];
                     let mut output_axis2 = output.index_axis_mut(Axis(1), bin);
                     let mut output_bin = output_axis2.index_axis_mut(Axis(1), out_ch);
-                    output_bin += &input_bin.mapv(|x| x * h_val);
+                    for (destination, &source) in output_bin.iter_mut().zip(input_bin.iter()) {
+                        *destination += source * h_val;
+                    }
                 }
             }
         }
@@ -669,8 +671,10 @@ impl DiffModule<f64> for Biquad {
 
         let (b, a, db_dparam, da_dparam) = self.build_coeffs_and_grads()?;
         let gamma = self.gamma();
-        let h = sos_frequency_response(&b, &a, self.nfft, Some(&gamma))?;
-        let (dh_db, dh_da) = sos_frequency_response_jacobian(&b, &a, self.nfft, Some(&gamma))?;
+        let response = sos_response(&b, &a, self.nfft, &gamma);
+        let h = response.h;
+        let dh_db = response.dh_db;
+        let dh_da = response.dh_da;
 
         // Compute dLoss/dH using real parts (MVP assumption: real time-domain signals).
         let mut dl_dh = Array3::zeros((n_bins, n_out, n_in));
@@ -722,7 +726,9 @@ impl DiffModule<f64> for Biquad {
                     let grad_bin = grad_axis2.index_axis(Axis(1), bin);
                     let mut input_axis2 = grad_input.index_axis_mut(Axis(2), in_ch);
                     let mut input_bin = input_axis2.index_axis_mut(Axis(1), bin);
-                    input_bin += &grad_bin.mapv(|x| x * h_conj);
+                    for (destination, &gradient) in input_bin.iter_mut().zip(grad_bin.iter()) {
+                        *destination += gradient * h_conj;
+                    }
                 }
             }
         }
@@ -995,7 +1001,9 @@ impl DiffModule<f64> for ParallelBiquad {
                 let input_bin = input_axis2.index_axis(Axis(1), bin);
                 let mut output_axis2 = output.index_axis_mut(Axis(2), ch);
                 let mut output_bin = output_axis2.index_axis_mut(Axis(1), bin);
-                output_bin += &input_bin.mapv(|x| x * h_val);
+                for (destination, &source) in output_bin.iter_mut().zip(input_bin.iter()) {
+                    *destination += source * h_val;
+                }
             }
         }
 
@@ -1106,7 +1114,9 @@ impl DiffModule<f64> for ParallelBiquad {
                 let grad_bin = grad_axis2.index_axis(Axis(1), bin);
                 let mut input_axis2 = grad_input.index_axis_mut(Axis(2), ch);
                 let mut input_bin = input_axis2.index_axis_mut(Axis(1), bin);
-                input_bin += &grad_bin.mapv(|x| x * h_conj);
+                for (destination, &gradient) in input_bin.iter_mut().zip(grad_bin.iter()) {
+                    *destination += gradient * h_conj;
+                }
             }
         }
 

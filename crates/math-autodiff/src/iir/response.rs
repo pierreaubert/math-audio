@@ -1,6 +1,5 @@
 use ndarray::{Array2, Array3, Array4, Array5, ArrayBase, Axis, Data, Ix4};
 use num_complex::Complex;
-use rustfft::FftPlanner;
 
 use crate::error::AutodiffError;
 
@@ -20,6 +19,57 @@ pub struct SosResponse {
 /// Validate common SOS inputs and resolve the gamma envelope.
 fn resolve_gamma(gamma: Option<&[f64; 3]>) -> [f64; 3] {
     gamma.copied().unwrap_or(DEFAULT_GAMMA)
+}
+
+#[allow(
+    clippy::cast_precision_loss,
+    reason = "FFT indices and practical audio FFT sizes are exactly representable as f64"
+)]
+fn tap_frequency_response(nfft: usize, gamma: &[f64; 3]) -> Array2<Complex<f64>> {
+    let n_bins = nfft / 2 + 1;
+    let mut response = Array2::zeros((3, n_bins));
+    for bin in 0..n_bins {
+        let angle = -std::f64::consts::TAU * bin as f64 / nfft as f64;
+        let z1 = Complex::new(angle.cos(), angle.sin());
+        response[[0, bin]] = Complex::from(gamma[0]);
+        response[[1, bin]] = z1 * gamma[1];
+        response[[2, bin]] = z1 * z1 * gamma[2];
+    }
+    response
+}
+
+fn sos_frequency_response_impl<S>(
+    b: &ArrayBase<S, Ix4>,
+    a: &ArrayBase<S, Ix4>,
+    nfft: usize,
+    gamma: &[f64; 3],
+) -> Array3<Complex<f64>>
+where
+    S: Data<Elem = Complex<f64>>,
+{
+    let (n_sections, _, n_out, n_in) = b.dim();
+    let n_bins = nfft / 2 + 1;
+    let tap_response = tap_frequency_response(nfft, gamma);
+    let mut h = Array3::from_elem((n_bins, n_out, n_in), Complex::from(1.0));
+
+    for section in 0..n_sections {
+        for bin in 0..n_bins {
+            for out_ch in 0..n_out {
+                for in_ch in 0..n_in {
+                    let mut numerator = Complex::<f64>::default();
+                    let mut denominator = Complex::<f64>::default();
+                    for tap in 0..3 {
+                        let basis = tap_response[[tap, bin]];
+                        numerator += b[[section, tap, out_ch, in_ch]] * basis;
+                        denominator += a[[section, tap, out_ch, in_ch]] * basis;
+                    }
+                    h[[bin, out_ch, in_ch]] *= numerator / denominator;
+                }
+            }
+        }
+    }
+
+    h
 }
 
 /// Compute H(f) and its analytical Jacobian w.r.t. b/a coefficients.
@@ -62,19 +112,7 @@ where
     let (n_sections, _, n_out, n_in) = b.dim();
     let n_bins = nfft / 2 + 1;
 
-    let mut planner = FftPlanner::<f64>::new();
-    let fft = planner.plan_fft_forward(nfft);
-
-    // Precompute FFT(gamma[t] * e_t) for each tap t. Shape (3, n_bins).
-    let mut fft_envelope = Array2::zeros((3, n_bins));
-    for tap in 0..3 {
-        let mut buf = vec![Complex::<f64>::default(); nfft];
-        buf[tap] = Complex::from(gamma[tap]);
-        fft.process(&mut buf);
-        for bin in 0..n_bins {
-            fft_envelope[[tap, bin]] = buf[bin];
-        }
-    }
+    let fft_envelope = tap_frequency_response(nfft, gamma);
 
     // Compute B_k and A_k for every section, and accumulate H = prod_k B_k/A_k.
     let mut h = Array3::from_elem((n_bins, n_out, n_in), Complex::from(1.0));
@@ -85,13 +123,11 @@ where
         // Numerator B_section(f).
         for out_ch in 0..n_out {
             for in_ch in 0..n_in {
-                let mut buf = vec![Complex::<f64>::default(); nfft];
-                for tap in 0..3 {
-                    buf[tap] = b[[section, tap, out_ch, in_ch]] * gamma[tap];
-                }
-                fft.process(&mut buf);
                 for bin in 0..n_bins {
-                    let val = buf[bin];
+                    let mut val = Complex::default();
+                    for tap in 0..3 {
+                        val += b[[section, tap, out_ch, in_ch]] * fft_envelope[[tap, bin]];
+                    }
                     b_response[[section, bin, out_ch, in_ch]] = val;
                     h[[bin, out_ch, in_ch]] *= val;
                 }
@@ -101,13 +137,11 @@ where
         // Denominator A_section(f).
         for out_ch in 0..n_out {
             for in_ch in 0..n_in {
-                let mut buf = vec![Complex::<f64>::default(); nfft];
-                for tap in 0..3 {
-                    buf[tap] = a[[section, tap, out_ch, in_ch]] * gamma[tap];
-                }
-                fft.process(&mut buf);
                 for bin in 0..n_bins {
-                    let val = buf[bin];
+                    let mut val = Complex::default();
+                    for tap in 0..3 {
+                        val += a[[section, tap, out_ch, in_ch]] * fft_envelope[[tap, bin]];
+                    }
                     a_response[[section, bin, out_ch, in_ch]] = val;
                     h[[bin, out_ch, in_ch]] /= val;
                 }
@@ -176,8 +210,7 @@ pub fn sos_frequency_response(
     let gamma = resolve_gamma(gamma);
     let b_view = b.view();
     let a_view = a.view();
-    let resp = sos_response_impl(&b_view, &a_view, nfft, &gamma);
-    Ok(resp.h)
+    Ok(sos_frequency_response_impl(&b_view, &a_view, nfft, &gamma))
 }
 
 /// Compute the analytical Jacobian of the SOS frequency response w.r.t. the

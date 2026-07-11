@@ -5,7 +5,11 @@
 
 use ndarray::{ArrayD, IxDyn};
 use num_complex::Complex;
-use realfft::RealFftPlanner;
+use realfft::{ComplexToReal, RealFftPlanner, RealToComplex};
+use std::{
+    fmt,
+    sync::{Arc, OnceLock},
+};
 
 use crate::error::AutodiffError;
 use crate::module::DiffModule;
@@ -82,6 +86,28 @@ fn output_shape_for(input_shape: &[usize], n_bins: usize) -> Vec<usize> {
     output_shape
 }
 
+#[derive(Clone)]
+struct FftPlans {
+    forward: Arc<dyn RealToComplex<f64>>,
+    inverse: Arc<dyn ComplexToReal<f64>>,
+}
+
+impl FftPlans {
+    fn new(nfft: usize) -> Self {
+        let mut planner = RealFftPlanner::<f64>::new();
+        Self {
+            forward: planner.plan_fft_forward(nfft),
+            inverse: planner.plan_fft_inverse(nfft),
+        }
+    }
+}
+
+impl fmt::Debug for FftPlans {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("FftPlans")
+    }
+}
+
 /// Real-to-complex FFT differentiable module.
 ///
 /// Processes the second-to-last axis of a tensor as the time dimension. The
@@ -92,6 +118,7 @@ fn output_shape_for(input_shape: &[usize], n_bins: usize) -> Vec<usize> {
 pub struct Fft {
     pub nfft: usize,
     pub channels: usize,
+    plans: OnceLock<FftPlans>,
 }
 
 impl Fft {
@@ -99,18 +126,30 @@ impl Fft {
     #[must_use]
     pub const fn new(nfft: usize) -> Self {
         validate_fft_config(nfft, 1);
-        Self { nfft, channels: 1 }
+        Self {
+            nfft,
+            channels: 1,
+            plans: OnceLock::new(),
+        }
     }
 
     /// Create a new FFT module for `channels` parallel channels.
     #[must_use]
     pub const fn with_channels(nfft: usize, channels: usize) -> Self {
         validate_fft_config(nfft, channels);
-        Self { nfft, channels }
+        Self {
+            nfft,
+            channels,
+            plans: OnceLock::new(),
+        }
     }
 
     const fn n_bins(&self) -> usize {
         self.nfft / 2 + 1
+    }
+
+    fn plans(&self) -> &FftPlans {
+        self.plans.get_or_init(|| FftPlans::new(self.nfft))
     }
 }
 
@@ -131,8 +170,7 @@ impl DiffModule<f64> for Fft {
             )));
         }
 
-        let mut planner = RealFftPlanner::<f64>::new();
-        let r2c = planner.plan_fft_forward(self.nfft);
+        let r2c = &self.plans().forward;
 
         let input_3d = input
             .data
@@ -184,8 +222,7 @@ impl DiffModule<f64> for Fft {
             )));
         }
 
-        let mut planner = RealFftPlanner::<f64>::new();
-        let c2r = planner.plan_fft_inverse(self.nfft);
+        let c2r = &self.plans().inverse;
 
         let grad_3d = grad_output
             .data
@@ -261,6 +298,7 @@ impl DiffModule<f64> for Fft {
 pub struct Ifft {
     pub nfft: usize,
     pub channels: usize,
+    plans: OnceLock<FftPlans>,
 }
 
 impl Ifft {
@@ -268,18 +306,30 @@ impl Ifft {
     #[must_use]
     pub const fn new(nfft: usize) -> Self {
         validate_fft_config(nfft, 1);
-        Self { nfft, channels: 1 }
+        Self {
+            nfft,
+            channels: 1,
+            plans: OnceLock::new(),
+        }
     }
 
     /// Create a new inverse FFT module for `channels` parallel channels.
     #[must_use]
     pub const fn with_channels(nfft: usize, channels: usize) -> Self {
         validate_fft_config(nfft, channels);
-        Self { nfft, channels }
+        Self {
+            nfft,
+            channels,
+            plans: OnceLock::new(),
+        }
     }
 
     const fn n_bins(&self) -> usize {
         self.nfft / 2 + 1
+    }
+
+    fn plans(&self) -> &FftPlans {
+        self.plans.get_or_init(|| FftPlans::new(self.nfft))
     }
 }
 
@@ -301,8 +351,7 @@ impl DiffModule<f64> for Ifft {
             )));
         }
 
-        let mut planner = RealFftPlanner::<f64>::new();
-        let c2r = planner.plan_fft_inverse(self.nfft);
+        let c2r = &self.plans().inverse;
 
         let input_3d = input
             .data
@@ -356,8 +405,7 @@ impl DiffModule<f64> for Ifft {
             )));
         }
 
-        let mut planner = RealFftPlanner::<f64>::new();
-        let r2c = planner.plan_fft_forward(self.nfft);
+        let r2c = &self.plans().forward;
 
         let grad_3d = grad_output
             .data
@@ -433,6 +481,7 @@ pub struct FftAntiAlias {
     pub alias_decay_db: f64,
     pub gamma: f64,
     pub envelope: Vec<f64>,
+    plans: FftPlans,
 }
 
 impl FftAntiAlias {
@@ -471,6 +520,7 @@ impl FftAntiAlias {
             alias_decay_db,
             gamma,
             envelope,
+            plans: FftPlans::new(nfft),
         }
     }
 
@@ -496,8 +546,7 @@ impl DiffModule<f64> for FftAntiAlias {
             )));
         }
 
-        let mut planner = RealFftPlanner::<f64>::new();
-        let r2c = planner.plan_fft_forward(self.nfft);
+        let r2c = &self.plans.forward;
 
         let input_3d = input
             .data
@@ -553,8 +602,7 @@ impl DiffModule<f64> for FftAntiAlias {
             )));
         }
 
-        let mut planner = RealFftPlanner::<f64>::new();
-        let c2r = planner.plan_fft_inverse(self.nfft);
+        let c2r = &self.plans.inverse;
 
         let grad_3d = grad_output
             .data
@@ -631,6 +679,7 @@ pub struct IfftAntiAlias {
     pub alias_decay_db: f64,
     pub gamma: f64,
     pub envelope: Vec<f64>,
+    plans: FftPlans,
 }
 
 impl IfftAntiAlias {
@@ -669,6 +718,7 @@ impl IfftAntiAlias {
             alias_decay_db,
             gamma,
             envelope,
+            plans: FftPlans::new(nfft),
         }
     }
 
@@ -695,8 +745,7 @@ impl DiffModule<f64> for IfftAntiAlias {
             )));
         }
 
-        let mut planner = RealFftPlanner::<f64>::new();
-        let c2r = planner.plan_fft_inverse(self.nfft);
+        let c2r = &self.plans.inverse;
 
         let input_3d = input
             .data
@@ -754,8 +803,7 @@ impl DiffModule<f64> for IfftAntiAlias {
             )));
         }
 
-        let mut planner = RealFftPlanner::<f64>::new();
-        let r2c = planner.plan_fft_forward(self.nfft);
+        let r2c = &self.plans.forward;
 
         let grad_3d = grad_output
             .data
