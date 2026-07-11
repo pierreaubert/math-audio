@@ -21,7 +21,8 @@ differentiation framework is required.
 | `iir::svf` | State Variable Filter parameterized by `fc`/`R`/`gain`. |
 | `iir::geq` | Graphic EQ with fixed ISO frequencies and learnable per-band gains. |
 | `iir::peq` | Parametric EQ with learnable frequency, Q, and gain per section. |
-| `system` | `Series` and `Shell` compositions. |
+| `system` | `Series`, `Parallel`, and `Shell` compositions. |
+| `signals` | Signal generators: impulse, step, noise, sine sweep, wav file loader. |
 | `loss` | MSE loss and backward helper. |
 | `optim` | Simple SGD optimizer. |
 
@@ -53,6 +54,26 @@ magnitude response:
 
 ```bash
 cargo run --release -p math-autodiff --example peq_match
+```
+
+A fourth example, `svf_match`, fits a State Variable Filter to a target
+magnitude response:
+
+```bash
+cargo run --release -p math-autodiff --example svf_match
+```
+
+A fifth example, `geq_match`, fits a graphic EQ to a target magnitude response:
+
+```bash
+cargo run --release -p math-autodiff --example geq_match
+```
+
+A sixth example, `fdn_direct_match`, matches an FDN core plus a separate
+direct path using the `Parallel` combiner:
+
+```bash
+cargo run --release -p math-autodiff --example fdn_direct_match
 ```
 
 ## Benchmarks
