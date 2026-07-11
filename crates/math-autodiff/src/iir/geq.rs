@@ -1,10 +1,6 @@
 //! Fixed-frequency graphic equalizer with learnable per-band gains.
 
 #![allow(
-    clippy::cast_precision_loss,
-    reason = "nfft is an audio buffer length that fits exactly in f64 for practical values"
-)]
-#![allow(
     clippy::uninlined_format_args,
     reason = "format strings are clearer with explicit arguments in error messages"
 )]
@@ -75,19 +71,19 @@ impl GraphicEq {
         alias_decay_db: f64,
     ) -> Result<Self, AutodiffError> {
         if nfft == 0 {
-            return Err(AutodiffError::Message(
-                "GraphicEq: nfft must be greater than 0".to_string(),
-            ));
+            return Err(AutodiffError::Message(format!(
+                "GraphicEq: nfft must be greater than 0, got {nfft}"
+            )));
         }
         if n_bands == 0 {
-            return Err(AutodiffError::Message(
-                "GraphicEq: n_bands must be greater than 0".to_string(),
-            ));
+            return Err(AutodiffError::Message(format!(
+                "GraphicEq: n_bands must be greater than 0, got {n_bands}"
+            )));
         }
         if n_channels == 0 {
-            return Err(AutodiffError::Message(
-                "GraphicEq: n_channels must be greater than 0".to_string(),
-            ));
+            return Err(AutodiffError::Message(format!(
+                "GraphicEq: n_channels must be greater than 0, got {n_channels}"
+            )));
         }
         if n_bands > ISO_CENTER_FREQUENCIES.len() {
             return Err(AutodiffError::Message(format!(
@@ -131,31 +127,44 @@ impl GraphicEq {
         self.nfft / 2 + 1
     }
 
-    /// Rebuild the inner SOS coefficients from the current gain parameters.
+    /// Fill an SOS coefficient tensor for a graphic EQ.
     ///
+    /// `param` must have shape `(n_bands, 6, n_channels, n_channels)`.
     /// Per-channel diagonal coefficients realize the peaking filters; all
     /// off-diagonal couplings are set to a zero-response section
     /// (`b = [0, 0, 0]`, `a = [1, 0, 0]`) so that the cascade response stays
     /// finite and the output channel matrix remains diagonal.
-    fn rebuild_inner(&mut self) {
-        self.inner.param.fill(0.0);
-        for band in 0..self.n_bands {
-            for out_ch in 0..self.n_channels {
-                for in_ch in 0..self.n_channels {
-                    self.inner.param[[band, 3, out_ch, in_ch]] = 1.0;
+    fn fill_sos_param(
+        param: &mut ArrayD<f64>,
+        frequencies: &[f64],
+        gains: &ArrayD<f64>,
+        fs: f64,
+    ) {
+        let n_bands = frequencies.len();
+        let n_channels = gains.shape()[1];
+        param.fill(0.0);
+        for band in 0..n_bands {
+            for out_ch in 0..n_channels {
+                for in_ch in 0..n_channels {
+                    param[[band, 3, out_ch, in_ch]] = 1.0;
                 }
             }
         }
-        for (band, &fc) in self.frequencies.iter().enumerate() {
-            let (b_peak, a) = peak_coefficients(fc, DEFAULT_Q, self.fs);
-            for ch in 0..self.n_channels {
-                let gain = self.param[[band, ch]];
+        for (band, &fc) in frequencies.iter().enumerate() {
+            let (b_peak, a) = peak_coefficients(fc, DEFAULT_Q, fs);
+            for ch in 0..n_channels {
+                let gain = gains[[band, ch]];
                 for (tap, &b_tap) in b_peak.iter().enumerate() {
-                    self.inner.param[[band, tap, ch, ch]] = gain * b_tap;
-                    self.inner.param[[band, 3 + tap, ch, ch]] = a[tap];
+                    param[[band, tap, ch, ch]] = gain * b_tap;
+                    param[[band, 3 + tap, ch, ch]] = a[tap];
                 }
             }
         }
+    }
+
+    /// Rebuild the inner SOS coefficients from the current gain parameters.
+    fn rebuild_inner(&mut self) {
+        Self::fill_sos_param(&mut self.inner.param, &self.frequencies, &self.param, self.fs);
     }
 
     /// Build a fresh inner SOS filter reflecting the current parameters.
@@ -163,24 +172,7 @@ impl GraphicEq {
     /// Used by the immutable `forward` pass.
     fn build_fresh_inner(&self) -> SosFilter {
         let mut inner = self.inner.clone();
-        inner.param.fill(0.0);
-        for band in 0..self.n_bands {
-            for out_ch in 0..self.n_channels {
-                for in_ch in 0..self.n_channels {
-                    inner.param[[band, 3, out_ch, in_ch]] = 1.0;
-                }
-            }
-        }
-        for (band, &fc) in self.frequencies.iter().enumerate() {
-            let (b_peak, a) = peak_coefficients(fc, DEFAULT_Q, self.fs);
-            for ch in 0..self.n_channels {
-                let gain = self.param[[band, ch]];
-                for (tap, &b_tap) in b_peak.iter().enumerate() {
-                    inner.param[[band, tap, ch, ch]] = gain * b_tap;
-                    inner.param[[band, 3 + tap, ch, ch]] = a[tap];
-                }
-            }
-        }
+        Self::fill_sos_param(&mut inner.param, &self.frequencies, &self.param, self.fs);
         inner
     }
 
@@ -282,7 +274,7 @@ impl DiffModule<f64> for GraphicEq {
     }
 
     fn n_bins(&self) -> usize {
-        self.n_bins()
+        self.nfft / 2 + 1
     }
 
     fn parameters(&self) -> Vec<&ArrayD<f64>> {
