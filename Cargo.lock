@@ -1720,8 +1720,10 @@ name = "math-autodiff"
 version = "0.5.0"
 dependencies = [
  "approx",
+ "criterion",
  "math-dsp",
  "math-iir-fir",
+ "nalgebra",
  "ndarray",
  "num-complex",
  "num-traits",

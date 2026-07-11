@@ -25,8 +25,8 @@ impl Sgd {
     /// Returns an error if the parameter and gradient counts or shapes differ.
     pub fn step(
         &self,
-        params: &mut [ArrayD<f64>],
-        grads: &[ArrayD<f64>],
+        params: &mut [&mut ArrayD<f64>],
+        grads: &[&ArrayD<f64>],
     ) -> Result<(), AutodiffError> {
         if params.len() != grads.len() {
             return Err(AutodiffError::Message(format!(
@@ -45,7 +45,7 @@ impl Sgd {
             }
         }
         for (p, g) in params.iter_mut().zip(grads) {
-            *p -= &(g * self.lr);
+            **p -= &(*g * self.lr);
         }
         Ok(())
     }

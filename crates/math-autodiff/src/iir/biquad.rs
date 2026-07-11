@@ -638,15 +638,16 @@ impl DiffModule<f64> for Biquad {
     fn backward(
         &mut self,
         input: &DiffTensor<f64>,
-        _output: &DiffTensor<f64>,
+        output: &DiffTensor<f64>,
         grad_output: &DiffTensor<f64>,
     ) -> Result<DiffTensor<f64>, AutodiffError> {
         let input_shape = input.data.shape();
         let grad_shape = grad_output.data.shape();
-        if input_shape != grad_shape {
+        let output_shape = output.data.shape();
+        if grad_shape != output_shape {
             return Err(AutodiffError::Message(format!(
-                "Biquad::backward: input shape {:?} does not match grad_output shape {:?}",
-                input_shape, grad_shape
+                "Biquad::backward: grad_output shape {:?} does not match output shape {:?}",
+                grad_shape, output_shape
             )));
         }
         if input_shape.len() < 3 {
@@ -1011,15 +1012,16 @@ impl DiffModule<f64> for ParallelBiquad {
     fn backward(
         &mut self,
         input: &DiffTensor<f64>,
-        _output: &DiffTensor<f64>,
+        output: &DiffTensor<f64>,
         grad_output: &DiffTensor<f64>,
     ) -> Result<DiffTensor<f64>, AutodiffError> {
         let input_shape = input.data.shape();
         let grad_shape = grad_output.data.shape();
-        if input_shape != grad_shape {
+        let output_shape = output.data.shape();
+        if grad_shape != output_shape {
             return Err(AutodiffError::Message(format!(
-                "ParallelBiquad::backward: input shape {:?} does not match grad_output shape {:?}",
-                input_shape, grad_shape
+                "ParallelBiquad::backward: grad_output shape {:?} does not match output shape {:?}",
+                grad_shape, output_shape
             )));
         }
         if input_shape.len() < 3 {
