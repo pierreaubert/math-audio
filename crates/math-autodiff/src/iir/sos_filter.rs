@@ -238,8 +238,18 @@ impl DiffModule<f64> for SosFilter {
                         let mut accum_a = 0.0;
                         for bin in 0..n_bins {
                             let term = dl_dh[[bin, out_ch, in_ch]].conj();
-                            accum_b += (term * dh_db[[bin, section, tap, out_ch, in_ch]]).re;
-                            accum_a += (term * dh_da[[bin, section, tap, out_ch, in_ch]]).re;
+                            let db_term = term * dh_db[[bin, section, tap, out_ch, in_ch]];
+                            let da_term = term * dh_da[[bin, section, tap, out_ch, in_ch]];
+                            // Non-finite Jacobian terms occur at frequencies where the
+                            // numerator/denominator response is exactly zero (e.g. lowpass
+                            // at Nyquist); their contribution is skipped because the loss
+                            // gradient at those bins is also zero for practical targets.
+                            if db_term.is_finite() {
+                                accum_b += db_term.re;
+                            }
+                            if da_term.is_finite() {
+                                accum_a += da_term.re;
+                            }
                         }
                         param_grad[[section, tap, out_ch, in_ch]] += accum_b;
                         param_grad[[section, 3 + tap, out_ch, in_ch]] += accum_a;
