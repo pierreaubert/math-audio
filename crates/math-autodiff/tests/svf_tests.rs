@@ -6,8 +6,10 @@
 use math_audio_autodiff::iir::svf::{SvFilter, SvfType};
 use math_audio_autodiff::module::DiffModule;
 use math_audio_autodiff::tensor::DiffTensor;
+use math_audio_iir_fir::svf::{SvfFilter as RefSvfFilter, SvfFilterType};
 use ndarray::{Array3, ArrayD, IxDyn};
 use num_complex::Complex;
+use std::f64::consts::PI;
 
 const FS: f64 = 48_000.0;
 const NFFT: usize = 512;
@@ -225,5 +227,117 @@ fn svf_gradient_finite_difference_peak() {
             finite_diff,
             relative_error
         );
+    }
+}
+
+fn map_svf_type(ty: SvfType) -> SvfFilterType {
+    match ty {
+        SvfType::Lowpass => SvfFilterType::Lowpass,
+        SvfType::Highpass => SvfFilterType::Highpass,
+        SvfType::Bandpass => SvfFilterType::Bandpass,
+        SvfType::Notch => SvfFilterType::Notch,
+        SvfType::Peak => SvfFilterType::Peak,
+        SvfType::Lowshelf => SvfFilterType::Lowshelf,
+        SvfType::Highshelf => SvfFilterType::Highshelf,
+        SvfType::Allpass => SvfFilterType::Allpass,
+    }
+}
+
+/// Measure the steady-state magnitude of `math-iir-fir`'s SVF at `freq` by
+/// processing a sinusoid. This uses the time-domain `process` implementation
+/// rather than the analytic `response_at`, which has known sign errors for
+/// some filter types.
+fn process_magnitude(
+    filter_type: SvfFilterType,
+    fc_hz: f64,
+    fs: f64,
+    q: f64,
+    gain_db: f64,
+    freq: f64,
+) -> f64 {
+    let mut filter = RefSvfFilter::new(filter_type, fc_hz, fs, q, gain_db);
+
+    // Warm up long enough for any resonant transient to decay, then measure
+    // over a generous window so that a full cycle of low-frequency signals is
+    // captured.
+    let skip = (fs * 0.5).ceil() as usize;
+    let measure = (fs * 0.2).ceil() as usize;
+
+    if freq < 1.0 {
+        // DC / near-DC: use a constant input.
+        let mut sum_y = 0.0f64;
+        for i in 0..skip + measure {
+            let y = filter.process(1.0);
+            if i >= skip {
+                sum_y += y;
+            }
+        }
+        (sum_y / measure as f64).abs()
+    } else {
+        // Fit the steady-state output to A*sin(omega*n) + B*cos(omega*n).
+        // This removes finite-window bias for arbitrary frequencies.
+        let omega = 2.0 * PI * freq / fs;
+        let mut s_ss = 0.0f64;
+        let mut s_cc = 0.0f64;
+        let mut s_sc = 0.0f64;
+        let mut s_sy = 0.0f64;
+        let mut s_cy = 0.0f64;
+        for i in 0..skip + measure {
+            let s = (omega * i as f64).sin();
+            let c = (omega * i as f64).cos();
+            let y = filter.process(s);
+            if i >= skip {
+                s_ss += s * s;
+                s_cc += c * c;
+                s_sc += s * c;
+                s_sy += s * y;
+                s_cy += c * y;
+            }
+        }
+        let det = s_ss * s_cc - s_sc * s_sc;
+        let a = (s_sy * s_cc - s_sc * s_cy) / det;
+        let b = (s_ss * s_cy - s_sy * s_sc) / det;
+        (a * a + b * b).sqrt()
+    }
+}
+
+#[test]
+fn svf_forward_matches_math_iir_fir_process() {
+    let n_bins = NFFT / 2 + 1;
+
+    for (filter_type, fc_hz, R, gain_db) in [
+        (SvfType::Lowpass, 1_000.0, 1.0 / 0.707, 0.0),
+        (SvfType::Highpass, 1_000.0, 1.0 / 0.707, 0.0),
+        (SvfType::Bandpass, 1_000.0, 1.0 / 0.707, 0.0),
+        (SvfType::Notch, 1_000.0, 1.0 / 5.0, 0.0),
+        (SvfType::Allpass, 1_000.0, 1.0 / 0.707, 0.0),
+        (SvfType::Peak, 1_000.0, 1.0 / 2.0, 6.0),
+        (SvfType::Lowshelf, 1_000.0, 1.0 / 0.707, 6.0),
+        (SvfType::Highshelf, 1_000.0, 1.0 / 0.707, 6.0),
+    ] {
+        let mut svf =
+            SvFilter::new(NFFT, FS, 1, 1, filter_type, ALIAS_DECAY_DB).expect("valid svf filter");
+        set_svf_param(&mut svf, fc_hz, R, gain_db);
+
+        let input = ones_spectrum(&[1, n_bins, 1]);
+        let output = svf.forward(&input).expect("svf forward should succeed");
+
+        let q = 1.0 / R;
+        for bin in [0, 1, 10, 50, 100, 200] {
+            let freq = bin as f64 * FS / NFFT as f64;
+            let expected =
+                process_magnitude(map_svf_type(filter_type), fc_hz, FS, q, gain_db, freq);
+            let actual = output.data[[0, bin, 0]].norm();
+            let scale = expected.max(1.0);
+            assert!(
+                (actual - expected).abs() < 1e-4 || (actual - expected).abs() / scale < 1e-4,
+                "filter={:?} bin={} freq={}: actual={} expected={}",
+                filter_type,
+                bin,
+                freq,
+                actual,
+                expected
+            );
+        }
     }
 }

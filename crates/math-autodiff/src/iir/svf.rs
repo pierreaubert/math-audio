@@ -31,7 +31,7 @@ use crate::module::DiffModule;
 use crate::tensor::DiffTensor;
 
 /// SVF filter type.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SvfType {
     Lowpass,
     Highpass,
@@ -142,7 +142,7 @@ fn svf_coefficients(
         }
         SvfType::Peak => {
             let k_peak = k / a;
-            let mix_bp = k + k_peak * (a * a - 1.0);
+            let mix_bp = k * a;
             let b = [
                 hp[0] + mix_bp * bp[0] + lp[0],
                 hp[1] + mix_bp * bp[1] + lp[1],
@@ -269,7 +269,8 @@ impl SvFilter {
     ///
     /// # Errors
     ///
-    /// Returns an error if `nfft` is zero.
+    /// Returns an error if `nfft`, `n_out`, or `n_in` is zero, or if `fs` is not
+    /// finite and positive.
     pub fn new(
         nfft: usize,
         fs: f64,
@@ -281,6 +282,21 @@ impl SvFilter {
         if nfft == 0 {
             return Err(AutodiffError::Message(
                 "SvFilter: nfft must be greater than 0".to_string(),
+            ));
+        }
+        if fs <= 0.0 || !fs.is_finite() {
+            return Err(AutodiffError::Message(
+                "SvFilter: fs must be finite and greater than 0".to_string(),
+            ));
+        }
+        if n_out == 0 {
+            return Err(AutodiffError::Message(
+                "SvFilter: n_out must be greater than 0".to_string(),
+            ));
+        }
+        if n_in == 0 {
+            return Err(AutodiffError::Message(
+                "SvFilter: n_in must be greater than 0".to_string(),
             ));
         }
         let n_params = filter_type.n_params();
@@ -471,6 +487,8 @@ impl DiffModule<f64> for SvFilter {
 
         let n_params = self.filter_type.n_params();
         let (b, a, db_dparam, da_dparam) = self.build_coeffs_and_grads()?;
+
+        self.inner.zero_grad();
 
         // Synchronise the inner SOS coefficients with the current parameters.
         for out_ch in 0..self.n_out {

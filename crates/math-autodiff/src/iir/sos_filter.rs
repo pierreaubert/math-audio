@@ -92,6 +92,16 @@ impl SosFilter {
                 "SosFilter: n_sections must be greater than 0".to_string(),
             ));
         }
+        if n_out == 0 {
+            return Err(AutodiffError::Message(
+                "SosFilter: n_out must be greater than 0".to_string(),
+            ));
+        }
+        if n_in == 0 {
+            return Err(AutodiffError::Message(
+                "SosFilter: n_in must be greater than 0".to_string(),
+            ));
+        }
         Ok(Self {
             nfft,
             n_sections,
