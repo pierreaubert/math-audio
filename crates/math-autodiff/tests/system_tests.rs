@@ -3,7 +3,7 @@ use math_audio_autodiff::fft::Fft;
 use math_audio_autodiff::gain::{Gain, Magnitude, ParallelGain};
 use math_audio_autodiff::iir::biquad::Biquad;
 use math_audio_autodiff::module::DiffModule;
-use math_audio_autodiff::system::{Series, Shell};
+use math_audio_autodiff::system::{Parallel, Series, Shell};
 use math_audio_autodiff::tensor::DiffTensor;
 use math_audio_iir_fir::BiquadFilterType;
 use ndarray::{Array1, ArrayD, Axis, IxDyn};
@@ -457,5 +457,105 @@ fn shell_get_freq_response() {
             expected.data[[0, f, 0]].im,
             epsilon = 1e-9
         );
+    }
+}
+
+#[test]
+fn parallel_two_gains_sums() {
+    let n_bins = NFFT / 2 + 1;
+    let n_channels = 2;
+
+    let mut gain_a = Gain::new(NFFT, n_channels, n_channels).expect("valid gain");
+    gain_a.param =
+        ArrayD::from_shape_vec(IxDyn(&[n_channels, n_channels]), vec![1.0, 0.0, 0.0, 2.0]).unwrap();
+
+    let mut gain_b = Gain::new(NFFT, n_channels, n_channels).expect("valid gain");
+    gain_b.param =
+        ArrayD::from_shape_vec(IxDyn(&[n_channels, n_channels]), vec![0.0, 1.0, 1.0, 0.0]).unwrap();
+
+    let parallel = Parallel::new(Box::new(gain_a), Box::new(gain_b)).expect("valid parallel");
+    assert_eq!(parallel.input_channels(), n_channels);
+    assert_eq!(parallel.output_channels(), n_channels);
+
+    let input = ones_spectrum(&[1, n_bins, n_channels]);
+    let output = parallel.forward(&input).expect("forward should succeed");
+    assert_eq!(output.data.shape(), &[1, n_bins, n_channels]);
+
+    // gain_a: out0 = in0, out1 = 2*in1.
+    // gain_b: out0 = in1, out1 = in0.
+    // With input [1, 1]: out0 = 1 + 1 = 2, out1 = 2 + 1 = 3.
+    for f in 0..n_bins {
+        assert_abs_diff_eq!(output.data[[0, f, 0]].re, 2.0, epsilon = 1e-12);
+        assert_abs_diff_eq!(output.data[[0, f, 1]].re, 3.0, epsilon = 1e-12);
+    }
+}
+
+#[test]
+fn parallel_gradient_matches_manual() {
+    let n_bins = NFFT / 2 + 1;
+    let n_channels = 2;
+
+    let mut gain_a = Gain::new(NFFT, n_channels, n_channels).expect("valid gain");
+    gain_a.param =
+        ArrayD::from_shape_vec(IxDyn(&[n_channels, n_channels]), vec![0.5, -0.3, 1.2, -0.7])
+            .unwrap();
+
+    let mut gain_b = Gain::new(NFFT, n_channels, n_channels).expect("valid gain");
+    gain_b.param =
+        ArrayD::from_shape_vec(IxDyn(&[n_channels, n_channels]), vec![-0.7, 0.9, 0.1, 0.5])
+            .unwrap();
+
+    let input = random_spectrum(&[1, n_bins, n_channels]);
+    let target = DiffTensor::zeros(IxDyn(&[1, n_bins, n_channels]));
+
+    let mut parallel =
+        Parallel::new(Box::new(gain_a.clone()), Box::new(gain_b.clone())).expect("valid parallel");
+    parallel.zero_grad();
+    let output = parallel.forward(&input).expect("parallel forward");
+    let grad_output_data: Vec<Complex<f64>> = output
+        .data
+        .iter()
+        .zip(target.data.iter())
+        .map(|(o, t)| 2.0 * (o - t))
+        .collect();
+    let grad_output = DiffTensor::from_array(
+        ArrayD::from_shape_vec(IxDyn(&[1, n_bins, n_channels]), grad_output_data).unwrap(),
+    );
+    let grad_input_parallel = parallel
+        .backward(&input, &output, &grad_output)
+        .expect("parallel backward");
+
+    // Manual sum of branch gradients.
+    let mut gain_a_manual = gain_a.clone();
+    let mut gain_b_manual = gain_b.clone();
+    gain_a_manual.zero_grad();
+    gain_b_manual.zero_grad();
+    let out_a = gain_a_manual.forward(&input).expect("gain_a forward");
+    let out_b = gain_b_manual.forward(&input).expect("gain_b forward");
+    let grad_input_a = gain_a_manual
+        .backward(&input, &out_a, &grad_output)
+        .expect("gain_a backward");
+    let grad_input_b = gain_b_manual
+        .backward(&input, &out_b, &grad_output)
+        .expect("gain_b backward");
+    let grad_input_manual = &grad_input_a.data + &grad_input_b.data;
+
+    for (parallel, manual) in grad_input_parallel
+        .data
+        .iter()
+        .zip(grad_input_manual.iter())
+    {
+        assert_abs_diff_eq!(parallel.re, manual.re, epsilon = 1e-12);
+        assert_abs_diff_eq!(parallel.im, manual.im, epsilon = 1e-12);
+    }
+
+    // Verify gradients were accumulated in both branches.
+    let branch_a_grad = parallel.branches().0.gradients()[0];
+    for (manual, parallel) in gain_a_manual.param_grad.iter().zip(branch_a_grad.iter()) {
+        assert_abs_diff_eq!(manual, parallel, epsilon = 1e-12);
+    }
+    let branch_b_grad = parallel.branches().1.gradients()[0];
+    for (manual, parallel) in gain_b_manual.param_grad.iter().zip(branch_b_grad.iter()) {
+        assert_abs_diff_eq!(manual, parallel, epsilon = 1e-12);
     }
 }

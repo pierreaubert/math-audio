@@ -152,6 +152,142 @@ impl DiffModule<f64> for Series {
     }
 }
 
+/// Parallel composition of two differentiable modules.
+///
+/// Both branches receive the same input and their outputs are summed
+/// element-wise. The branches must share the same number of frequency bins,
+/// input channels, and output channels.
+pub struct Parallel {
+    branch_a: Box<dyn DiffModule<f64>>,
+    branch_b: Box<dyn DiffModule<f64>>,
+    nfft: usize,
+    input_channels: usize,
+    output_channels: usize,
+}
+
+impl std::fmt::Debug for Parallel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Parallel")
+            .field("nfft", &self.nfft)
+            .field("input_channels", &self.input_channels)
+            .field("output_channels", &self.output_channels)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Parallel {
+    /// Create a new parallel combiner from two branches.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the branches do not share the same number of bins,
+    /// input channels, or output channels.
+    pub fn new(
+        branch_a: Box<dyn DiffModule<f64>>,
+        branch_b: Box<dyn DiffModule<f64>>,
+    ) -> Result<Self, AutodiffError> {
+        if branch_a.n_bins() != branch_b.n_bins() {
+            return Err(AutodiffError::Message(format!(
+                "Parallel: branch_a has {} bins, branch_b has {}",
+                branch_a.n_bins(),
+                branch_b.n_bins()
+            )));
+        }
+        if branch_a.input_channels() != branch_b.input_channels() {
+            return Err(AutodiffError::Message(format!(
+                "Parallel: branch_a has {} input channels, branch_b has {}",
+                branch_a.input_channels(),
+                branch_b.input_channels()
+            )));
+        }
+        if branch_a.output_channels() != branch_b.output_channels() {
+            return Err(AutodiffError::Message(format!(
+                "Parallel: branch_a has {} output channels, branch_b has {}",
+                branch_a.output_channels(),
+                branch_b.output_channels()
+            )));
+        }
+        Ok(Self {
+            nfft: branch_a.n_bins(),
+            input_channels: branch_a.input_channels(),
+            output_channels: branch_a.output_channels(),
+            branch_a,
+            branch_b,
+        })
+    }
+
+    /// Return the contained branches.
+    #[must_use]
+    pub fn branches(&self) -> (&dyn DiffModule<f64>, &dyn DiffModule<f64>) {
+        (self.branch_a.as_ref(), self.branch_b.as_ref())
+    }
+}
+
+impl DiffModule<f64> for Parallel {
+    fn forward(&self, input: &DiffTensor<f64>) -> Result<DiffTensor<f64>, AutodiffError> {
+        let out_a = self.branch_a.forward(input)?;
+        let out_b = self.branch_b.forward(input)?;
+        Ok(DiffTensor::from_array(&out_a.data + &out_b.data))
+    }
+
+    fn backward(
+        &mut self,
+        input: &DiffTensor<f64>,
+        _output: &DiffTensor<f64>,
+        grad_output: &DiffTensor<f64>,
+    ) -> Result<DiffTensor<f64>, AutodiffError> {
+        let out_a = self.branch_a.forward(input)?;
+        let out_b = self.branch_b.forward(input)?;
+        let grad_input_a = self.branch_a.backward(input, &out_a, grad_output)?;
+        let grad_input_b = self.branch_b.backward(input, &out_b, grad_output)?;
+        Ok(DiffTensor::from_array(
+            &grad_input_a.data + &grad_input_b.data,
+        ))
+    }
+
+    fn input_channels(&self) -> usize {
+        self.input_channels
+    }
+
+    fn output_channels(&self) -> usize {
+        self.output_channels
+    }
+
+    fn n_bins(&self) -> usize {
+        self.nfft
+    }
+
+    fn parameters(&self) -> Vec<&ArrayD<f64>> {
+        self.branch_a
+            .parameters()
+            .into_iter()
+            .chain(self.branch_b.parameters())
+            .collect()
+    }
+
+    fn parameters_mut(&mut self) -> Vec<&mut ArrayD<f64>> {
+        let mut params_a = self.branch_a.parameters_mut();
+        let mut params_b = self.branch_b.parameters_mut();
+        let mut params = Vec::with_capacity(params_a.len() + params_b.len());
+        params.append(&mut params_a);
+        params.append(&mut params_b);
+        params
+    }
+
+    fn gradients(&self) -> Vec<&ArrayD<f64>> {
+        self.branch_a
+            .gradients()
+            .into_iter()
+            .chain(self.branch_b.gradients())
+            .collect()
+    }
+
+    fn zero_grad(&mut self) {
+        self.branch_a.zero_grad();
+        self.branch_b.zero_grad();
+    }
+}
+
 /// Shell composition: input layer, core, and output layer.
 pub struct Shell {
     /// Input transformation layer.
