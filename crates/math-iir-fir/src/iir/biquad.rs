@@ -66,25 +66,6 @@ trait BiquadForm {
     fn process_sample<T: FilterFloat>(b: &mut Biquad<T>, input: T) -> T;
 }
 
-struct Df1Form;
-impl BiquadForm for Df1Form {
-    #[inline(always)]
-    fn process_sample<T: FilterFloat>(b: &mut Biquad<T>, input: T) -> T {
-        // Fused multiply-add for the feed-forward and feedback dot products.
-        // The two FMA groups can execute in parallel, and only one final
-        // subtraction serializes them.
-        let output =
-            b.b0.mul_add(input, b.b1.mul_add(b.x1, b.b2 * b.x2)) - b.a1.mul_add(b.y1, b.a2 * b.y2);
-
-        b.x2 = b.x1;
-        b.x1 = input;
-        b.y2 = b.y1;
-        b.y1 = output;
-
-        output
-    }
-}
-
 struct Tdf2Form;
 impl BiquadForm for Tdf2Form {
     #[inline(always)]
@@ -647,8 +628,78 @@ impl<T: FilterFloat> Biquad<T> {
         if self.use_tdf2 {
             self.process_block_form::<Tdf2Form>(samples);
         } else {
-            self.process_block_form::<Df1Form>(samples);
+            self.process_block_df1_scalar(samples);
         }
+    }
+
+    /// Scalar DF1 block processor unrolled two samples per iteration.
+    /// Coefficients and delay-line state are held in locals for the block so
+    /// the inner loop has no struct-field traffic.  The second sample's
+    /// feed-forward path is evaluated in parallel with the first sample's
+    /// output, reducing the serial dependency chain while keeping the exact
+    /// `Df1Form` arithmetic grouping (and therefore the checksum).
+    #[inline(always)]
+    fn process_block_df1_scalar(&mut self, samples: &mut [T]) {
+        let b0 = self.b0;
+        let b1 = self.b1;
+        let b2 = self.b2;
+        let a1 = self.a1;
+        let a2 = self.a2;
+
+        let mut x1 = self.x1;
+        let mut x2 = self.x2;
+        let mut y1 = self.y1;
+        let mut y2 = self.y2;
+
+        let mut ptr = samples.as_mut_ptr();
+        let end = unsafe { ptr.add(samples.len()) };
+        let pair_end = unsafe { ptr.add(samples.len() & !1) };
+
+        unsafe {
+            while ptr < pair_end {
+                let x0 = *ptr;
+                let x1_in = *ptr.add(1);
+
+                // Sample 0: full output using the current state.
+                let ff0 = b0.mul_add(x0, b1.mul_add(x1, b2 * x2));
+                let fb0 = a1.mul_add(y1, a2 * y2);
+                let y0 = ff0 - fb0;
+
+                // Sample 1: feed-forward path is independent of y0.
+                let ff1 = b0.mul_add(x1_in, b1.mul_add(x0, b2 * x1));
+                let a2_y1 = a2 * y1;
+                let fb1 = a1.mul_add(y0, a2_y1);
+                let y1_out = ff1 - fb1;
+
+                *ptr = y0;
+                *ptr.add(1) = y1_out;
+
+                // State after processing the second sample.
+                x2 = x0;
+                x1 = x1_in;
+                y2 = y0;
+                y1 = y1_out;
+
+                ptr = ptr.add(2);
+            }
+
+            while ptr < end {
+                let xi = *ptr;
+                let yi = b0.mul_add(xi, b1.mul_add(x1, b2 * x2))
+                    - a1.mul_add(y1, a2 * y2);
+                *ptr = yi;
+                x2 = x1;
+                x1 = xi;
+                y2 = y1;
+                y1 = yi;
+                ptr = ptr.add(1);
+            }
+        }
+
+        self.x1 = x1;
+        self.x2 = x2;
+        self.y1 = y1;
+        self.y2 = y2;
     }
 
     #[inline(always)]

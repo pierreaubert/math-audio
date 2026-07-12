@@ -48,6 +48,14 @@ pub struct Fir<T: FilterFloat = f64> {
     /// Whether the coefficients are symmetric, enabling the half-multiply fast path.
     #[serde(skip)]
     symmetric: bool,
+    /// Temporary linear buffer used by block fast paths.
+    /// Holds the previous `n_taps - 1` samples followed by the current input
+    /// block so the convolution can be computed without circular wrap.
+    #[serde(skip)]
+    scratch: Vec<T>,
+    /// Coefficients in reverse order, used by the linearized block dot-product.
+    #[serde(skip)]
+    coeffs_rev: Vec<T>,
 }
 
 impl<T: FilterFloat> Fir<T> {
@@ -78,6 +86,8 @@ impl<T: FilterFloat> Fir<T> {
             state: vec![T::zero(); 2 * n_taps],
             state_pos: n_taps,
             symmetric,
+            scratch: Vec::new(),
+            coeffs_rev: Vec::new(),
         }
     }
 
@@ -119,6 +129,8 @@ impl<T: FilterFloat> Fir<T> {
             state: vec![T::zero(); 2 * n],
             state_pos: n,
             symmetric,
+            scratch: Vec::new(),
+            coeffs_rev: Vec::new(),
         }
     }
 
@@ -166,6 +178,8 @@ impl<T: FilterFloat> Fir<T> {
             state: vec![T::zero(); 2 * n],
             state_pos: n,
             symmetric,
+            scratch: Vec::new(),
+            coeffs_rev: Vec::new(),
         }
     }
 
@@ -229,6 +243,8 @@ impl<T: FilterFloat> Fir<T> {
             state: vec![T::zero(); 2 * n],
             state_pos: n,
             symmetric,
+            scratch: Vec::new(),
+            coeffs_rev: Vec::new(),
         }
     }
 
@@ -292,6 +308,8 @@ impl<T: FilterFloat> Fir<T> {
             state: vec![T::zero(); 2 * n],
             state_pos: n,
             symmetric,
+            scratch: Vec::new(),
+            coeffs_rev: Vec::new(),
         }
     }
 
@@ -309,6 +327,8 @@ impl<T: FilterFloat> Fir<T> {
     pub fn reset(&mut self) {
         self.state.fill(T::zero());
         self.state_pos = self.n_taps();
+        self.scratch.clear();
+        self.coeffs_rev.clear();
     }
 
     /// Processes a single audio sample through the filter.
@@ -389,23 +409,56 @@ impl<T: FilterFloat> Fir<T> {
             return unsafe { self.process_block_symmetric_f64_avx2(samples) };
         }
 
-        let n_taps = self.coeffs.len();
-
-        for sample in samples.iter_mut() {
-            let x = *sample;
-            // Store input sample in circular buffer and its duplicate
-            self.state[self.state_pos] = x;
-            self.state[self.state_pos - n_taps] = x;
-
-            // Compute output using convolution
-            *sample = self.compute_output_symmetric();
-
-            // Update circular buffer position
-            self.state_pos += 1;
-            if self.state_pos == 2 * n_taps {
-                self.state_pos = n_taps;
-            }
+        #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
+        if std::mem::size_of::<T>() == 8 {
+            return unsafe { self.process_block_symmetric_f64_neon(samples) };
         }
+
+        self.process_block_symmetric_linearized(samples);
+    }
+
+    fn ensure_coeffs_rev(&mut self) {
+        if self.coeffs_rev.is_empty() {
+            self.coeffs_rev = self.coeffs.iter().rev().copied().collect();
+        }
+    }
+
+    /// Scalar linearized symmetric block convolution.
+    ///
+    /// Copies the previous `n_taps - 1` samples followed by the whole input
+    /// block into a contiguous scratch buffer, then computes each output as a
+    /// simple slice dot-product with the reversed coefficients.
+    fn process_block_symmetric_linearized(&mut self, samples: &mut [T]) {
+        let n_taps = self.coeffs.len();
+        let len = samples.len();
+        if len == 0 {
+            return;
+        }
+
+        self.ensure_coeffs_rev();
+
+        let scratch_len = n_taps - 1 + len;
+        self.scratch.resize(scratch_len, T::zero());
+        let prev_start = self.state_pos - n_taps + 1;
+        self.scratch[..n_taps - 1]
+            .copy_from_slice(&self.state[prev_start..self.state_pos]);
+        self.scratch[n_taps - 1..].copy_from_slice(samples);
+
+        for (i, sample) in samples.iter_mut().enumerate().take(len) {
+            let window = &self.scratch[i..i + n_taps];
+            *sample = self
+                .coeffs_rev
+                .iter()
+                .zip(window.iter())
+                .map(|(&c, &s)| c * s)
+                .sum();
+        }
+
+        let tail_start = len;
+        self.state[1..n_taps]
+            .copy_from_slice(&self.scratch[tail_start..tail_start + n_taps - 1]);
+        self.state[0] = T::zero();
+        self.state_pos = n_taps;
     }
 
     #[inline(always)]
@@ -843,6 +896,141 @@ impl<T: FilterFloat> Fir<T> {
             }
 
             self.state_pos = pos;
+        }
+    }
+
+    /// aarch64 NEON block fast path for symmetric FIR filters when `T` is `f64`.
+    ///
+    /// Linearizes the filter state and input block into a contiguous scratch
+    /// buffer once, then computes eight output samples in parallel with four
+    /// 128-bit vector accumulators. This avoids per-sample circular-buffer
+    /// wrap handling and duplicated state writes while keeping coefficient
+    /// lane broadcasts amortised across eight outputs.
+    ///
+    /// # Safety
+    /// Must only be called when `T` is `f64` (checked by the caller via
+    /// `size_of::<T>() == 8`) and when NEON is available on the host.
+    #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
+    #[target_feature(enable = "neon")]
+    #[inline(never)]
+    unsafe fn process_block_symmetric_f64_neon(&mut self, samples: &mut [T]) {
+        // SAFETY: caller verified `T` is `f64`. Pointer casts are valid, all
+        // accesses stay within `coeffs`/`state`/`samples`/`scratch`, and this
+        // function is compiled with NEON enabled.
+        unsafe {
+            use std::arch::aarch64::*;
+
+            let n_taps = self.coeffs.len();
+            let len = samples.len();
+            if len == 0 {
+                return;
+            }
+            let half = n_taps / 2;
+
+            // Build a linear buffer: previous `n_taps - 1` samples followed by
+            // the current input block.
+            let scratch_len = n_taps - 1 + len;
+            self.scratch.resize(scratch_len, T::zero());
+            let prev_start = self.state_pos - n_taps + 1;
+            self.scratch[..n_taps - 1]
+                .copy_from_slice(&self.state[prev_start..self.state_pos]);
+            self.scratch[n_taps - 1..].copy_from_slice(samples);
+
+            let coeffs_ptr = self.coeffs.as_ptr() as *const f64;
+            let scratch_ptr = self.scratch.as_ptr() as *const f64;
+            let out_ptr = samples.as_mut_ptr() as *mut f64;
+
+            let mut j = 0;
+            // Main loop: eight outputs per iteration.
+            while j + 7 < len {
+                let mut acc0 = vdupq_n_f64(0.0);
+                let mut acc1 = vdupq_n_f64(0.0);
+                let mut acc2 = vdupq_n_f64(0.0);
+                let mut acc3 = vdupq_n_f64(0.0);
+
+                let mut i = 0;
+                while i + 1 < half {
+                    let c = vld1q_f64(coeffs_ptr.add(i));
+
+                    // Coefficient `i` contributes to all eight outputs.
+                    let old0 = vld1q_f64_x4(scratch_ptr.add(j + i));
+                    let new0 = vld1q_f64_x4(scratch_ptr.add(j + n_taps - 1 - i));
+                    let pair00 = vaddq_f64(old0.0, new0.0);
+                    let pair01 = vaddq_f64(old0.1, new0.1);
+                    let pair02 = vaddq_f64(old0.2, new0.2);
+                    let pair03 = vaddq_f64(old0.3, new0.3);
+                    acc0 = vfmaq_laneq_f64::<0>(acc0, pair00, c);
+                    acc1 = vfmaq_laneq_f64::<0>(acc1, pair01, c);
+                    acc2 = vfmaq_laneq_f64::<0>(acc2, pair02, c);
+                    acc3 = vfmaq_laneq_f64::<0>(acc3, pair03, c);
+
+                    // Coefficient `i + 1` contributes to all eight outputs.
+                    let old1 = vld1q_f64_x4(scratch_ptr.add(j + i + 1));
+                    let new1 = vld1q_f64_x4(scratch_ptr.add(j + n_taps - 2 - i));
+                    let pair10 = vaddq_f64(old1.0, new1.0);
+                    let pair11 = vaddq_f64(old1.1, new1.1);
+                    let pair12 = vaddq_f64(old1.2, new1.2);
+                    let pair13 = vaddq_f64(old1.3, new1.3);
+                    acc0 = vfmaq_laneq_f64::<1>(acc0, pair10, c);
+                    acc1 = vfmaq_laneq_f64::<1>(acc1, pair11, c);
+                    acc2 = vfmaq_laneq_f64::<1>(acc2, pair12, c);
+                    acc3 = vfmaq_laneq_f64::<1>(acc3, pair13, c);
+
+                    i += 2;
+                }
+                if i < half {
+                    let c = vdupq_n_f64(*coeffs_ptr.add(i));
+                    let old = vld1q_f64_x4(scratch_ptr.add(j + i));
+                    let new = vld1q_f64_x4(scratch_ptr.add(j + n_taps - 1 - i));
+                    let pair0 = vaddq_f64(old.0, new.0);
+                    let pair1 = vaddq_f64(old.1, new.1);
+                    let pair2 = vaddq_f64(old.2, new.2);
+                    let pair3 = vaddq_f64(old.3, new.3);
+                    acc0 = vfmaq_f64(acc0, c, pair0);
+                    acc1 = vfmaq_f64(acc1, c, pair1);
+                    acc2 = vfmaq_f64(acc2, c, pair2);
+                    acc3 = vfmaq_f64(acc3, c, pair3);
+                }
+
+                if n_taps % 2 == 1 {
+                    let c = vdupq_n_f64(*coeffs_ptr.add(half));
+                    let s = vld1q_f64_x4(scratch_ptr.add(j + half));
+                    acc0 = vfmaq_f64(acc0, c, s.0);
+                    acc1 = vfmaq_f64(acc1, c, s.1);
+                    acc2 = vfmaq_f64(acc2, c, s.2);
+                    acc3 = vfmaq_f64(acc3, c, s.3);
+                }
+
+                vst1q_f64(out_ptr.add(j), acc0);
+                vst1q_f64(out_ptr.add(j + 2), acc1);
+                vst1q_f64(out_ptr.add(j + 4), acc2);
+                vst1q_f64(out_ptr.add(j + 6), acc3);
+
+                j += 8;
+            }
+
+            // Scalar tail for any remaining samples, using the same arithmetic
+            // order as the scalar symmetric path.
+            while j < len {
+                let window = scratch_ptr.add(j);
+                let mut y: f64 = 0.0;
+                for k in 0..half {
+                    let pair = *window.add(k) + *window.add(n_taps - 1 - k);
+                    y = (*coeffs_ptr.add(k)).mul_add(pair, y);
+                }
+                if n_taps % 2 == 1 {
+                    y = (*coeffs_ptr.add(half)).mul_add(*window.add(half), y);
+                }
+                *out_ptr.add(j) = y;
+                j += 1;
+            }
+
+            // Restore the doubled-buffer invariant for subsequent calls.
+            let tail_start = len;
+            self.state[1..n_taps]
+                .copy_from_slice(&self.scratch[tail_start..tail_start + n_taps - 1]);
+            self.state[0] = T::zero();
+            self.state_pos = n_taps;
         }
     }
 

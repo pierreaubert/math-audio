@@ -114,11 +114,13 @@ def main() -> int:
     args = parser.parse_args()
 
     worktree = Path(__file__).resolve().parent
-    repo_root = Path(
-        subprocess.check_output(
-            ["git", "-C", str(worktree), "rev-parse", "--show-toplevel"],
-            text=True,
-        ).strip()
+    # The worktree lives inside .evo/run_NNNN/worktrees/exp_NNNN; build artifacts
+    # should land in the main repo's target/ directory so they are not committed
+    # as part of the experiment branch.
+    repo_root = next(
+        p
+        for p in worktree.parents
+        if (p / ".evo").exists() and (p / "Cargo.toml").exists()
     )
     env = os.environ.copy()
     env["CARGO_TARGET_DIR"] = str(repo_root / "target")
