@@ -31,8 +31,8 @@ use std::f64::consts::{PI, SQRT_2};
 
 use crate::error::AutodiffError;
 use crate::iir::response::{
-    SosFrequencyBasis, sos_coefficient_vjp_with_basis, sos_frequency_response,
-    sos_frequency_response_jacobian_parallel, sos_frequency_response_parallel,
+    SosFrequencyBasis, sos_coefficient_vjp_with_basis, sos_frequency_response_jacobian_parallel,
+    sos_frequency_response_parallel,
 };
 use crate::module::{DiffModule, validate_spectral_gradient_shape};
 use crate::tensor::DiffTensor;
@@ -80,6 +80,66 @@ impl SectionCoeffs {
             da_dparam: [[0.0; 3]; 3],
         }
     }
+}
+
+/// Compute normalized RBJ lowpass or highpass coefficients without gradients.
+fn compute_lowpass_highpass_coeffs(
+    fc: f64,
+    gain: f64,
+    fs: f64,
+    highpass: bool,
+) -> ([f64; 3], [f64; 3]) {
+    let omega = 2.0 * PI * fc / fs;
+    let sn = omega.sin();
+    let cs = omega.cos();
+    let q = 1.0 / SQRT_2;
+    let alpha = sn / (2.0 * q);
+
+    let (b0, b1, b2): (f64, f64, f64);
+    if highpass {
+        b0 = (1.0 + cs) / 2.0;
+        b1 = -(1.0 + cs);
+        b2 = (1.0 + cs) / 2.0;
+    } else {
+        b0 = (1.0 - cs) / 2.0;
+        b1 = 1.0 - cs;
+        b2 = (1.0 - cs) / 2.0;
+    }
+    let a0 = 1.0 + alpha;
+    let a1 = -2.0 * cs;
+    let a2 = 1.0 - alpha;
+
+    let inv_a0 = 1.0 / a0;
+    (
+        [b0 * gain * inv_a0, b1 * gain * inv_a0, b2 * gain * inv_a0],
+        [1.0, a1 * inv_a0, a2 * inv_a0],
+    )
+}
+
+/// Compute normalized RBJ bandpass coefficients without gradients.
+#[allow(clippy::similar_names)]
+fn compute_bandpass_coeffs(fc1: f64, fc2: f64, gain: f64, fs: f64) -> ([f64; 3], [f64; 3]) {
+    let omega1 = 2.0 * PI * fc1 / fs;
+    let omega2 = 2.0 * PI * fc2 / fs;
+    let omega_c = (omega1 + omega2) / 2.0;
+    let bw = (fc2 / fc1).log2();
+
+    let sn_c = omega_c.sin();
+    let cs_c = omega_c.cos();
+    let c = 2.0_f64.ln() / 2.0;
+    let alpha = sn_c * (c * bw * omega_c / sn_c).sinh();
+
+    let b0 = alpha;
+    let b2 = -alpha;
+    let a0 = 1.0 + alpha;
+    let a1 = -2.0 * cs_c;
+    let a2 = 1.0 - alpha;
+
+    let inv_a0 = 1.0 / a0;
+    (
+        [b0 * gain * inv_a0, 0.0, b2 * gain * inv_a0],
+        [1.0, a1 * inv_a0, a2 * inv_a0],
+    )
 }
 
 /// Compute normalized RBJ lowpass or highpass coefficients and physical
@@ -359,6 +419,25 @@ fn parallel_biquad_param_grad_view_mut(
         })
 }
 
+/// Cached coefficient set for a [`Biquad`] module.
+#[derive(Debug, Clone)]
+struct BiquadCoeffCache {
+    b: Array4<Complex<f64>>,
+    a: Array4<Complex<f64>>,
+    db_dparam: Array5<f64>,
+    da_dparam: Array5<f64>,
+}
+
+/// Fast FNV-1a hash over parameter values for cache invalidation.
+fn hash_param(param: &ArrayD<f64>) -> u64 {
+    let mut h = 0xcbf2_9ce4_8422_2325_u64;
+    for &v in param {
+        h ^= v.to_bits();
+        h = h.wrapping_mul(0x0100_0000_01b3_u64);
+    }
+    h
+}
+
 /// Differentiable RBJ biquad with arbitrary input/output channel coupling.
 #[derive(Debug, Clone)]
 pub struct Biquad {
@@ -376,6 +455,16 @@ pub struct Biquad {
     pub param_grad: ArrayD<f64>,
     /// Anti-aliasing decay in dB.
     pub alias_decay_db: f64,
+    /// Coefficient cache keyed by parameter hash.
+    coeff_cache: Option<BiquadCoeffCache>,
+    /// Hash of parameters used to build `coeff_cache`.
+    param_hash: u64,
+    /// Reusable working buffers for the backward pass.
+    work_h: Array3<Complex<f64>>,
+    work_b_response: Array4<Complex<f64>>,
+    work_a_response: Array4<Complex<f64>>,
+    work_dl_dh: Array3<Complex<f64>>,
+    work_grad_input: ArrayD<Complex<f64>>,
 }
 
 impl Biquad {
@@ -442,6 +531,13 @@ impl Biquad {
             param,
             param_grad: ArrayD::zeros(IxDyn(&[n_sections, n_params, n_out, n_in])),
             alias_decay_db,
+            coeff_cache: None,
+            param_hash: 0,
+            work_h: Array3::zeros((0, 0, 0)),
+            work_b_response: Array4::zeros((0, 0, 0, 0)),
+            work_a_response: Array4::zeros((0, 0, 0, 0)),
+            work_dl_dh: Array3::zeros((0, 0, 0)),
+            work_grad_input: ArrayD::zeros(IxDyn(&[])),
         })
     }
 
@@ -453,6 +549,23 @@ impl Biquad {
     fn gamma(&self) -> [f64; 3] {
         let gamma = 10.0_f64.powf(-self.alias_decay_db.abs() / (20.0 * self.nfft as f64));
         [1.0, gamma, gamma * gamma]
+    }
+
+    /// Return a reference to the cached coefficients, recomputing only when
+    /// `self.param` has changed since the last call.
+    fn ensure_coeffs_cached(&mut self) -> Result<&BiquadCoeffCache, AutodiffError> {
+        let hash = hash_param(&self.param);
+        if self.coeff_cache.is_none() || self.param_hash != hash {
+            let (b, a, db_dparam, da_dparam) = self.build_coeffs_and_grads()?;
+            self.param_hash = hash;
+            self.coeff_cache = Some(BiquadCoeffCache {
+                b,
+                a,
+                db_dparam,
+                da_dparam,
+            });
+        }
+        Ok(self.coeff_cache.as_ref().expect("cache just populated"))
     }
 
     /// Map raw parameters to normalized coefficients and parameter gradients.
@@ -562,6 +675,7 @@ impl Biquad {
 }
 
 impl DiffModule<f64> for Biquad {
+    #[allow(clippy::too_many_lines)]
     fn forward(&self, input: &DiffTensor<f64>) -> Result<DiffTensor<f64>, AutodiffError> {
         let input_shape = input.data.shape();
         if input_shape.len() < 3 {
@@ -595,19 +709,87 @@ impl DiffModule<f64> for Biquad {
             )));
         }
 
-        let (b, a, _, _) = self.build_coeffs_and_grads()?;
-        let h = sos_frequency_response(&b, &a, self.nfft, Some(&self.gamma()))?;
+        // Build the frequency response directly from raw parameters, avoiding
+        // gradient coefficient arrays and complex b/a buffers.  Numerator and
+        // denominator products are accumulated across sections so only one
+        // complex division per frequency bin is required.
+        let param = biquad_param_view(&self.param)?;
+        let n_sections = param.dim().0;
+        let n_out = n_out_stored;
+
+        let gamma = self.gamma();
+        let basis = SosFrequencyBasis::new(self.nfft, &gamma);
+        let mut num_acc = Array3::from_elem((n_bins, n_out, n_in), Complex::from(1.0));
+        let mut den_acc = Array3::from_elem((n_bins, n_out, n_in), Complex::from(1.0));
+        let half_fs = self.fs / 2.0;
+
+        for section in 0..n_sections {
+            for out_ch in 0..n_out {
+                for in_ch in 0..n_in {
+                    let (b, a) = match self.filter_type {
+                        BiquadFilterType::Lowpass | BiquadFilterType::Highpass => {
+                            let fc_raw = param[[section, 0, out_ch, in_ch]];
+                            let gain_raw = param[[section, 1, out_ch, in_ch]];
+                            let fc_norm = sigmoid(fc_raw);
+                            let fc = fc_norm * half_fs;
+                            compute_lowpass_highpass_coeffs(
+                                fc,
+                                gain_raw,
+                                self.fs,
+                                self.filter_type == BiquadFilterType::Highpass,
+                            )
+                        }
+                        BiquadFilterType::Bandpass => {
+                            let fc1_raw = param[[section, 0, out_ch, in_ch]];
+                            let fc2_raw = param[[section, 1, out_ch, in_ch]];
+                            let gain_raw = param[[section, 2, out_ch, in_ch]];
+                            let fc1_norm = sigmoid(fc1_raw);
+                            let fc2_norm = sigmoid(fc2_raw);
+                            let (fc_low_norm, fc_high_norm) = if fc1_norm <= fc2_norm {
+                                (fc1_norm, fc2_norm)
+                            } else {
+                                (fc2_norm, fc1_norm)
+                            };
+                            let fc1 = fc_low_norm * half_fs;
+                            let fc2 = fc_high_norm * half_fs;
+                            compute_bandpass_coeffs(fc1, fc2, gain_raw, self.fs)
+                        }
+                        _ => {
+                            return Err(AutodiffError::Message(format!(
+                                "Biquad::forward: unsupported filter type {:?}",
+                                self.filter_type
+                            )));
+                        }
+                    };
+
+                    for bin in 0..n_bins {
+                        let z1 = basis.response[[1, bin]];
+                        let z2 = basis.response[[2, bin]];
+                        let numerator = Complex::new(
+                            b[0] + b[1] * z1.re + b[2] * z2.re,
+                            b[1] * z1.im + b[2] * z2.im,
+                        );
+                        let denominator = Complex::new(
+                            a[0] + a[1] * z1.re + a[2] * z2.re,
+                            a[1] * z1.im + a[2] * z2.im,
+                        );
+                        num_acc[[bin, out_ch, in_ch]] *= numerator;
+                        den_acc[[bin, out_ch, in_ch]] *= denominator;
+                    }
+                }
+            }
+        }
 
         let mut output_shape: Vec<usize> = input_shape.to_vec();
-        output_shape[2] = n_out_stored;
+        output_shape[2] = n_out;
         let mut output = ArrayD::zeros(IxDyn(&output_shape));
 
         for bin in 0..n_bins {
             for in_ch in 0..n_in {
                 let input_axis2 = input.data.index_axis(Axis(2), in_ch);
                 let input_bin = input_axis2.index_axis(Axis(1), bin);
-                for out_ch in 0..n_out_stored {
-                    let h_val = h[[bin, out_ch, in_ch]];
+                for out_ch in 0..n_out {
+                    let h_val = num_acc[[bin, out_ch, in_ch]] / den_acc[[bin, out_ch, in_ch]];
                     let mut output_axis2 = output.index_axis_mut(Axis(1), bin);
                     let mut output_bin = output_axis2.index_axis_mut(Axis(1), out_ch);
                     for (destination, &source) in output_bin.iter_mut().zip(input_bin.iter()) {
@@ -620,6 +802,7 @@ impl DiffModule<f64> for Biquad {
         Ok(DiffTensor::from_array(output))
     }
 
+    #[allow(clippy::too_many_lines)]
     fn backward(
         &mut self,
         input: &DiffTensor<f64>,
@@ -669,11 +852,41 @@ impl DiffModule<f64> for Biquad {
             )));
         }
 
-        let (b, a, db_dparam, da_dparam) = self.build_coeffs_and_grads()?;
+        let nfft = self.nfft;
         let gamma = self.gamma();
 
+        // Clone the cached coefficients so the cache borrow is released and we
+        // can reuse `self` working buffers for the rest of the backward pass.
+        let (b, a, db_dparam, da_dparam) = {
+            let cache = self.ensure_coeffs_cached()?;
+            (
+                cache.b.clone(),
+                cache.a.clone(),
+                cache.db_dparam.clone(),
+                cache.da_dparam.clone(),
+            )
+        };
+
+        // Resize reusable working buffers when shapes change.
+        if self.work_dl_dh.dim() != (n_bins, n_out, n_in) {
+            self.work_dl_dh = Array3::zeros((n_bins, n_out, n_in));
+        }
+        if self.work_h.dim() != (n_bins, n_out, n_in) {
+            self.work_h = Array3::zeros((n_bins, n_out, n_in));
+        }
+        if self.work_b_response.dim() != (n_sections, n_bins, n_out, n_in) {
+            self.work_b_response = Array4::zeros((n_sections, n_bins, n_out, n_in));
+        }
+        if self.work_a_response.dim() != (n_sections, n_bins, n_out, n_in) {
+            self.work_a_response = Array4::zeros((n_sections, n_bins, n_out, n_in));
+        }
+        if self.work_grad_input.shape() != input_shape {
+            self.work_grad_input = ArrayD::zeros(IxDyn(input_shape));
+        }
+        self.work_grad_input.fill(Complex::default());
+
         // Compute dLoss/dH using real parts (MVP assumption: real time-domain signals).
-        let mut dl_dh = Array3::zeros((n_bins, n_out, n_in));
+        self.work_dl_dh.fill(Complex::default());
         for out_ch in 0..n_out {
             let grad_axis2 = grad_output.data.index_axis(Axis(2), out_ch);
             for in_ch in 0..n_in {
@@ -681,7 +894,7 @@ impl DiffModule<f64> for Biquad {
                 for bin in 0..n_bins {
                     let grad_bin = grad_axis2.index_axis(Axis(1), bin);
                     let input_bin = input_axis2.index_axis(Axis(1), bin);
-                    dl_dh[[bin, out_ch, in_ch]] = grad_bin
+                    self.work_dl_dh[[bin, out_ch, in_ch]] = grad_bin
                         .iter()
                         .zip(input_bin.iter())
                         .map(|(grad, input)| *grad * input.conj())
@@ -690,9 +903,16 @@ impl DiffModule<f64> for Biquad {
             }
         }
 
-        let basis = SosFrequencyBasis::new(self.nfft, &gamma);
-        let response_vjp = sos_coefficient_vjp_with_basis(&b, &a, &basis, &dl_dh);
-        let h = response_vjp.h;
+        let basis = SosFrequencyBasis::new(nfft, &gamma);
+        let (response_db, response_da) = sos_coefficient_vjp_with_basis(
+            &b,
+            &a,
+            &basis,
+            &self.work_dl_dh,
+            &mut self.work_h,
+            &mut self.work_b_response,
+            &mut self.work_a_response,
+        );
 
         // Accumulate parameter gradients.
         let mut param_grad = biquad_param_grad_view_mut(&mut self.param_grad)?;
@@ -704,8 +924,8 @@ impl DiffModule<f64> for Biquad {
                         for tap in 0..3 {
                             let db_dp = db_dparam[[section, tap, param_idx, out_ch, in_ch]];
                             let da_dp = da_dparam[[section, tap, param_idx, out_ch, in_ch]];
-                            accum += response_vjp.db[[section, tap, out_ch, in_ch]] * db_dp
-                                + response_vjp.da[[section, tap, out_ch, in_ch]] * da_dp;
+                            accum += response_db[[section, tap, out_ch, in_ch]] * db_dp
+                                + response_da[[section, tap, out_ch, in_ch]] * da_dp;
                         }
                         param_grad[[section, param_idx, out_ch, in_ch]] += accum;
                     }
@@ -713,15 +933,15 @@ impl DiffModule<f64> for Biquad {
             }
         }
 
-        // Compute dLoss/dInput.
-        let mut grad_input = ArrayD::zeros(IxDyn(input_shape));
+        // Compute dLoss/dInput into the reusable buffer.
+        let h = &self.work_h;
         for in_ch in 0..n_in {
             for out_ch in 0..n_out {
                 for bin in 0..n_bins {
                     let h_conj = h[[bin, out_ch, in_ch]].conj();
                     let grad_axis2 = grad_output.data.index_axis(Axis(2), out_ch);
                     let grad_bin = grad_axis2.index_axis(Axis(1), bin);
-                    let mut input_axis2 = grad_input.index_axis_mut(Axis(2), in_ch);
+                    let mut input_axis2 = self.work_grad_input.index_axis_mut(Axis(2), in_ch);
                     let mut input_bin = input_axis2.index_axis_mut(Axis(1), bin);
                     for (destination, &gradient) in input_bin.iter_mut().zip(grad_bin.iter()) {
                         *destination += gradient * h_conj;
@@ -729,6 +949,7 @@ impl DiffModule<f64> for Biquad {
                 }
             }
         }
+        let grad_input = std::mem::replace(&mut self.work_grad_input, ArrayD::zeros(IxDyn(&[])));
 
         Ok(DiffTensor::from_array(grad_input))
     }

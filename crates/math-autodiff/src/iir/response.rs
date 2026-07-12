@@ -5,6 +5,7 @@ use std::{cell::RefCell, collections::HashMap, sync::Arc};
 use crate::error::AutodiffError;
 
 const DEFAULT_GAMMA: [f64; 3] = [1.0, 1.0, 1.0];
+const SOS_BIN_CHUNK: usize = 8;
 type SosBasisKey = (usize, [u64; 3]);
 type SosBasisCache = HashMap<SosBasisKey, Arc<Array2<Complex<f64>>>>;
 
@@ -49,7 +50,7 @@ fn tap_frequency_response(nfft: usize, gamma: &[f64; 3]) -> Array2<Complex<f64>>
 #[derive(Debug, Clone)]
 pub(crate) struct SosFrequencyBasis {
     nfft: usize,
-    response: Arc<Array2<Complex<f64>>>,
+    pub(crate) response: Arc<Array2<Complex<f64>>>,
 }
 
 impl SosFrequencyBasis {
@@ -83,19 +84,69 @@ where
     let tap_response = &basis.response;
     let mut h = Array3::from_elem((n_bins, n_out, n_in), Complex::from(1.0));
 
-    for section in 0..n_sections {
-        for bin in 0..n_bins {
-            for out_ch in 0..n_out {
-                for in_ch in 0..n_in {
-                    let mut numerator = Complex::<f64>::default();
-                    let mut denominator = Complex::<f64>::default();
-                    for tap in 0..3 {
-                        let basis = tap_response[[tap, bin]];
-                        numerator += b[[section, tap, out_ch, in_ch]] * basis;
-                        denominator += a[[section, tap, out_ch, in_ch]] * basis;
+    // Process bins in small chunks so that the per-bin H values can live in
+    // registers across all SOS sections, and the per-bin basis values are
+    // loaded only once per chunk.
+    let n_chunked = n_bins / SOS_BIN_CHUNK * SOS_BIN_CHUNK;
+
+    for bin_start in (0..n_chunked).step_by(SOS_BIN_CHUNK) {
+        let mut basis0_chunk = [Complex::from(0.0); SOS_BIN_CHUNK];
+        let mut basis1_chunk = [Complex::from(0.0); SOS_BIN_CHUNK];
+        let mut basis2_chunk = [Complex::from(0.0); SOS_BIN_CHUNK];
+        for i in 0..SOS_BIN_CHUNK {
+            let bin = bin_start + i;
+            basis0_chunk[i] = tap_response[[0, bin]];
+            basis1_chunk[i] = tap_response[[1, bin]];
+            basis2_chunk[i] = tap_response[[2, bin]];
+        }
+
+        for out_ch in 0..n_out {
+            for in_ch in 0..n_in {
+                let mut h_chunk = [Complex::from(1.0); SOS_BIN_CHUNK];
+                for section in 0..n_sections {
+                    let b0 = b[[section, 0, out_ch, in_ch]];
+                    let b1 = b[[section, 1, out_ch, in_ch]];
+                    let b2 = b[[section, 2, out_ch, in_ch]];
+                    let a0 = a[[section, 0, out_ch, in_ch]];
+                    let a1 = a[[section, 1, out_ch, in_ch]];
+                    let a2 = a[[section, 2, out_ch, in_ch]];
+
+                    for i in 0..SOS_BIN_CHUNK {
+                        let basis0 = basis0_chunk[i];
+                        let basis1 = basis1_chunk[i];
+                        let basis2 = basis2_chunk[i];
+                        let numerator = b0 * basis0 + b1 * basis1 + b2 * basis2;
+                        let denominator = a0 * basis0 + a1 * basis1 + a2 * basis2;
+                        h_chunk[i] *= numerator / denominator;
                     }
-                    h[[bin, out_ch, in_ch]] *= numerator / denominator;
                 }
+                for i in 0..SOS_BIN_CHUNK {
+                    h[[bin_start + i, out_ch, in_ch]] = h_chunk[i];
+                }
+            }
+        }
+    }
+
+    // Tail bins (fewer than SOS_BIN_CHUNK).
+    for bin in n_chunked..n_bins {
+        let basis0 = tap_response[[0, bin]];
+        let basis1 = tap_response[[1, bin]];
+        let basis2 = tap_response[[2, bin]];
+        for out_ch in 0..n_out {
+            for in_ch in 0..n_in {
+                let mut h_val = Complex::from(1.0);
+                for section in 0..n_sections {
+                    let b0 = b[[section, 0, out_ch, in_ch]];
+                    let b1 = b[[section, 1, out_ch, in_ch]];
+                    let b2 = b[[section, 2, out_ch, in_ch]];
+                    let a0 = a[[section, 0, out_ch, in_ch]];
+                    let a1 = a[[section, 1, out_ch, in_ch]];
+                    let a2 = a[[section, 2, out_ch, in_ch]];
+                    let numerator = b0 * basis0 + b1 * basis1 + b2 * basis2;
+                    let denominator = a0 * basis0 + a1 * basis1 + a2 * basis2;
+                    h_val *= numerator / denominator;
+                }
+                h[[bin, out_ch, in_ch]] = h_val;
             }
         }
     }
@@ -140,40 +191,178 @@ pub(crate) fn sos_response_with_basis(
     sos_response_impl(&b_view, &a_view, basis)
 }
 
-pub(crate) struct SosCoefficientVjp {
-    pub h: Array3<Complex<f64>>,
-    pub db: Array4<f64>,
-    pub da: Array4<f64>,
-}
-
+#[allow(clippy::too_many_lines)]
+// Stride names follow ndarray's axis ordering (section/bin/out/in); the
+// `bin` and `in` labels are single-character apart, which triggers
+// `similar_names`, but renaming them would obscure the axis they index.
+#[allow(clippy::similar_names)]
 pub(crate) fn sos_coefficient_vjp_with_basis(
     b: &Array4<Complex<f64>>,
     a: &Array4<Complex<f64>>,
     basis: &SosFrequencyBasis,
     dl_dh: &Array3<Complex<f64>>,
-) -> SosCoefficientVjp {
+    h: &mut Array3<Complex<f64>>,
+    b_response: &mut Array4<Complex<f64>>,
+    a_response: &mut Array4<Complex<f64>>,
+) -> (Array4<f64>, Array4<f64>) {
     let (n_sections, _, n_out, n_in) = b.dim();
     let n_bins = basis.n_bins();
     debug_assert_eq!(dl_dh.dim(), (n_bins, n_out, n_in));
+    debug_assert_eq!(h.dim(), (n_bins, n_out, n_in));
+    debug_assert_eq!(b_response.dim(), (n_sections, n_bins, n_out, n_in));
+    debug_assert_eq!(a_response.dim(), (n_sections, n_bins, n_out, n_in));
 
-    let mut h = Array3::from_elem((n_bins, n_out, n_in), Complex::from(1.0));
-    let mut b_response = Array4::zeros((n_sections, n_bins, n_out, n_in));
-    let mut a_response = Array4::zeros((n_sections, n_bins, n_out, n_in));
+    h.fill(Complex::from(1.0));
+    let mut has_zero_b = false;
 
-    for section in 0..n_sections {
-        for bin in 0..n_bins {
-            for out_ch in 0..n_out {
-                for in_ch in 0..n_in {
-                    let mut numerator = Complex::<f64>::default();
-                    let mut denominator = Complex::<f64>::default();
-                    for tap in 0..3 {
-                        let frequency_term = basis.response[[tap, bin]];
-                        numerator += b[[section, tap, out_ch, in_ch]] * frequency_term;
-                        denominator += a[[section, tap, out_ch, in_ch]] * frequency_term;
+    // Precompute raw pointers and strides for all arrays used in both passes.
+    // `b` and `a` share the shape `(K, 3, N_out, N_in)`; `b_response` and
+    // `a_response` share the shape `(K, M, N_out, N_in)`.
+    let b_ptr = b.as_ptr();
+    let a_ptr = a.as_ptr();
+    let b_resp_ptr = b_response.as_mut_ptr();
+    let a_resp_ptr = a_response.as_mut_ptr();
+    let h_ptr = h.as_mut_ptr();
+    let dl_ptr = dl_dh.as_ptr();
+    let basis_ptr = basis.response.as_ptr();
+
+    let b_strides = b.strides();
+    let b_sec_stride = b_strides[0].cast_unsigned();
+    let b_tap_stride = b_strides[1].cast_unsigned();
+    let b_out_stride = b_strides[2].cast_unsigned();
+    let b_in_stride = b_strides[3].cast_unsigned();
+
+    let resp_strides = b_response.strides();
+    let resp_sec_stride = resp_strides[0].cast_unsigned();
+    let resp_bin_stride = resp_strides[1].cast_unsigned();
+    let resp_out_stride = resp_strides[2].cast_unsigned();
+    let resp_in_stride = resp_strides[3].cast_unsigned();
+
+    let h_strides = h.strides();
+    let h_bin_stride = h_strides[0].cast_unsigned();
+    let h_out_stride = h_strides[1].cast_unsigned();
+    let h_in_stride = h_strides[2].cast_unsigned();
+
+    let dl_strides = dl_dh.strides();
+    let dl_bin_stride = dl_strides[0].cast_unsigned();
+    let dl_out_stride = dl_strides[1].cast_unsigned();
+    let dl_in_stride = dl_strides[2].cast_unsigned();
+
+    // First pass: compute B_k and A_k together and accumulate H = prod_k B_k/A_k.
+    // Process bins in chunks so the per-bin H values stay in registers across
+    // all SOS sections, and each bin's basis values are loaded only once.
+    let n_chunked = n_bins / SOS_BIN_CHUNK * SOS_BIN_CHUNK;
+    for bin_start in (0..n_chunked).step_by(SOS_BIN_CHUNK) {
+        let mut basis0_chunk = [Complex::from(0.0); SOS_BIN_CHUNK];
+        let mut basis1_chunk = [Complex::from(0.0); SOS_BIN_CHUNK];
+        let mut basis2_chunk = [Complex::from(0.0); SOS_BIN_CHUNK];
+        for i in 0..SOS_BIN_CHUNK {
+            let bin = bin_start + i;
+            // SAFETY: bin_start + i < n_chunked <= n_bins, so all offsets are in bounds.
+            unsafe {
+                basis0_chunk[i] = *basis_ptr.add(bin);
+                basis1_chunk[i] = *basis_ptr.add(n_bins + bin);
+                basis2_chunk[i] = *basis_ptr.add(2 * n_bins + bin);
+            }
+        }
+        for out_ch in 0..n_out {
+            for in_ch in 0..n_in {
+                // Accumulate numerator and denominator products separately so
+                // only one complex division per bin is needed at the end.
+                let mut num_chunk = [Complex::from(1.0); SOS_BIN_CHUNK];
+                let mut den_chunk = [Complex::from(1.0); SOS_BIN_CHUNK];
+                let h_base = out_ch * h_out_stride + in_ch * h_in_stride;
+                for section in 0..n_sections {
+                    let coeff_base =
+                        section * b_sec_stride + out_ch * b_out_stride + in_ch * b_in_stride;
+                    let resp_base = section * resp_sec_stride
+                        + out_ch * resp_out_stride
+                        + in_ch * resp_in_stride;
+                    // SAFETY: coeff_base is built from bounded section/out/in and
+                    // the three tap offsets (0/1/2) are inside the tap axis of length 3.
+                    let (b0, b1, b2, a0, a1, a2) = unsafe {
+                        (
+                            *b_ptr.add(coeff_base),
+                            *b_ptr.add(coeff_base + b_tap_stride),
+                            *b_ptr.add(coeff_base + 2 * b_tap_stride),
+                            *a_ptr.add(coeff_base),
+                            *a_ptr.add(coeff_base + b_tap_stride),
+                            *a_ptr.add(coeff_base + 2 * b_tap_stride),
+                        )
+                    };
+                    for i in 0..SOS_BIN_CHUNK {
+                        let basis0 = basis0_chunk[i];
+                        let basis1 = basis1_chunk[i];
+                        let basis2 = basis2_chunk[i];
+                        let numerator = b0 * basis0 + b1 * basis1 + b2 * basis2;
+                        let denominator = a0 * basis0 + a1 * basis1 + a2 * basis2;
+                        let bin = bin_start + i;
+                        // SAFETY: resp_base + bin*resp_bin_stride stays inside the
+                        // bin dimension of length n_bins for this section/channel.
+                        unsafe {
+                            *b_resp_ptr.add(resp_base + bin * resp_bin_stride) = numerator;
+                            *a_resp_ptr.add(resp_base + bin * resp_bin_stride) = denominator;
+                        }
+                        num_chunk[i] *= numerator;
+                        den_chunk[i] *= denominator;
+                        has_zero_b |= numerator == Complex::default();
                     }
-                    b_response[[section, bin, out_ch, in_ch]] = numerator;
-                    a_response[[section, bin, out_ch, in_ch]] = denominator;
-                    h[[bin, out_ch, in_ch]] *= numerator / denominator;
+                }
+                // SAFETY: h_base + (bin_start+i)*h_bin_stride stays inside h.
+                unsafe {
+                    for i in 0..SOS_BIN_CHUNK {
+                        let bin = bin_start + i;
+                        *h_ptr.add(h_base + bin * h_bin_stride) = num_chunk[i] / den_chunk[i];
+                    }
+                }
+            }
+        }
+    }
+    for bin in n_chunked..n_bins {
+        // SAFETY: bin is in [n_chunked, n_bins), so all offsets are in bounds.
+        let (basis0, basis1, basis2) = unsafe {
+            (
+                *basis_ptr.add(bin),
+                *basis_ptr.add(n_bins + bin),
+                *basis_ptr.add(2 * n_bins + bin),
+            )
+        };
+        for out_ch in 0..n_out {
+            for in_ch in 0..n_in {
+                let mut num_val = Complex::from(1.0);
+                let mut den_val = Complex::from(1.0);
+                let h_base = out_ch * h_out_stride + in_ch * h_in_stride;
+                for section in 0..n_sections {
+                    let coeff_base =
+                        section * b_sec_stride + out_ch * b_out_stride + in_ch * b_in_stride;
+                    let resp_base = section * resp_sec_stride
+                        + out_ch * resp_out_stride
+                        + in_ch * resp_in_stride;
+                    // SAFETY: same bounded coeff_base/tap offsets as above.
+                    let (b0, b1, b2, a0, a1, a2) = unsafe {
+                        (
+                            *b_ptr.add(coeff_base),
+                            *b_ptr.add(coeff_base + b_tap_stride),
+                            *b_ptr.add(coeff_base + 2 * b_tap_stride),
+                            *a_ptr.add(coeff_base),
+                            *a_ptr.add(coeff_base + b_tap_stride),
+                            *a_ptr.add(coeff_base + 2 * b_tap_stride),
+                        )
+                    };
+                    let numerator = b0 * basis0 + b1 * basis1 + b2 * basis2;
+                    let denominator = a0 * basis0 + a1 * basis1 + a2 * basis2;
+                    // SAFETY: resp_base + bin*resp_bin_stride is in bounds.
+                    unsafe {
+                        *b_resp_ptr.add(resp_base + bin * resp_bin_stride) = numerator;
+                        *a_resp_ptr.add(resp_base + bin * resp_bin_stride) = denominator;
+                    }
+                    num_val *= numerator;
+                    den_val *= denominator;
+                    has_zero_b |= numerator == Complex::default();
+                }
+                // SAFETY: h_base + bin*h_bin_stride is in bounds.
+                unsafe {
+                    *h_ptr.add(h_base + bin * h_bin_stride) = num_val / den_val;
                 }
             }
         }
@@ -181,38 +370,110 @@ pub(crate) fn sos_coefficient_vjp_with_basis(
 
     let mut db = Array4::zeros((n_sections, 3, n_out, n_in));
     let mut da = Array4::zeros((n_sections, 3, n_out, n_in));
-    for section in 0..n_sections {
-        for tap in 0..3 {
+
+    if has_zero_b {
+        // Rare path: a section numerator is exactly zero somewhere, so we
+        // must compute other_sections explicitly to avoid 0/0 NaNs.
+        for section in 0..n_sections {
+            for tap in 0..3 {
+                for out_ch in 0..n_out {
+                    for in_ch in 0..n_in {
+                        let mut numerator_gradient = 0.0;
+                        let mut denominator_gradient = 0.0;
+                        for bin in 0..n_bins {
+                            let b_bin = b_response[[section, bin, out_ch, in_ch]];
+                            let a_bin = a_response[[section, bin, out_ch, in_ch]];
+                            let mut other_sections = Complex::new(1.0, 0.0);
+                            for other in 0..n_sections {
+                                if other != section {
+                                    other_sections *= b_response[[other, bin, out_ch, in_ch]]
+                                        / a_response[[other, bin, out_ch, in_ch]];
+                                }
+                            }
+                            let frequency_term = basis.response[[tap, bin]];
+                            let derivative_b = other_sections * frequency_term / a_bin;
+                            let derivative_a =
+                                -other_sections * b_bin * frequency_term / (a_bin * a_bin);
+                            let loss_gradient = dl_dh[[bin, out_ch, in_ch]].conj();
+                            numerator_gradient += (loss_gradient * derivative_b).re;
+                            denominator_gradient += (loss_gradient * derivative_a).re;
+                        }
+                        db[[section, tap, out_ch, in_ch]] = numerator_gradient;
+                        da[[section, tap, out_ch, in_ch]] = denominator_gradient;
+                    }
+                }
+            }
+        }
+    } else {
+        // Common path: every section numerator is non-zero, so h*A_s/B_s is
+        // safe and avoids the per-section product. Reduce the six per-bin
+        // complex divisions to two reciprocals, use real-only accumulation for
+        // the real-valued tap-0 basis, and walk the bin lanes with raw pointers
+        // following the arrays' natural strides.
+        for section in 0..n_sections {
             for out_ch in 0..n_out {
                 for in_ch in 0..n_in {
-                    let mut numerator_gradient = 0.0;
-                    let mut denominator_gradient = 0.0;
-                    for bin in 0..n_bins {
-                        let b_bin = b_response[[section, bin, out_ch, in_ch]];
-                        let a_bin = a_response[[section, bin, out_ch, in_ch]];
-                        let mut other_sections = Complex::new(1.0, 0.0);
-                        for other in 0..n_sections {
-                            if other != section {
-                                other_sections *= b_response[[other, bin, out_ch, in_ch]]
-                                    / a_response[[other, bin, out_ch, in_ch]];
-                            }
+                    let mut g0_num = 0.0;
+                    let mut g0_den = 0.0;
+                    let mut g1_num = 0.0;
+                    let mut g1_den = 0.0;
+                    let mut g2_num = 0.0;
+                    let mut g2_den = 0.0;
+
+                    let b_base = section * resp_sec_stride
+                        + out_ch * resp_out_stride
+                        + in_ch * resp_in_stride;
+                    let a_base = section * resp_sec_stride
+                        + out_ch * resp_out_stride
+                        + in_ch * resp_in_stride;
+                    let h_base = out_ch * h_out_stride + in_ch * h_in_stride;
+                    let dl_base = out_ch * dl_out_stride + in_ch * dl_in_stride;
+
+                    // SAFETY: all offsets are derived from the arrays' own
+                    // strides and stay within the allocated shape (section,
+                    // out_ch, in_ch are bounded by their respective dimensions
+                    // and bin is bounded by n_bins).
+                    unsafe {
+                        for bin in 0..n_bins {
+                            let b_bin = *b_resp_ptr.add(b_base + bin * resp_bin_stride);
+                            let a_bin = *a_resp_ptr.add(a_base + bin * resp_bin_stride);
+                            let h_bin = *h_ptr.add(h_base + bin * h_bin_stride);
+                            let loss_gradient = (*dl_ptr.add(dl_base + bin * dl_bin_stride)).conj();
+
+                            // One reciprocal per coefficient instead of
+                            // dividing each tap contribution separately.
+                            let inv_b = 1.0 / b_bin;
+                            let inv_a = 1.0 / a_bin;
+                            let cb = loss_gradient * h_bin * inv_b;
+                            let ca = -loss_gradient * h_bin * inv_a;
+
+                            // Tap 0 basis is real-valued; avoid a complex multiply.
+                            let freq0_re = (*basis_ptr.add(bin)).re;
+                            g0_num += cb.re * freq0_re;
+                            g0_den += ca.re * freq0_re;
+
+                            let freq1 = *basis_ptr.add(n_bins + bin);
+                            g1_num += (cb * freq1).re;
+                            g1_den += (ca * freq1).re;
+
+                            let freq2 = *basis_ptr.add(2 * n_bins + bin);
+                            g2_num += (cb * freq2).re;
+                            g2_den += (ca * freq2).re;
                         }
-                        let frequency_term = basis.response[[tap, bin]];
-                        let derivative_b = other_sections * frequency_term / a_bin;
-                        let derivative_a =
-                            -other_sections * b_bin * frequency_term / (a_bin * a_bin);
-                        let loss_gradient = dl_dh[[bin, out_ch, in_ch]].conj();
-                        numerator_gradient += (loss_gradient * derivative_b).re;
-                        denominator_gradient += (loss_gradient * derivative_a).re;
                     }
-                    db[[section, tap, out_ch, in_ch]] = numerator_gradient;
-                    da[[section, tap, out_ch, in_ch]] = denominator_gradient;
+
+                    db[[section, 0, out_ch, in_ch]] = g0_num;
+                    da[[section, 0, out_ch, in_ch]] = g0_den;
+                    db[[section, 1, out_ch, in_ch]] = g1_num;
+                    da[[section, 1, out_ch, in_ch]] = g1_den;
+                    db[[section, 2, out_ch, in_ch]] = g2_num;
+                    da[[section, 2, out_ch, in_ch]] = g2_den;
                 }
             }
         }
     }
 
-    SosCoefficientVjp { h, db, da }
+    (db, da)
 }
 
 fn sos_response_impl<S>(
@@ -232,31 +493,47 @@ where
     let mut b_response = Array4::zeros((n_sections, n_bins, n_out, n_in));
     let mut a_response = Array4::zeros((n_sections, n_bins, n_out, n_in));
 
+    // Compute B_k and A_k for every section in one pass, and accumulate
+    // H = prod_k B_k/A_k.
     for section in 0..n_sections {
-        // Numerator B_section(f).
-        for out_ch in 0..n_out {
-            for in_ch in 0..n_in {
-                for bin in 0..n_bins {
-                    let mut val = Complex::default();
-                    for tap in 0..3 {
-                        val += b[[section, tap, out_ch, in_ch]] * fft_envelope[[tap, bin]];
-                    }
-                    b_response[[section, bin, out_ch, in_ch]] = val;
-                    h[[bin, out_ch, in_ch]] *= val;
+        for bin in 0..n_bins {
+            let basis0 = fft_envelope[[0, bin]];
+            let basis1 = fft_envelope[[1, bin]];
+            let basis2 = fft_envelope[[2, bin]];
+            for out_ch in 0..n_out {
+                for in_ch in 0..n_in {
+                    let b0 = b[[section, 0, out_ch, in_ch]];
+                    let b1 = b[[section, 1, out_ch, in_ch]];
+                    let b2 = b[[section, 2, out_ch, in_ch]];
+                    let a0 = a[[section, 0, out_ch, in_ch]];
+                    let a1 = a[[section, 1, out_ch, in_ch]];
+                    let a2 = a[[section, 2, out_ch, in_ch]];
+                    let numerator = b0 * basis0 + b1 * basis1 + b2 * basis2;
+                    let denominator = a0 * basis0 + a1 * basis1 + a2 * basis2;
+                    b_response[[section, bin, out_ch, in_ch]] = numerator;
+                    a_response[[section, bin, out_ch, in_ch]] = denominator;
+                    h[[bin, out_ch, in_ch]] *= numerator / denominator;
                 }
             }
         }
+    }
 
-        // Denominator A_section(f).
-        for out_ch in 0..n_out {
-            for in_ch in 0..n_in {
-                for bin in 0..n_bins {
-                    let mut val = Complex::default();
-                    for tap in 0..3 {
-                        val += a[[section, tap, out_ch, in_ch]] * fft_envelope[[tap, bin]];
+    // Precompute the per-(section, bin, channel) product over the other
+    // sections so the Jacobian loops avoid repeated inner "other" loops.
+    let one = Complex::new(1.0, 0.0);
+    let mut other_response = Array4::zeros((n_sections, n_bins, n_out, n_in));
+    for section in 0..n_sections {
+        for bin in 0..n_bins {
+            for out_ch in 0..n_out {
+                for in_ch in 0..n_in {
+                    let mut other_sections = one;
+                    for other in 0..n_sections {
+                        if other != section {
+                            other_sections *= b_response[[other, bin, out_ch, in_ch]]
+                                / a_response[[other, bin, out_ch, in_ch]];
+                        }
                     }
-                    a_response[[section, bin, out_ch, in_ch]] = val;
-                    h[[bin, out_ch, in_ch]] /= val;
+                    other_response[[section, bin, out_ch, in_ch]] = other_sections;
                 }
             }
         }
@@ -274,13 +551,7 @@ where
                     for in_ch in 0..n_in {
                         let b_bin = b_response[[section, bin, out_ch, in_ch]];
                         let a_bin = a_response[[section, bin, out_ch, in_ch]];
-                        let mut other_sections = Complex::new(1.0, 0.0);
-                        for other in 0..n_sections {
-                            if other != section {
-                                other_sections *= b_response[[other, bin, out_ch, in_ch]]
-                                    / a_response[[other, bin, out_ch, in_ch]];
-                            }
-                        }
+                        let other_sections = other_response[[section, bin, out_ch, in_ch]];
 
                         jacobian_b[[bin, section, tap, out_ch, in_ch]] =
                             other_sections * envelope_bin / a_bin;

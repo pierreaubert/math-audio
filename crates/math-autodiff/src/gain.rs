@@ -159,13 +159,16 @@ impl DiffModule<f64> for Gain {
                 let h = Complex::new(param[[out_ch, in_ch]], 0.0);
                 let input_slice = input.data.index_axis(Axis(2), in_ch);
                 let mut output_slice = output.index_axis_mut(Axis(2), out_ch);
-                output_slice += &input_slice.mapv(|x| x * h);
+                for (dst, &src) in output_slice.iter_mut().zip(input_slice.iter()) {
+                    *dst += src * h;
+                }
             }
         }
 
         Ok(DiffTensor::from_array(output))
     }
 
+    #[allow(clippy::too_many_lines)]
     fn backward(
         &mut self,
         input: &DiffTensor<f64>,
@@ -221,23 +224,68 @@ impl DiffModule<f64> for Gain {
         }
 
         // Accumulate parameter gradients.
-        for out_ch in 0..n_out {
-            let grad_slice = grad_output.data.index_axis(Axis(2), out_ch);
-            for in_ch in 0..n_in {
-                let input_slice = input.data.index_axis(Axis(2), in_ch);
-                let prod = &grad_slice * &input_slice.mapv(|x| x.conj());
-                param_grad[[out_ch, in_ch]] += prod.sum().re;
+        if input_shape.len() == 3
+            && grad_shape.len() == 3
+            && let Some(input_data) = input.data.as_slice()
+            && let Some(grad_data) = grad_output.data.as_slice()
+        {
+            let batch = input_shape[0];
+            for out_ch in 0..n_out {
+                for in_ch in 0..n_in {
+                    let mut sum = 0.0;
+                    for batch_index in 0..batch {
+                        for f in 0..n_bins {
+                            let g = grad_data[(batch_index * n_bins + f) * n_out + out_ch];
+                            let x = input_data[(batch_index * n_bins + f) * n_in + in_ch];
+                            sum += (g * x.conj()).re;
+                        }
+                    }
+                    param_grad[[out_ch, in_ch]] += sum;
+                }
+            }
+        } else {
+            for out_ch in 0..n_out {
+                let grad_slice = grad_output.data.index_axis(Axis(2), out_ch);
+                for in_ch in 0..n_in {
+                    let input_slice = input.data.index_axis(Axis(2), in_ch);
+                    let mut sum = 0.0;
+                    for (g, x) in grad_slice.iter().zip(input_slice.iter()) {
+                        sum += (g * x.conj()).re;
+                    }
+                    param_grad[[out_ch, in_ch]] += sum;
+                }
             }
         }
 
         // Compute dLoss/dInput.
         let mut grad_input = ArrayD::zeros(IxDyn(input_shape));
-        for in_ch in 0..n_in {
-            for out_ch in 0..n_out {
-                let h = param[[out_ch, in_ch]];
-                let grad_slice = grad_output.data.index_axis(Axis(2), out_ch);
-                let mut input_grad_slice = grad_input.index_axis_mut(Axis(2), in_ch);
-                input_grad_slice += &grad_slice.mapv(|x| x * h);
+        if grad_shape.len() == 3
+            && let Some(grad_data) = grad_output.data.as_slice()
+            && let Some(grad_input_data) = grad_input.as_slice_mut()
+        {
+            let batch = grad_shape[0];
+            for in_ch in 0..n_in {
+                for out_ch in 0..n_out {
+                    let h = param[[out_ch, in_ch]];
+                    for batch_index in 0..batch {
+                        for f in 0..n_bins {
+                            let g = grad_data[(batch_index * n_bins + f) * n_out + out_ch];
+                            let idx = (batch_index * n_bins + f) * n_in + in_ch;
+                            grad_input_data[idx] += g * h;
+                        }
+                    }
+                }
+            }
+        } else {
+            for in_ch in 0..n_in {
+                for out_ch in 0..n_out {
+                    let h = Complex::new(param[[out_ch, in_ch]], 0.0);
+                    let grad_slice = grad_output.data.index_axis(Axis(2), out_ch);
+                    let mut input_grad_slice = grad_input.index_axis_mut(Axis(2), in_ch);
+                    for (dst, &g) in input_grad_slice.iter_mut().zip(grad_slice.iter()) {
+                        *dst += g * h;
+                    }
+                }
             }
         }
 

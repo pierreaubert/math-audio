@@ -22,25 +22,21 @@ use crate::error::AutodiffError;
 use crate::module::{DiffModule, validate_spectral_gradient_shape};
 use crate::tensor::DiffTensor;
 
-/// Build an identity spectrum of shape `(n_in, n_bins, n_in)`.
-fn identity_spectrum(n_in: usize, n_bins: usize) -> DiffTensor<f64> {
-    let mut data = ArrayD::zeros(IxDyn(&[n_in, n_bins, n_in]));
-    for i in 0..n_in {
-        for f in 0..n_bins {
-            data[[i, f, i]] = Complex::new(1.0, 0.0);
-        }
-    }
-    DiffTensor::from_array(data)
-}
-
 /// Extract the transfer matrix of a submodule as `(n_bins, n_out, n_in)`.
 fn module_response(
     module: &dyn DiffModule<f64>,
-    n_in: usize,
+    identity: &DiffTensor<f64>,
 ) -> Result<Array3<Complex<f64>>, AutodiffError> {
     let nb = module.n_bins();
-    let identity = identity_spectrum(n_in, nb);
-    let output = module.forward(&identity)?;
+    let identity_shape = identity.data.shape();
+    if identity_shape.len() != 3 || identity_shape[1] != nb {
+        return Err(AutodiffError::Message(format!(
+            "Recursion: identity spectrum shape {:?} incompatible with module bins {nb}",
+            identity_shape
+        )));
+    }
+    let n_in = identity_shape[0];
+    let output = module.forward(identity)?;
     let out_shape = output.data.shape();
     if out_shape.len() != 3 || out_shape[0] != n_in || out_shape[1] != nb {
         return Err(AutodiffError::Message(format!(
@@ -88,6 +84,52 @@ fn invert_complex_matrix(
     Ok(dmatrix_to_ndarray2(&inv))
 }
 
+/// Compute `out = a @ b` into the pre-allocated `out` buffer.
+#[allow(clippy::many_single_char_names)]
+fn matmul_into(a: &Array2<Complex<f64>>, b: &Array2<Complex<f64>>, out: &mut Array2<Complex<f64>>) {
+    let (m, k) = (a.nrows(), a.ncols());
+    let n = b.ncols();
+    assert_eq!(b.nrows(), k, "matmul_into: incompatible inner dimensions");
+    assert_eq!(out.dim(), (m, n), "matmul_into: incompatible output shape");
+    out.fill(Complex::new(0.0, 0.0));
+    for i in 0..m {
+        for l in 0..k {
+            let a_il = a[[i, l]];
+            if a_il == Complex::new(0.0, 0.0) {
+                continue;
+            }
+            for j in 0..n {
+                out[[i, j]] += a_il * b[[l, j]];
+            }
+        }
+    }
+}
+
+/// Compute the conjugate transpose `out = a^H` into the pre-allocated `out` buffer.
+fn conj_transpose_into(src: &Array2<Complex<f64>>, dst: &mut Array2<Complex<f64>>) {
+    let (m, n) = (src.nrows(), src.ncols());
+    assert_eq!(
+        dst.dim(),
+        (n, m),
+        "conj_transpose_into: incompatible output shape"
+    );
+    for i in 0..m {
+        for j in 0..n {
+            dst[[j, i]] = src[[i, j]].conj();
+        }
+    }
+}
+
+/// Fill an `(n, nb, n)` tensor with an identity spectrum.
+fn fill_identity_spectrum(n: usize, nb: usize, tensor: &mut DiffTensor<f64>) {
+    tensor.data.fill(Complex::new(0.0, 0.0));
+    for i in 0..n {
+        for f in 0..nb {
+            tensor.data[[i, f, i]] = Complex::new(1.0, 0.0);
+        }
+    }
+}
+
 type ClosedLoopResponse = (
     Array3<Complex<f64>>,
     Array3<Complex<f64>>,
@@ -101,6 +143,24 @@ pub struct Recursion {
     pub feedback: Box<dyn DiffModule<f64>>,
     n_bins: usize,
     response_cache: Mutex<Option<(u64, Arc<ClosedLoopResponse>)>>,
+    // Reusable backward buffers to avoid per-call heap allocations.
+    identity_ff: DiffTensor<f64>,
+    identity_fb: DiffTensor<f64>,
+    h_ff_response: DiffTensor<f64>,
+    h_fb_response: DiffTensor<f64>,
+    grad_ff: DiffTensor<f64>,
+    grad_fb: DiffTensor<f64>,
+    dl_dh_closed: Array3<Complex<f64>>,
+    grad_input: ArrayD<Complex<f64>>,
+    // 2-D per-bin work buffers.
+    a_buf: Array2<Complex<f64>>,
+    a_h_buf: Array2<Complex<f64>>,
+    h_ff_f_buf: Array2<Complex<f64>>,
+    h_ff_h_buf: Array2<Complex<f64>>,
+    dl_dh_closed_f_buf: Array2<Complex<f64>>,
+    dl_dh_ff_bin_buf: Array2<Complex<f64>>,
+    work_buf: Array2<Complex<f64>>,
+    work2_buf: Array2<Complex<f64>>,
 }
 
 impl std::fmt::Debug for Recursion {
@@ -110,7 +170,8 @@ impl std::fmt::Debug for Recursion {
             .field("feedforward", &"<dyn DiffModule>")
             .field("feedback", &"<dyn DiffModule>")
             .field("response_cache", &"<cached closed-loop response>")
-            .finish()
+            .field("backward_buffers", &"<reused>")
+            .finish_non_exhaustive()
     }
 }
 
@@ -146,11 +207,36 @@ impl Recursion {
                 feedforward.output_channels()
             )));
         }
+        let n_bins = feedforward.n_bins();
+        let n_in = feedforward.input_channels();
+        let n_out = feedforward.output_channels();
+
+        let mut identity_ff = DiffTensor::zeros(IxDyn(&[n_in, n_bins, n_in]));
+        fill_identity_spectrum(n_in, n_bins, &mut identity_ff);
+        let mut identity_fb = DiffTensor::zeros(IxDyn(&[n_out, n_bins, n_out]));
+        fill_identity_spectrum(n_out, n_bins, &mut identity_fb);
+
         Ok(Self {
-            n_bins: feedforward.n_bins(),
+            n_bins,
             feedforward,
             feedback,
             response_cache: Mutex::new(None),
+            identity_ff,
+            identity_fb,
+            h_ff_response: DiffTensor::zeros(IxDyn(&[n_in, n_bins, n_out])),
+            h_fb_response: DiffTensor::zeros(IxDyn(&[n_out, n_bins, n_out])),
+            grad_ff: DiffTensor::zeros(IxDyn(&[n_in, n_bins, n_out])),
+            grad_fb: DiffTensor::zeros(IxDyn(&[n_out, n_bins, n_out])),
+            dl_dh_closed: Array3::zeros((n_bins, n_out, n_in)),
+            grad_input: ArrayD::zeros(IxDyn(&[0, 0, 0])),
+            a_buf: Array2::zeros((n_out, n_out)),
+            a_h_buf: Array2::zeros((n_out, n_out)),
+            h_ff_f_buf: Array2::zeros((n_out, n_in)),
+            h_ff_h_buf: Array2::zeros((n_in, n_out)),
+            dl_dh_closed_f_buf: Array2::zeros((n_out, n_in)),
+            dl_dh_ff_bin_buf: Array2::zeros((n_out, n_in)),
+            work_buf: Array2::zeros((n_out, n_out)),
+            work2_buf: Array2::zeros((n_out, n_out)),
         })
     }
 
@@ -204,8 +290,8 @@ impl Recursion {
         let n_out = self.feedforward.output_channels();
         let nb = self.n_bins();
 
-        let h_ff = module_response(self.feedforward.as_ref(), n_in)?; // (nb, n_out, n_in)
-        let h_fb = module_response(self.feedback.as_ref(), n_out)?; // (nb, n_out, n_out)
+        let h_ff = module_response(self.feedforward.as_ref(), &self.identity_ff)?; // (nb, n_out, n_in)
+        let h_fb = module_response(self.feedback.as_ref(), &self.identity_fb)?; // (nb, n_out, n_out)
 
         let mut h_closed = Array3::zeros((nb, n_out, n_in));
         let mut a_arr = Array3::zeros((nb, n_out, n_out));
@@ -350,146 +436,132 @@ impl DiffModule<f64> for Recursion {
         let response = self.cached_closed_loop_response()?;
         let (h_closed, h_ff, h_fb, a_arr) = response.as_ref();
 
+        // Reusable buffers are sized for the module's fixed channel/bin counts.
+        // If the input shape differs from the cached buffer, re-allocate.
+        if self.grad_input.shape() == input_shape {
+            self.grad_input.fill(Complex::new(0.0, 0.0));
+        } else {
+            self.grad_input = ArrayD::zeros(IxDyn(input_shape));
+        }
+        self.dl_dh_closed.fill(Complex::new(0.0, 0.0));
+        self.grad_ff.data.fill(Complex::new(0.0, 0.0));
+        self.grad_fb.data.fill(Complex::new(0.0, 0.0));
+        self.h_ff_response.data.fill(Complex::new(0.0, 0.0));
+        self.h_fb_response.data.fill(Complex::new(0.0, 0.0));
+
         // dL/dH_closed[f, o, i] = sum_b grad_output[b, f, o] * conj(input[b, f, i])
-        let mut dl_dh_closed = Array3::<Complex<f64>>::zeros((nb, n_out, n_in));
-        for f in 0..nb {
-            for o in 0..n_out {
-                for i in 0..n_in {
-                    let grad_slice = grad_output.data.index_axis(Axis(1), f);
-                    let grad_bin = grad_slice.index_axis(Axis(1), o);
-                    let input_slice = input.data.index_axis(Axis(1), f);
-                    let input_bin = input_slice.index_axis(Axis(1), i);
-                    dl_dh_closed[[f, o, i]] = grad_bin
-                        .iter()
-                        .zip(input_bin.iter())
-                        .map(|(g, x)| g * x.conj())
-                        .sum::<Complex<f64>>();
+        if input_shape.len() == 3
+            && let Some(grad_output_data) = grad_output.data.as_slice()
+            && let Some(input_data) = input.data.as_slice()
+        {
+            let batch = input_shape[0];
+            for f in 0..nb {
+                for o in 0..n_out {
+                    for i in 0..n_in {
+                        let mut sum = Complex::default();
+                        for batch_index in 0..batch {
+                            let grad_index = (batch_index * nb + f) * n_out + o;
+                            let input_index = (batch_index * nb + f) * n_in + i;
+                            sum += grad_output_data[grad_index] * input_data[input_index].conj();
+                        }
+                        self.dl_dh_closed[[f, o, i]] = sum;
+                    }
+                }
+            }
+        } else {
+            for f in 0..nb {
+                for o in 0..n_out {
+                    for i in 0..n_in {
+                        let grad_slice = grad_output.data.index_axis(Axis(1), f);
+                        let grad_bin = grad_slice.index_axis(Axis(1), o);
+                        let input_slice = input.data.index_axis(Axis(1), f);
+                        let input_bin = input_slice.index_axis(Axis(1), i);
+                        self.dl_dh_closed[[f, o, i]] = grad_bin
+                            .iter()
+                            .zip(input_bin.iter())
+                            .map(|(g, x)| g * x.conj())
+                            .sum::<Complex<f64>>();
+                    }
                 }
             }
         }
 
-        // Build per-bin dL/dH_ff and dL/dH_fb.
-        let mut dl_dh_ff = Array3::<Complex<f64>>::zeros((nb, n_out, n_in));
-        let mut dl_dh_fb = Array3::<Complex<f64>>::zeros((nb, n_out, n_out));
-
+        // Build per-bin dL/dH_ff and dL/dH_fb, populating response/gradient
+        // tensors for the feedforward and feedback backward calls in-place.
         for f in 0..nb {
-            let a = {
-                let mut m = Array2::zeros((n_out, n_out));
-                for r in 0..n_out {
-                    for c in 0..n_out {
-                        m[[r, c]] = a_arr[[f, r, c]];
-                    }
+            // Fill response tensors for this bin.
+            for i in 0..n_in {
+                for o in 0..n_out {
+                    self.h_ff_response.data[[i, f, o]] = h_ff[[f, o, i]];
                 }
-                m
-            };
-            let a_conj = a.mapv(|x| x.conj());
-            let a_h = a_conj.t();
-            let h_ff_f = {
-                let mut m = Array2::zeros((n_out, n_in));
-                for r in 0..n_out {
-                    for c in 0..n_in {
-                        m[[r, c]] = h_ff[[f, r, c]];
-                    }
+            }
+            for i in 0..n_out {
+                for o in 0..n_out {
+                    self.h_fb_response.data[[i, f, o]] = h_fb[[f, o, i]];
                 }
-                m
-            };
-            let dl_dh_closed_f = {
-                let mut m = Array2::zeros((n_out, n_in));
-                for r in 0..n_out {
-                    for c in 0..n_in {
-                        m[[r, c]] = dl_dh_closed[[f, r, c]];
-                    }
+            }
+
+            // Copy this bin's matrices into reusable 2-D buffers.
+            for r in 0..n_out {
+                for c in 0..n_out {
+                    self.a_buf[[r, c]] = a_arr[[f, r, c]];
                 }
-                m
-            };
+            }
+            conj_transpose_into(&self.a_buf, &mut self.a_h_buf);
+            for r in 0..n_out {
+                for c in 0..n_in {
+                    self.h_ff_f_buf[[r, c]] = h_ff[[f, r, c]];
+                }
+            }
+            conj_transpose_into(&self.h_ff_f_buf, &mut self.h_ff_h_buf);
+            for r in 0..n_out {
+                for c in 0..n_in {
+                    self.dl_dh_closed_f_buf[[r, c]] = self.dl_dh_closed[[f, r, c]];
+                }
+            }
 
             // dL/dH_ff[f] = A^H @ dL/dH_closed[f]
-            let dl_dh_ff_bin = a_h.dot(&dl_dh_closed_f);
+            matmul_into(
+                &self.a_h_buf,
+                &self.dl_dh_closed_f_buf,
+                &mut self.dl_dh_ff_bin_buf,
+            );
             for o in 0..n_out {
                 for i in 0..n_in {
-                    dl_dh_ff[[f, o, i]] = dl_dh_ff_bin[[o, i]];
+                    self.grad_ff.data[[i, f, o]] = self.dl_dh_ff_bin_buf[[o, i]];
                 }
             }
 
             // dL/dH_fb[f] = A^H @ dL/dH_closed[f] @ H_ff^H @ A^H
-            let dl_dh_fb_bin = a_h
-                .dot(&dl_dh_closed_f)
-                .dot(&h_ff_f.mapv(|x| x.conj()).t())
-                .dot(&a_h);
+            matmul_into(&self.a_h_buf, &self.dl_dh_closed_f_buf, &mut self.work_buf);
+            matmul_into(&self.work_buf, &self.h_ff_h_buf, &mut self.work2_buf);
+            matmul_into(&self.work2_buf, &self.a_h_buf, &mut self.work_buf);
             for r in 0..n_out {
                 for c in 0..n_out {
-                    dl_dh_fb[[f, r, c]] = dl_dh_fb_bin[[r, c]];
+                    self.grad_fb.data[[c, f, r]] = self.work_buf[[r, c]];
                 }
             }
         }
 
         // Backward through feedforward submodule.
-        {
-            let identity_in = identity_spectrum(n_in, nb);
-            let h_ff_response = {
-                let mut out = ArrayD::zeros(IxDyn(&[n_in, nb, n_out]));
-                for i in 0..n_in {
-                    for f in 0..nb {
-                        for o in 0..n_out {
-                            out[[i, f, o]] = h_ff[[f, o, i]];
-                        }
-                    }
-                }
-                DiffTensor::from_array(out)
-            };
-            let mut grad_ff = ArrayD::zeros(IxDyn(&[n_in, nb, n_out]));
-            for i in 0..n_in {
-                for f in 0..nb {
-                    for o in 0..n_out {
-                        grad_ff[[i, f, o]] = dl_dh_ff[[f, o, i]];
-                    }
-                }
-            }
-            let _ = self.feedforward.backward(
-                &identity_in,
-                &h_ff_response,
-                &DiffTensor::from_array(grad_ff),
-            )?;
-        }
+        let _ = self
+            .feedforward
+            .backward(&self.identity_ff, &self.h_ff_response, &self.grad_ff)?;
 
         // Backward through feedback submodule.
-        {
-            let identity_in = identity_spectrum(n_out, nb);
-            let h_fb_response = {
-                let mut out = ArrayD::zeros(IxDyn(&[n_out, nb, n_out]));
-                for i in 0..n_out {
-                    for f in 0..nb {
-                        for o in 0..n_out {
-                            out[[i, f, o]] = h_fb[[f, o, i]];
-                        }
-                    }
-                }
-                DiffTensor::from_array(out)
-            };
-            let mut grad_fb = ArrayD::zeros(IxDyn(&[n_out, nb, n_out]));
-            for i in 0..n_out {
-                for f in 0..nb {
-                    for o in 0..n_out {
-                        grad_fb[[i, f, o]] = dl_dh_fb[[f, o, i]];
-                    }
-                }
-            }
-            let _ = self.feedback.backward(
-                &identity_in,
-                &h_fb_response,
-                &DiffTensor::from_array(grad_fb),
-            )?;
-        }
+        let _ = self
+            .feedback
+            .backward(&self.identity_fb, &self.h_fb_response, &self.grad_fb)?;
 
         // dL/dinput[b, f, i] = sum_o conj(H_closed[f, o, i]) * grad_output[b, f, o]
-        let mut grad_input = ArrayD::zeros(IxDyn(input_shape));
         if input_shape.len() == 3
             && let Some(grad_output_data) = grad_output.data.as_slice()
         {
             let batch = input_shape[0];
-            let grad_input_data = grad_input
+            let grad_input_data = self
+                .grad_input
                 .as_slice_mut()
-                .expect("new recursion gradient must be contiguous");
+                .expect("recursion gradient buffer must be contiguous");
             for batch_index in 0..batch {
                 for f in 0..nb {
                     for input_channel in 0..n_in {
@@ -511,7 +583,7 @@ impl DiffModule<f64> for Recursion {
                         let h_conj = h_closed[[f, o, i]].conj();
                         let grad_slice = grad_output.data.index_axis(Axis(1), f);
                         let grad_bin = grad_slice.index_axis(Axis(1), o);
-                        let mut input_grad_slice = grad_input.index_axis_mut(Axis(1), f);
+                        let mut input_grad_slice = self.grad_input.index_axis_mut(Axis(1), f);
                         let mut input_grad_bin = input_grad_slice.index_axis_mut(Axis(1), i);
                         for (destination, &gradient) in
                             input_grad_bin.iter_mut().zip(grad_bin.iter())
@@ -523,7 +595,7 @@ impl DiffModule<f64> for Recursion {
             }
         }
 
-        Ok(DiffTensor::from_array(grad_input))
+        Ok(DiffTensor::from_array(self.grad_input.clone()))
     }
 
     fn input_channels(&self) -> usize {
