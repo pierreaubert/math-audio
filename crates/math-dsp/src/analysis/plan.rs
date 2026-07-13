@@ -1,6 +1,8 @@
 use super::FFT_PLANNER;
+use super::REAL_FFT_PLANNER;
 use super::misc::next_power_of_two;
 use super::types::CrossCorrelationEnvelopeResult;
+use realfft::RealToComplex;
 use rustfft::num_complex::Complex;
 use std::sync::Arc;
 
@@ -15,6 +17,14 @@ pub fn plan_fft_forward(size: usize) -> Arc<dyn rustfft::Fft<f32>> {
 /// Get a cached inverse FFT plan for the given size (f32).
 pub fn plan_fft_inverse(size: usize) -> Arc<dyn rustfft::Fft<f32>> {
     FFT_PLANNER.with(|p| p.borrow_mut().plan_fft_inverse(size))
+}
+
+/// Get a cached real-to-complex FFT plan for the given size (f32).
+///
+/// The returned plan transforms `size` real samples into `size/2 + 1`
+/// complex bins.  Uses a thread-local planner for plan reuse.
+pub fn plan_real_fft_forward(size: usize) -> Arc<dyn RealToComplex<f32>> {
+    REAL_FFT_PLANNER.with(|p| p.borrow_mut().plan_fft_forward(size))
 }
 
 /// Cross-correlate a probe with a recording and compute the analytic envelope.

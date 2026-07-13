@@ -7,11 +7,13 @@
 //! - Microphone compensation for calibrated measurements
 //! - Standalone WAV buffer analysis (wav2csv functionality)
 
+use realfft::RealFftPlanner;
 use rustfft::FftPlanner;
 use std::cell::RefCell;
 
 thread_local! {
     static FFT_PLANNER: RefCell<FftPlanner<f32>> = RefCell::new(FftPlanner::new());
+    static REAL_FFT_PLANNER: RefCell<RealFftPlanner<f32>> = RefCell::new(RealFftPlanner::new());
 }
 
 mod analyze;

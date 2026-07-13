@@ -7,14 +7,13 @@
 
 use super::chroma::ChromaFeatureExtractor;
 use super::loudness;
-use super::utils::{geometric_mean, mean, normalize, std_deviation};
+use super::utils::{geometric_mean, normalize};
 use super::zcr;
 use super::{AnalysisError, FEATURES_COUNT, MIN_SAMPLES};
-use crate::analysis;
-use rustfft::Fft;
+use realfft::RealFftPlanner;
 use rustfft::num_complex::Complex;
 use std::f32::consts::PI;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 pub const DEFAULT_WINDOW_SIZE: usize = 512;
 pub const HOP_SIZE_TEMPO: usize = 256;
@@ -30,26 +29,25 @@ const MIN_BPM: f32 = 0.0;
 pub struct FeatureExtractor {
     window_size: usize,
     hann_window: Vec<f32>,
-    fft: Arc<dyn Fft<f32>>,
-    complex_buf: Vec<Complex<f32>>,
+    fft: Arc<dyn realfft::RealToComplex<f32>>,
+    time_buf: Vec<f32>,
+    freq_buf: Vec<Complex<f32>>,
     spectrum_buf: Vec<f32>,
     prev_spectrum: Vec<f32>,
     onset_buf: Vec<f32>,
     centered_buf: Vec<f32>,
-    centroid_values: Vec<f32>,
-    rolloff_values: Vec<f32>,
-    flatness_values: Vec<f32>,
 }
 
 impl FeatureExtractor {
     /// Create a new extractor with the default window size (512 samples).
     pub fn new() -> Self {
-        Self::with_window_size(DEFAULT_WINDOW_SIZE)
+        Self::with_cached_fft(DEFAULT_WINDOW_SIZE)
     }
 
-    /// Create a new extractor with a custom window size.
-    pub fn with_window_size(window_size: usize) -> Self {
-        let fft = analysis::plan_fft_forward(window_size);
+    /// Create a new extractor reusing the globally cached forward real FFT plan
+    /// for the default window size. Avoids re-planning on every call.
+    fn with_cached_fft(window_size: usize) -> Self {
+        let fft = default_real_fft();
         let hann_window = build_hann_window(window_size);
         let n_bins = window_size / 2 + 1;
 
@@ -57,14 +55,32 @@ impl FeatureExtractor {
             window_size,
             hann_window,
             fft,
-            complex_buf: vec![Complex::new(0.0, 0.0); window_size],
+            time_buf: vec![0.0; window_size],
+            freq_buf: vec![Complex::new(0.0, 0.0); n_bins],
             spectrum_buf: vec![0.0; n_bins],
             prev_spectrum: vec![0.0; n_bins],
             onset_buf: Vec::new(),
             centered_buf: Vec::new(),
-            centroid_values: Vec::new(),
-            rolloff_values: Vec::new(),
-            flatness_values: Vec::new(),
+        }
+    }
+
+    /// Create a new extractor with a custom window size.
+    pub fn with_window_size(window_size: usize) -> Self {
+        let mut planner = RealFftPlanner::<f32>::new();
+        let fft = planner.plan_fft_forward(window_size);
+        let hann_window = build_hann_window(window_size);
+        let n_bins = window_size / 2 + 1;
+
+        Self {
+            window_size,
+            hann_window,
+            fft,
+            time_buf: vec![0.0; window_size],
+            freq_buf: vec![Complex::new(0.0, 0.0); n_bins],
+            spectrum_buf: vec![0.0; n_bins],
+            prev_spectrum: vec![0.0; n_bins],
+            onset_buf: Vec::new(),
+            centered_buf: Vec::new(),
         }
     }
 
@@ -82,13 +98,15 @@ impl FeatureExtractor {
         debug_assert_eq!(samples.len(), self.window_size);
 
         for (i, (&s, &w)) in samples.iter().zip(self.hann_window.iter()).enumerate() {
-            self.complex_buf[i] = Complex::new(s * w, 0.0);
+            self.time_buf[i] = s * w;
         }
 
-        self.fft.process(&mut self.complex_buf);
+        self.fft
+            .process(&mut self.time_buf, &mut self.freq_buf)
+            .expect("real FFT forward failed");
 
         for i in 0..self.spectrum_buf.len() {
-            self.spectrum_buf[i] = self.complex_buf[i].norm();
+            self.spectrum_buf[i] = self.freq_buf[i].norm();
         }
     }
 
@@ -142,14 +160,20 @@ impl FeatureExtractor {
         let sr = sample_rate as f32;
         let half_sr = sr / 2.0;
 
-        self.centroid_values.clear();
-        self.rolloff_values.clear();
-        self.flatness_values.clear();
+        // Running mean / variance (Welford) so we do not need to store every
+        // per-frame descriptor in a growable buffer.
+        let mut centroid_mean = 0.0f32;
+        let mut centroid_m2 = 0.0f32;
+        let mut rolloff_mean = 0.0f32;
+        let mut rolloff_m2 = 0.0f32;
+        let mut flatness_mean = 0.0f32;
+        let mut flatness_m2 = 0.0f32;
+        let mut n = 0u32;
 
         for chunk in samples.windows(self.window_size).step_by(HOP_SIZE_SPECTRAL) {
             self.compute_magnitude_spectrum(chunk);
 
-            // --- Centroid (first pass) ---
+            // --- Centroid (first pass, fused with energy) ---
             let mut sum_mag = 0.0_f32;
             let mut weighted_sum = 0.0_f32;
             let mut energy = 0.0_f32;
@@ -164,7 +188,6 @@ impl FeatureExtractor {
                 0.0
             };
             let centroid_freq = centroid_bin * sr / self.window_size as f32;
-            self.centroid_values.push(centroid_freq);
 
             // --- Rolloff ---
             let threshold = 0.95 * energy;
@@ -181,34 +204,48 @@ impl FeatureExtractor {
                 rolloff_bin = self.window_size as f32 / 2.0;
             }
             let rolloff_freq = rolloff_bin * sr / self.window_size as f32;
-            self.rolloff_values.push(rolloff_freq);
 
             // --- Flatness ---
             let geo_len = (self.spectrum_buf.len() / 8) * 8;
             let geo = geometric_mean(&self.spectrum_buf[..geo_len]);
-            if geo == 0.0 {
-                self.flatness_values.push(0.0);
+            let mean_mag = sum_mag / self.spectrum_buf.len() as f32;
+            let flatness = if geo == 0.0 || mean_mag == 0.0 {
+                0.0
             } else {
-                let mean_mag = sum_mag / self.spectrum_buf.len() as f32;
-                let flatness = geo / mean_mag;
-                self.flatness_values.push(flatness);
-            }
+                geo / mean_mag
+            };
+
+            // Update online statistics for this frame.
+            n += 1;
+            let nf = n as f32;
+            let delta_c = centroid_freq - centroid_mean;
+            centroid_mean += delta_c / nf;
+            let delta2_c = centroid_freq - centroid_mean;
+            centroid_m2 += delta_c * delta2_c;
+
+            let delta_r = rolloff_freq - rolloff_mean;
+            rolloff_mean += delta_r / nf;
+            let delta2_r = rolloff_freq - rolloff_mean;
+            rolloff_m2 += delta_r * delta2_r;
+
+            let delta_f = flatness - flatness_mean;
+            flatness_mean += delta_f / nf;
+            let delta2_f = flatness - flatness_mean;
+            flatness_m2 += delta_f * delta2_f;
         }
 
-        let centroid_mean = normalize(mean(&self.centroid_values), 0.0, half_sr);
-        let centroid_std = normalize(std_deviation(&self.centroid_values), 0.0, half_sr);
-        let rolloff_mean = normalize(mean(&self.rolloff_values), 0.0, half_sr);
-        let rolloff_std = normalize(std_deviation(&self.rolloff_values), 0.0, half_sr);
-        let flatness_mean = normalize(mean(&self.flatness_values), 0.0, 1.0);
-        let flatness_std = normalize(std_deviation(&self.flatness_values), 0.0, 1.0);
+        let count = n as f32;
+        let centroid_std = if n > 0 { (centroid_m2 / count).sqrt() } else { 0.0 };
+        let rolloff_std = if n > 0 { (rolloff_m2 / count).sqrt() } else { 0.0 };
+        let flatness_std = if n > 0 { (flatness_m2 / count).sqrt() } else { 0.0 };
 
         [
-            centroid_mean,
-            centroid_std,
-            rolloff_mean,
-            rolloff_std,
-            flatness_mean,
-            flatness_std,
+            normalize(centroid_mean, 0.0, half_sr),
+            normalize(centroid_std, 0.0, half_sr),
+            normalize(rolloff_mean, 0.0, half_sr),
+            normalize(rolloff_std, 0.0, half_sr),
+            normalize(flatness_mean, 0.0, 1.0),
+            normalize(flatness_std, 0.0, 1.0),
         ]
     }
 }
@@ -295,6 +332,16 @@ impl Default for AudioFeatureExtractor {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Return a cached forward real FFT plan for the default window size.
+fn default_real_fft() -> Arc<dyn realfft::RealToComplex<f32>> {
+    static PLAN: OnceLock<Arc<dyn realfft::RealToComplex<f32>>> = OnceLock::new();
+    PLAN.get_or_init(|| {
+        let mut planner = RealFftPlanner::<f32>::new();
+        planner.plan_fft_forward(DEFAULT_WINDOW_SIZE)
+    })
+    .clone()
 }
 
 fn build_hann_window(size: usize) -> Vec<f32> {

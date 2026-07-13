@@ -6,7 +6,7 @@ use super::compute::compute_spectrogram;
 use super::compute::compute_thd_from_ir;
 use super::compute::compute_welch_spectrum_into;
 use super::compute::with_welch_buffers;
-use super::plan::plan_fft_forward;
+use super::plan::plan_real_fft_forward;
 use super::estimate::estimate_lag;
 use super::interpolate::interpolate_log;
 use super::interpolate::interpolate_log_phase;
@@ -66,7 +66,7 @@ pub fn analyze_wav_buffer(
             interpolate_log_phase(&freqs, &phases_deg, &log_freqs),
         )
     } else {
-        let fft = plan_fft_forward(fft_size);
+        let fft = plan_real_fft_forward(fft_size);
         with_welch_buffers(fft_size, &fft, |bufs| -> Result<(Vec<f32>, Vec<f32>), String> {
             compute_welch_spectrum_into(
                 samples,
@@ -74,9 +74,11 @@ pub fn analyze_wav_buffer(
                 fft_size,
                 config.overlap,
                 &bufs.hann_window,
+                &bufs.scaled_window,
                 &fft,
-                &mut bufs.scratch,
-                &mut bufs.buffer,
+                &mut bufs.real_buffer,
+                &mut bufs.spectrum,
+                &mut bufs.real_scratch,
                 &mut bufs.magnitude_sum,
                 &mut bufs.phase_real_sum,
                 &mut bufs.phase_imag_sum,
