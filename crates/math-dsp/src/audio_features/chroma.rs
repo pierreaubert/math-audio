@@ -120,8 +120,8 @@ impl ChromaFeatureExtractor {
             .step_by(hop_length)
             .zip(spectrum.axis_iter_mut(Axis(1)))
         {
-            for i in 0..window_length {
-                self.fft_input[i] = window[i] * self.hann_window[i];
+            for (i, &w) in window.iter().enumerate() {
+                self.fft_input[i] = w * self.hann_window[i];
             }
             self.fft
                 .process(&mut self.fft_input, &mut self.fft_output)
@@ -143,7 +143,7 @@ impl ChromaFeatureExtractor {
     pub fn compute(&mut self, samples: &[f32], sample_rate: u32) -> Result<Vec<f32>, ChromaError> {
         let n_chroma = 12u32;
 
-        let mut spectrum = self.compute_stft(samples);
+        let spectrum = self.compute_stft(samples);
         let tuning = estimate_tuning(sample_rate, &spectrum, self.window_size, 0.01, n_chroma)?;
         let cache_key = (sample_rate, self.window_size, n_chroma, Self::quantize_tuning(tuning));
 
@@ -161,7 +161,7 @@ impl ChromaFeatureExtractor {
 
         let n_frames = spectrum.shape()[1];
         self.chroma_buf.resize(n_chroma as usize * n_frames, 0.0);
-        let chroma = chroma_stft_with_filter(filter, &mut spectrum, &mut self.chroma_buf)?;
+        let chroma = chroma_stft_with_filter(filter, &spectrum, &mut self.chroma_buf)?;
         self.spectrum_buf = Some(spectrum);
 
         let mut raw_features = chroma_interval_features(chroma)?;

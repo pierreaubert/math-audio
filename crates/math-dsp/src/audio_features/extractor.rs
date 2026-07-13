@@ -36,7 +36,6 @@ pub struct FeatureExtractor {
     spectrum_buf: Vec<f32>,
     prev_spectrum: Vec<f32>,
     onset_buf: Vec<f32>,
-    centered_buf: Vec<f32>,
     tempo_prior: Vec<f32>,
     tempo_prior_sr: u32,
 }
@@ -65,7 +64,6 @@ impl FeatureExtractor {
             spectrum_buf: vec![0.0; n_bins],
             prev_spectrum: vec![0.0; n_bins],
             onset_buf: Vec::new(),
-            centered_buf: Vec::new(),
             tempo_prior: Vec::new(),
             tempo_prior_sr: 0,
         }
@@ -89,7 +87,6 @@ impl FeatureExtractor {
             spectrum_buf: vec![0.0; n_bins],
             prev_spectrum: vec![0.0; n_bins],
             onset_buf: Vec::new(),
-            centered_buf: Vec::new(),
             tempo_prior: Vec::new(),
             tempo_prior_sr: 0,
         }
