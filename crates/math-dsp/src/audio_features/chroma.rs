@@ -280,9 +280,9 @@ fn chroma_matmul(filter: &Array2<f32>, spectrum: &Array2<f64>, chroma_buf: &mut 
 
     chroma_buf[..out_len].fill(0.0);
 
-    // Fast path: flat slices for contiguous memory-order access. Process two
+    // Fast path: flat slices for contiguous memory-order access. Process four
     // chroma rows per inner pass so the spectrum row (the largest operand) is
-    // read once per pair instead of once per row.
+    // read once per quadruple instead of once per row.
     if let (Some(f), Some(s)) = (
         filter.as_slice_memory_order(),
         spectrum.as_slice_memory_order(),
@@ -290,34 +290,26 @@ fn chroma_matmul(filter: &Array2<f32>, spectrum: &Array2<f64>, chroma_buf: &mut 
         for i in 0..n_bins {
             let f_row = &f[i * n_chroma..(i + 1) * n_chroma];
             let s_row = &s[i * n_frames..(i + 1) * n_frames];
-            for r in (0..n_chroma).step_by(2) {
+            for r in (0..n_chroma).step_by(4) {
                 let fc0 = f_row[r];
                 let fc1 = f_row[r + 1];
-                if fc0 == 0.0 && fc1 == 0.0 {
+                let fc2 = f_row[r + 2];
+                let fc3 = f_row[r + 3];
+                if fc0 == 0.0 && fc1 == 0.0 && fc2 == 0.0 && fc3 == 0.0 {
                     continue;
                 }
-                let (head, tail) = chroma_buf.split_at_mut((r + 1) * n_frames);
-                let out0 = &mut head[r * n_frames..];
-                let out1 = &mut tail[..n_frames];
-                match (fc0 == 0.0, fc1 == 0.0) {
-                    (true, false) => {
-                        for j in 0..n_frames {
-                            out1[j] += fc1 * (s_row[j] as f32);
-                        }
-                    }
-                    (false, true) => {
-                        for j in 0..n_frames {
-                            out0[j] += fc0 * (s_row[j] as f32);
-                        }
-                    }
-                    (false, false) => {
-                        for j in 0..n_frames {
-                            let v = s_row[j] as f32;
-                            out0[j] += fc0 * v;
-                            out1[j] += fc1 * v;
-                        }
-                    }
-                    (true, true) => unreachable!(),
+                let (chunk, _) = chroma_buf.split_at_mut((r + 4) * n_frames);
+                let (a, b) = chunk.split_at_mut((r + 2) * n_frames);
+                let (out0_part, out1) = a.split_at_mut((r + 1) * n_frames);
+                let out0 = &mut out0_part[r * n_frames..];
+                let out1 = &mut out1[..n_frames];
+                let (out2, out3) = b.split_at_mut(n_frames);
+                for j in 0..n_frames {
+                    let v = s_row[j] as f32;
+                    out0[j] += fc0 * v;
+                    out1[j] += fc1 * v;
+                    out2[j] += fc2 * v;
+                    out3[j] += fc3 * v;
                 }
             }
         }
