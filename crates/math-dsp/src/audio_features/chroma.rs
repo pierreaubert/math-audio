@@ -6,7 +6,7 @@
 use super::utils::{hz_to_octs_inplace, normalize, reflect_pad, stft};
 use crate::analysis;
 use crate::stft::generate_hann_window;
-use ndarray::{Array, Array1, Array2, Axis, Zip, arr1, arr2, s};
+use ndarray::{Array, Array1, Array2, Axis, Zip, arr2, s};
 use oxiblas_ndarray::blas::{dot_view, matmul};
 use rustfft::Fft;
 use rustfft::num_complex::Complex;
@@ -133,7 +133,7 @@ impl ChromaFeatureExtractor {
         let chroma = chroma_stft_with_filter(filter, &mut spectrum)?;
         self.spectrum_buf = Some(spectrum);
 
-        let mut raw_features = chroma_interval_features(&chroma)?;
+        let mut raw_features = chroma_interval_features(chroma)?;
 
         let (mut interval_class, mut interval_class_mode) =
             raw_features.view_mut().split_at(Axis(0), 6);
@@ -185,7 +185,7 @@ fn chroma_stft_with_filter(
     filter: &Array2<f64>,
     spectrum: &mut Array2<f64>,
 ) -> Result<Array2<f64>, ChromaError> {
-    spectrum.par_mapv_inplace(|x| x * x);
+    spectrum.mapv_inplace(|x| x * x);
     let mut raw_chroma = matmul(filter, spectrum);
     for mut row in raw_chroma.columns_mut() {
         let mut sum = row.mapv(|x| x.abs()).sum();
@@ -207,7 +207,7 @@ pub fn compute_chroma_features(samples: &[f32], sample_rate: u32) -> Result<Vec<
     let tuning = estimate_tuning(sample_rate, &spectrum, WINDOW_SIZE, 0.01, 12)?;
     let chroma = chroma_stft(sample_rate, &mut spectrum, WINDOW_SIZE, n_chroma, tuning)?;
 
-    let mut raw_features = chroma_interval_features(&chroma)?;
+    let mut raw_features = chroma_interval_features(chroma)?;
 
     let (mut interval_class, mut interval_class_mode) =
         raw_features.view_mut().split_at(Axis(0), 6);
@@ -242,8 +242,17 @@ pub fn compute_chroma_features(samples: &[f32], sample_rate: u32) -> Result<Vec<
     Ok(features)
 }
 
-fn chroma_interval_features(chroma: &Array2<f64>) -> Result<Array1<f64>, ChromaError> {
-    let chroma = normalize_feature_sequence(&chroma.mapv(|x| (x * 15.).exp()));
+fn chroma_interval_features(mut chroma: Array2<f64>) -> Result<Array1<f64>, ChromaError> {
+    // Apply the exponential transform and normalize each frame in-place.
+    chroma.mapv_inplace(|x| (x * 15.).exp());
+    for mut column in chroma.columns_mut() {
+        let mut sum = column.iter().map(|&x| x.abs()).sum();
+        if sum < 0.0001 {
+            sum = 1.;
+        }
+        column /= sum;
+    }
+
     let templates = arr2(&[
         [1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
         [1, 0, 0, 0, 0, 0, 0, 0, 0, 0],
@@ -264,26 +273,42 @@ fn chroma_interval_features(chroma: &Array2<f64>) -> Result<Array1<f64>, ChromaE
     })
 }
 
-fn extract_interval_features(chroma: &Array2<f64>, templates: &Array2<i32>) -> Array2<f64> {
-    let mut f_intervals: Array2<f64> = Array::zeros((chroma.shape()[1], templates.shape()[1]));
-    for (template, mut f_interval) in templates
-        .axis_iter(Axis(1))
-        .zip(f_intervals.axis_iter_mut(Axis(1)))
-    {
+/// 12-bit masks for the 10 interval templates (columns of the template matrix).
+const TEMPLATE_MASKS: [u16; 10] = [
+    0xFFF, // all bins
+    0x001, // bin 0
+    0x002, // bin 1
+    0x184, // bins 2, 7, 8
+    0x248, // bins 3, 6, 9
+    0x010, // bin 4
+    0x120, // bins 5, 8
+    0x0C0, // bins 6, 7
+    0x200, // bin 9
+    0x000, // none
+];
+
+fn extract_interval_features(chroma: &Array2<f64>, _templates: &Array2<i32>) -> Array2<f64> {
+    let n_frames = chroma.shape()[1];
+    let mut result = Array2::<f64>::zeros((TEMPLATE_MASKS.len(), n_frames));
+    for (t_idx, &mask) in TEMPLATE_MASKS.iter().enumerate() {
         for shift in 0..12 {
-            let mut vec: Vec<i32> = template.to_vec();
-            vec.rotate_right(shift);
-            let rolled = arr1(&vec);
-            let power = Zip::from(chroma.t())
-                .and_broadcast(&rolled)
-                .map_collect(|&f, &s| f.powi(s))
-                .map_axis_mut(Axis(1), |x| x.product());
-            f_interval += &power;
+            let rotated = ((mask << shift) | (mask >> (12 - shift))) & 0xFFF;
+            for frame in 0..n_frames {
+                let mut prod = 1.0_f64;
+                let mut bits = rotated;
+                while bits != 0 {
+                    let bin = bits.trailing_zeros() as usize;
+                    prod *= chroma[[bin, frame]];
+                    bits &= bits - 1;
+                }
+                result[[t_idx, frame]] += prod;
+            }
         }
     }
-    f_intervals.t().to_owned()
+    result
 }
 
+#[cfg(test)]
 fn normalize_feature_sequence(feature: &Array2<f64>) -> Array2<f64> {
     let mut normalized_sequence = feature.to_owned();
     for mut column in normalized_sequence.columns_mut() {
@@ -489,7 +514,7 @@ fn chroma_stft(
     n_chroma: u32,
     tuning: f64,
 ) -> Result<Array2<f64>, ChromaError> {
-    spectrum.par_mapv_inplace(|x| x * x);
+    spectrum.mapv_inplace(|x| x * x);
     let mut raw_chroma = chroma_filter(sample_rate, n_fft, n_chroma, tuning)?;
 
     raw_chroma = matmul(&raw_chroma, spectrum);

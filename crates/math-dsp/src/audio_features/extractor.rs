@@ -149,15 +149,17 @@ impl FeatureExtractor {
         for chunk in samples.windows(self.window_size).step_by(HOP_SIZE_SPECTRAL) {
             self.compute_magnitude_spectrum(chunk);
 
-            // --- Centroid ---
-            let sum_mag: f32 = self.spectrum_buf.iter().sum();
+            // --- Centroid (first pass) ---
+            let mut sum_mag = 0.0_f32;
+            let mut weighted_sum = 0.0_f32;
+            let mut energy = 0.0_f32;
+            for (i, &m) in self.spectrum_buf.iter().enumerate() {
+                sum_mag += m;
+                weighted_sum += i as f32 * m;
+                energy += m * m;
+            }
             let centroid_bin = if sum_mag > 0.0 {
-                self.spectrum_buf
-                    .iter()
-                    .enumerate()
-                    .map(|(i, &m)| i as f32 * m)
-                    .sum::<f32>()
-                    / sum_mag
+                weighted_sum / sum_mag
             } else {
                 0.0
             };
@@ -165,9 +167,8 @@ impl FeatureExtractor {
             self.centroid_values.push(centroid_freq);
 
             // --- Rolloff ---
-            let total_energy: f32 = self.spectrum_buf.iter().map(|&m| m * m).sum();
-            let threshold = 0.95 * total_energy;
-            let mut cumulative = 0.0;
+            let threshold = 0.95 * energy;
+            let mut cumulative = 0.0_f32;
             let mut rolloff_bin = 0.0_f32;
             for (i, &m) in self.spectrum_buf.iter().enumerate() {
                 cumulative += m * m;
@@ -188,7 +189,8 @@ impl FeatureExtractor {
             if geo == 0.0 {
                 self.flatness_values.push(0.0);
             } else {
-                let flatness = geo / mean(&self.spectrum_buf);
+                let mean_mag = sum_mag / self.spectrum_buf.len() as f32;
+                let flatness = geo / mean_mag;
                 self.flatness_values.push(flatness);
             }
         }
@@ -258,21 +260,18 @@ impl AudioFeatureExtractor {
                 self.spectral_features
                     .compute_spectral_features(samples, sample_rate)
             });
-            let child_zcr = s.spawn(|| zcr::compute_zcr(samples));
-            let child_loudness = s.spawn(|| loudness::compute_loudness(samples));
             let child_chroma =
                 s.spawn(|| self.chroma_features.compute(samples, sample_rate));
+
+            // These are cheap; run them on the caller thread while the heavy
+            // feature threads are in flight.
+            let zcr_val = zcr::compute_zcr(samples);
+            let loudness_vals = loudness::compute_loudness(samples);
 
             let tempo_val = child_tempo
                 .join()
                 .map_err(|e| AnalysisError::ThreadPanic(format!("{e:?}")))?;
             let spectral_vals = child_spectral
-                .join()
-                .map_err(|e| AnalysisError::ThreadPanic(format!("{e:?}")))?;
-            let zcr_val = child_zcr
-                .join()
-                .map_err(|e| AnalysisError::ThreadPanic(format!("{e:?}")))?;
-            let loudness_vals = child_loudness
                 .join()
                 .map_err(|e| AnalysisError::ThreadPanic(format!("{e:?}")))?;
             let chroma_vals = child_chroma
