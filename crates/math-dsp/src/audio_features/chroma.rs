@@ -39,7 +39,7 @@ impl std::error::Error for ChromaError {}
 ///
 /// The cached filter is stored in transposed form `(n_bins, n_chroma)` as
 /// `f32` so the bin-major matmul loop reads half the data and accumulates in
-/// the faster single-precision path without per-call conversions.
+/// the faster single-precision path.
 pub struct ChromaFeatureExtractor {
     window_size: usize,
     hop_length: usize,
@@ -221,7 +221,7 @@ impl Default for ChromaFeatureExtractor {
 /// `n_chroma * n_frames` `f32` values.
 fn chroma_stft_with_filter(
     filter: &Array2<f32>,
-    spectrum: &mut Array2<f64>,
+    spectrum: &Array2<f64>,
     chroma_buf: &mut [f32],
 ) -> Result<Array2<f64>, ChromaError> {
     chroma_matmul(filter, spectrum, chroma_buf);
