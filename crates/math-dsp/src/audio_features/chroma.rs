@@ -122,7 +122,9 @@ impl ChromaFeatureExtractor {
                 .expect("real FFT forward failed");
             for i in 0..n_bins {
                 let x = self.fft_output[i];
-                stft_col[i] = (x.re * x.re + x.im * x.im).sqrt() as f64;
+                // Store squared magnitude; chroma_stft_with_filter expects it,
+                // and pip_track works on squared values with an adjusted threshold.
+                stft_col[i] = (x.re * x.re + x.im * x.im) as f64;
             }
         }
 
@@ -199,11 +201,13 @@ impl Default for ChromaFeatureExtractor {
 }
 
 /// Compute chroma STFT using a pre-computed filter matrix.
+///
+/// `spectrum` must contain squared magnitudes (as produced by
+/// `ChromaFeatureExtractor::compute_stft`).
 fn chroma_stft_with_filter(
     filter: &Array2<f64>,
     spectrum: &mut Array2<f64>,
 ) -> Result<Array2<f64>, ChromaError> {
-    spectrum.mapv_inplace(|x| x * x);
     let mut raw_chroma = chroma_matmul(filter, spectrum);
     for mut row in raw_chroma.columns_mut() {
         let mut sum = row.iter().map(|&x| x.abs()).sum::<f64>();
@@ -431,7 +435,9 @@ fn pip_track(
     let sample_rate_float = f64::from(sample_rate);
     let fmin = 150.0_f64;
     let fmax = 4000.0_f64.min(sample_rate_float / 2.0);
-    let threshold = 0.1;
+    // Spectrum contains squared magnitudes; keep the same effective threshold
+    // in the squared domain: (0.1 * max_magnitude)^2 = 0.01 * max_sq.
+    let threshold = 0.01;
 
     let fft_freqs = Array::linspace(0., sample_rate_float / 2., 1 + n_fft / 2);
 
@@ -475,7 +481,8 @@ fn pip_track(
             }
             shift = avg / shift;
             pitches.push(((i + beginning + 1) as f64 + shift) * sample_rate_float / n_fft as f64);
-            mags.push(elem + 0.5 * avg * shift);
+            // `elem` is a squared magnitude; return the linear magnitude for tuning.
+            mags.push((elem + 0.5 * avg * shift).sqrt());
         }
     });
 
@@ -557,18 +564,11 @@ fn chroma_stft(
     n_chroma: u32,
     tuning: f64,
 ) -> Result<Array2<f64>, ChromaError> {
+    // Standalone path receives linear magnitudes from `stft`; square them to
+    // match the input contract of `chroma_stft_with_filter`.
     spectrum.mapv_inplace(|x| x * x);
     let filter = chroma_filter(sample_rate, n_fft, n_chroma, tuning)?;
-
-    let mut raw_chroma = chroma_matmul(&filter, spectrum);
-    for mut row in raw_chroma.columns_mut() {
-        let mut sum = row.iter().map(|&x| x.abs()).sum::<f64>();
-        if sum < f64::MIN_POSITIVE {
-            sum = 1.;
-        }
-        row /= sum;
-    }
-    Ok(raw_chroma)
+    chroma_stft_with_filter(&filter, spectrum)
 }
 
 #[cfg(test)]
