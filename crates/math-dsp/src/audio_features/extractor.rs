@@ -106,7 +106,7 @@ impl FeatureExtractor {
             .expect("real FFT forward failed");
 
         for i in 0..self.spectrum_buf.len() {
-            self.spectrum_buf[i] = self.freq_buf[i].norm();
+            self.spectrum_buf[i] = self.freq_buf[i].norm_sqr().sqrt();
         }
     }
 
