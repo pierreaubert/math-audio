@@ -36,6 +36,10 @@ impl std::error::Error for ChromaError {}
 /// Caches the Hann window, FFT plan, STFT scratch buffers, and the chroma
 /// filter matrix so repeated analysis on the same window size does not
 /// re-allocate or re-compute them on every call.
+///
+/// The cached filter is stored in transposed form `(n_bins, n_chroma)` as
+/// `f32` so the bin-major matmul loop reads half the data and accumulates in
+/// the faster single-precision path without per-call conversions.
 pub struct ChromaFeatureExtractor {
     window_size: usize,
     hop_length: usize,
@@ -45,7 +49,8 @@ pub struct ChromaFeatureExtractor {
     fft_output: Vec<Complex<f32>>,
     spectrum_buf: Option<Array2<f64>>,
     padded_buf: Vec<f32>,
-    filter_cache: HashMap<(u32, usize, u32, i64), Array2<f64>>,
+    filter_cache: HashMap<(u32, usize, u32, i64), Array2<f32>>,
+    chroma_buf: Vec<f32>,
 }
 
 impl ChromaFeatureExtractor {
@@ -70,6 +75,7 @@ impl ChromaFeatureExtractor {
             spectrum_buf: None,
             padded_buf: Vec::new(),
             filter_cache: HashMap::new(),
+            chroma_buf: Vec::new(),
         }
     }
 
@@ -145,12 +151,17 @@ impl ChromaFeatureExtractor {
             Some(f) => f,
             None => {
                 let f = chroma_filter(sample_rate, self.window_size, n_chroma, tuning)?;
-                self.filter_cache.insert(cache_key, f);
+                // Store in transposed, contiguous, single-precision form for the
+                // cache-friendly f32 matmul fast path.
+                let f_t = f.t().mapv(|x| x as f32);
+                self.filter_cache.insert(cache_key, f_t);
                 self.filter_cache.get(&cache_key).unwrap()
             }
         };
 
-        let chroma = chroma_stft_with_filter(filter, &mut spectrum)?;
+        let n_frames = spectrum.shape()[1];
+        self.chroma_buf.resize(n_chroma as usize * n_frames, 0.0);
+        let chroma = chroma_stft_with_filter(filter, &mut spectrum, &mut self.chroma_buf)?;
         self.spectrum_buf = Some(spectrum);
 
         let mut raw_features = chroma_interval_features(chroma)?;
@@ -200,48 +211,107 @@ impl Default for ChromaFeatureExtractor {
     }
 }
 
-/// Compute chroma STFT using a pre-computed filter matrix.
+/// Compute chroma STFT using a pre-computed, transposed, single-precision
+/// filter matrix.
 ///
-/// `spectrum` must contain squared magnitudes (as produced by
-/// `ChromaFeatureExtractor::compute_stft`).
+/// `filter` must have shape `(n_bins, n_chroma)` (the transpose of the
+/// canonical `(n_chroma, n_bins)` filter). `spectrum` must contain squared
+/// magnitudes (as produced by `ChromaFeatureExtractor::compute_stft`).
+/// `chroma_buf` is a reusable scratch buffer large enough to hold
+/// `n_chroma * n_frames` `f32` values.
 fn chroma_stft_with_filter(
-    filter: &Array2<f64>,
+    filter: &Array2<f32>,
     spectrum: &mut Array2<f64>,
+    chroma_buf: &mut [f32],
 ) -> Result<Array2<f64>, ChromaError> {
-    let mut raw_chroma = chroma_matmul(filter, spectrum);
-    for mut row in raw_chroma.columns_mut() {
-        let mut sum = row.iter().map(|&x| x.abs()).sum::<f64>();
-        if sum < f64::MIN_POSITIVE {
-            sum = 1.;
+    chroma_matmul(filter, spectrum, chroma_buf);
+
+    let n_chroma = filter.shape()[1];
+    let n_frames = spectrum.shape()[1];
+
+    // Normalize columns while still in f32, then convert to f64 for the
+    // downstream pipeline. This keeps the normalization pass in the faster
+    // precision and avoids allocating a second copy of the chromagram.
+    let mut sums = vec![0.0_f32; n_frames];
+    for r in 0..n_chroma {
+        let row = &chroma_buf[r * n_frames..(r + 1) * n_frames];
+        for j in 0..n_frames {
+            sums[j] += row[j].abs();
         }
-        row /= sum;
     }
+    for sum in &mut sums {
+        if *sum < f32::MIN_POSITIVE {
+            *sum = 1.0;
+        }
+    }
+    for r in 0..n_chroma {
+        let row = &mut chroma_buf[r * n_frames..(r + 1) * n_frames];
+        for j in 0..n_frames {
+            row[j] /= sums[j];
+        }
+    }
+
+    let mut raw_chroma = Array2::<f64>::zeros((n_chroma, n_frames));
+    if let Some(out) = raw_chroma.as_slice_memory_order_mut() {
+        for (dst, &src) in out.iter_mut().zip(chroma_buf.iter()) {
+            *dst = f64::from(src);
+        }
+    } else {
+        for ((r, j), dst) in raw_chroma.indexed_iter_mut() {
+            *dst = f64::from(chroma_buf[r * n_frames + j]);
+        }
+    }
+
     Ok(raw_chroma)
 }
 
 /// Cache-friendly dense multiply for the small chroma filter shape.
 ///
-/// `filter` has shape `(n_chroma, n_bins)` and `spectrum` has shape
-/// `(n_bins, n_frames)`. The result has shape `(n_chroma, n_frames)`.
-/// We transpose the filter so both operands are read contiguously along the
-/// bin axis and accumulate into a small result that stays in L1 cache.
-fn chroma_matmul(filter: &Array2<f64>, spectrum: &Array2<f64>) -> Array2<f64> {
-    let n_chroma = filter.shape()[0];
-    let n_bins = spectrum.shape()[0];
+/// `filter` is passed in already-transposed form with shape `(n_bins, n_chroma)`
+/// and contiguous rows. `spectrum` has shape `(n_bins, n_frames)`. The result
+/// is written into `chroma_buf` as `n_chroma * n_frames` `f32` values. The
+/// bin-major loop reads both operands contiguously and accumulates into a small
+/// result that stays in L1 cache.
+fn chroma_matmul(filter: &Array2<f32>, spectrum: &Array2<f64>, chroma_buf: &mut [f32]) {
+    let n_bins = filter.shape()[0];
+    let n_chroma = filter.shape()[1];
     let n_frames = spectrum.shape()[1];
-    let filter_t = filter.t();
-    let mut raw_chroma = Array2::<f64>::zeros((n_chroma, n_frames));
-    for i in 0..n_bins {
-        let f_row = filter_t.row(i);
-        let s_row = spectrum.row(i);
-        for (r, &fc) in f_row.iter().enumerate() {
-            let mut out = raw_chroma.row_mut(r);
-            for j in 0..n_frames {
-                out[j] += fc * s_row[j];
+    let out_len = n_chroma * n_frames;
+
+    chroma_buf[..out_len].fill(0.0);
+
+    // Fast path: flat slices for contiguous memory-order access.
+    if let (Some(f), Some(s)) = (
+        filter.as_slice_memory_order(),
+        spectrum.as_slice_memory_order(),
+    ) {
+        for i in 0..n_bins {
+            let f_row = &f[i * n_chroma..(i + 1) * n_chroma];
+            let s_row = &s[i * n_frames..(i + 1) * n_frames];
+            for (r, &fc) in f_row.iter().enumerate() {
+                if fc == 0.0 {
+                    continue;
+                }
+                let out_row = &mut chroma_buf[r * n_frames..(r + 1) * n_frames];
+                for j in 0..n_frames {
+                    out_row[j] += fc * (s_row[j] as f32);
+                }
+            }
+        }
+    } else {
+        // Fallback for non-contiguous inputs (e.g. the standalone
+        // `compute_chroma_features` path whose spectrum is permuted).
+        for i in 0..n_bins {
+            let f_row = filter.row(i);
+            let s_row = spectrum.row(i);
+            for (r, &fc) in f_row.iter().enumerate() {
+                let out_row = &mut chroma_buf[r * n_frames..(r + 1) * n_frames];
+                for j in 0..n_frames {
+                    out_row[j] += fc * (s_row[j] as f32);
+                }
             }
         }
     }
-    raw_chroma
 }
 
 /// Compute 13 chroma interval features from the full song samples.
@@ -568,7 +638,12 @@ fn chroma_stft(
     // match the input contract of `chroma_stft_with_filter`.
     spectrum.mapv_inplace(|x| x * x);
     let filter = chroma_filter(sample_rate, n_fft, n_chroma, tuning)?;
-    chroma_stft_with_filter(&filter, spectrum)
+    // Transpose to the contiguous `(n_bins, n_chroma)` layout and convert to
+    // the single-precision form expected by the matmul fast path.
+    let filter_t = filter.t().mapv(|x| x as f32);
+    let n_frames = spectrum.shape()[1];
+    let mut chroma_buf = vec![0.0_f32; n_chroma as usize * n_frames];
+    chroma_stft_with_filter(&filter_t, spectrum, &mut chroma_buf)
 }
 
 #[cfg(test)]
