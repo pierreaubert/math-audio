@@ -6,7 +6,7 @@
 use super::utils::{hz_to_octs_inplace, normalize, stft};
 use crate::stft::generate_hann_window;
 use ndarray::{Array, Array1, Array2, Axis, Zip, arr2, s};
-use oxiblas_ndarray::blas::{dot_view, matmul};
+use oxiblas_ndarray::blas::dot_view;
 use realfft::{RealFftPlanner, RealToComplex};
 use rustfft::num_complex::Complex;
 use std::collections::HashMap;
@@ -204,7 +204,7 @@ fn chroma_stft_with_filter(
     spectrum: &mut Array2<f64>,
 ) -> Result<Array2<f64>, ChromaError> {
     spectrum.mapv_inplace(|x| x * x);
-    let mut raw_chroma = matmul(filter, spectrum);
+    let mut raw_chroma = chroma_matmul(filter, spectrum);
     for mut row in raw_chroma.columns_mut() {
         let mut sum = row.iter().map(|&x| x.abs()).sum::<f64>();
         if sum < f64::MIN_POSITIVE {
@@ -213,6 +213,31 @@ fn chroma_stft_with_filter(
         row /= sum;
     }
     Ok(raw_chroma)
+}
+
+/// Cache-friendly dense multiply for the small chroma filter shape.
+///
+/// `filter` has shape `(n_chroma, n_bins)` and `spectrum` has shape
+/// `(n_bins, n_frames)`. The result has shape `(n_chroma, n_frames)`.
+/// We transpose the filter so both operands are read contiguously along the
+/// bin axis and accumulate into a small result that stays in L1 cache.
+fn chroma_matmul(filter: &Array2<f64>, spectrum: &Array2<f64>) -> Array2<f64> {
+    let n_chroma = filter.shape()[0];
+    let n_bins = spectrum.shape()[0];
+    let n_frames = spectrum.shape()[1];
+    let filter_t = filter.t();
+    let mut raw_chroma = Array2::<f64>::zeros((n_chroma, n_frames));
+    for i in 0..n_bins {
+        let f_row = filter_t.row(i);
+        let s_row = spectrum.row(i);
+        for (r, &fc) in f_row.iter().enumerate() {
+            let mut out = raw_chroma.row_mut(r);
+            for j in 0..n_frames {
+                out[j] += fc * s_row[j];
+            }
+        }
+    }
+    raw_chroma
 }
 
 /// Compute 13 chroma interval features from the full song samples.
@@ -533,11 +558,11 @@ fn chroma_stft(
     tuning: f64,
 ) -> Result<Array2<f64>, ChromaError> {
     spectrum.mapv_inplace(|x| x * x);
-    let mut raw_chroma = chroma_filter(sample_rate, n_fft, n_chroma, tuning)?;
+    let filter = chroma_filter(sample_rate, n_fft, n_chroma, tuning)?;
 
-    raw_chroma = matmul(&raw_chroma, spectrum);
+    let mut raw_chroma = chroma_matmul(&filter, spectrum);
     for mut row in raw_chroma.columns_mut() {
-        let mut sum = row.mapv(|x| x.abs()).sum();
+        let mut sum = row.iter().map(|&x| x.abs()).sum::<f64>();
         if sum < f64::MIN_POSITIVE {
             sum = 1.;
         }
