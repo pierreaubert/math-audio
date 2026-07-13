@@ -30,12 +30,15 @@ pub struct FeatureExtractor {
     window_size: usize,
     hann_window: Vec<f32>,
     fft: Arc<dyn realfft::RealToComplex<f32>>,
+    fft_scratch: Vec<Complex<f32>>,
     time_buf: Vec<f32>,
     freq_buf: Vec<Complex<f32>>,
     spectrum_buf: Vec<f32>,
     prev_spectrum: Vec<f32>,
     onset_buf: Vec<f32>,
     centered_buf: Vec<f32>,
+    tempo_prior: Vec<f32>,
+    tempo_prior_sr: u32,
 }
 
 impl FeatureExtractor {
@@ -48,6 +51,7 @@ impl FeatureExtractor {
     /// for the default window size. Avoids re-planning on every call.
     fn with_cached_fft(window_size: usize) -> Self {
         let fft = default_real_fft();
+        let fft_scratch = vec![Complex::new(0.0, 0.0); fft.get_scratch_len()];
         let hann_window = build_hann_window(window_size);
         let n_bins = window_size / 2 + 1;
 
@@ -55,12 +59,15 @@ impl FeatureExtractor {
             window_size,
             hann_window,
             fft,
+            fft_scratch,
             time_buf: vec![0.0; window_size],
             freq_buf: vec![Complex::new(0.0, 0.0); n_bins],
             spectrum_buf: vec![0.0; n_bins],
             prev_spectrum: vec![0.0; n_bins],
             onset_buf: Vec::new(),
             centered_buf: Vec::new(),
+            tempo_prior: Vec::new(),
+            tempo_prior_sr: 0,
         }
     }
 
@@ -68,6 +75,7 @@ impl FeatureExtractor {
     pub fn with_window_size(window_size: usize) -> Self {
         let mut planner = RealFftPlanner::<f32>::new();
         let fft = planner.plan_fft_forward(window_size);
+        let fft_scratch = vec![Complex::new(0.0, 0.0); fft.get_scratch_len()];
         let hann_window = build_hann_window(window_size);
         let n_bins = window_size / 2 + 1;
 
@@ -75,12 +83,15 @@ impl FeatureExtractor {
             window_size,
             hann_window,
             fft,
+            fft_scratch,
             time_buf: vec![0.0; window_size],
             freq_buf: vec![Complex::new(0.0, 0.0); n_bins],
             spectrum_buf: vec![0.0; n_bins],
             prev_spectrum: vec![0.0; n_bins],
             onset_buf: Vec::new(),
             centered_buf: Vec::new(),
+            tempo_prior: Vec::new(),
+            tempo_prior_sr: 0,
         }
     }
 
@@ -94,6 +105,7 @@ impl FeatureExtractor {
     ///
     /// `samples` must have length `self.window_size`. The result is stored in
     /// `self.spectrum_buf` (length `window_size / 2 + 1`).
+    #[inline]
     fn compute_magnitude_spectrum(&mut self, samples: &[f32]) {
         debug_assert_eq!(samples.len(), self.window_size);
 
@@ -102,7 +114,11 @@ impl FeatureExtractor {
         }
 
         self.fft
-            .process(&mut self.time_buf, &mut self.freq_buf)
+            .process_with_scratch(
+                &mut self.time_buf,
+                &mut self.freq_buf,
+                &mut self.fft_scratch,
+            )
             .expect("real FFT forward failed");
 
         for i in 0..self.spectrum_buf.len() {
@@ -115,7 +131,13 @@ impl FeatureExtractor {
     /// Returns a single normalized value in [-1, 1], or -1 for silence or
     /// signals that are too short.
     pub fn compute_tempo(&mut self, samples: &[f32], sample_rate: u32) -> f32 {
+        let expected_onsets = samples
+            .len()
+            .saturating_sub(self.window_size)
+            / HOP_SIZE_TEMPO
+            + 1;
         self.onset_buf.clear();
+        self.onset_buf.reserve(expected_onsets);
         self.prev_spectrum.fill(0.0);
 
         let n_bins = self.window_size / 2 + 1;
@@ -131,7 +153,8 @@ impl FeatureExtractor {
                 .sum();
 
             self.onset_buf.push(flux);
-            self.prev_spectrum.copy_from_slice(&self.spectrum_buf);
+            // Reuse buffers: swap instead of copying the current spectrum.
+            std::mem::swap(&mut self.spectrum_buf, &mut self.prev_spectrum);
         }
 
         if self.onset_buf.len() < 4 {
@@ -369,11 +392,22 @@ impl FeatureExtractor {
             return 0.0;
         }
 
-        // Remove mean, reusing centered_buf
-        let mean_val = onset_envelope.iter().sum::<f32>() / n as f32;
-        self.centered_buf.resize(n, 0.0);
-        for (i, &x) in onset_envelope.iter().enumerate() {
-            self.centered_buf[i] = x - mean_val;
+        // Remove mean in-place on the onset envelope.
+        let mean_val = self.onset_buf.iter().sum::<f32>() / n as f32;
+        for x in &mut self.onset_buf {
+            *x -= mean_val;
+        }
+
+        // Cache Gaussian tempo prior across calls with the same sample rate.
+        // The prior depends only on lag and frame_rate, not on envelope length.
+        if self.tempo_prior_sr != sample_rate || self.tempo_prior.len() <= max_lag {
+            self.tempo_prior.resize(max_lag + 1, 0.0);
+            for lag in min_lag..=max_lag {
+                let bpm = frame_rate * 60.0 / lag as f32;
+                self.tempo_prior[lag] =
+                    (-0.5 * ((bpm - 120.0) / 40.0).powi(2)).exp();
+            }
+            self.tempo_prior_sr = sample_rate;
         }
 
         let mut best_lag = min_lag;
@@ -382,14 +416,11 @@ impl FeatureExtractor {
         for lag in min_lag..=max_lag {
             let mut corr = 0.0f32;
             for i in 0..n - lag {
-                corr += self.centered_buf[i] * self.centered_buf[i + lag];
+                corr += self.onset_buf[i] * self.onset_buf[i + lag];
             }
             corr /= (n - lag) as f32;
 
-            // Apply tempo prior: prefer tempos near 120 BPM (Gaussian weighting)
-            let bpm = frame_rate * 60.0 / lag as f32;
-            let prior = (-0.5 * ((bpm - 120.0) / 40.0).powi(2)).exp();
-            let score = corr * prior;
+            let score = corr * self.tempo_prior[lag];
 
             if score > best_score {
                 best_score = score;
