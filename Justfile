@@ -45,6 +45,7 @@ prod: prod-workspace
 	cargo build --release --bin run-de -p math-optimisation
 	cargo build --release --bin wav2csv -p math-dsp
 	cargo build --release --bin simd-fuzzer -p math-dsp
+	cargo build --release --bin benchmark-convergence -p math-optimisation
 
 prod-workspace:
 	cargo build --release --workspace
@@ -56,7 +57,6 @@ prod-workspace:
 bench: bench-math
 
 bench-math:
-	cargo run --release --bin benchmark-convergence -p math-optimisation
 	cargo run --release --bin biquad-bench -p math-iir-fir
 	cargo bench --release -p math-autodiff --bench biquad_bench
 

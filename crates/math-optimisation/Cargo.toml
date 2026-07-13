@@ -68,7 +68,7 @@ required-features = ["plotly"]
 
 [[bin]]
 name = "benchmark-convergence"
-path = "bench/benchmark_convergence.rs"
+path = "bin/benchmark_convergence.rs"
 
 [[bin]]
 name = "run-de"
