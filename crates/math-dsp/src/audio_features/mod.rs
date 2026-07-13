@@ -21,10 +21,16 @@ pub mod tempo;
 pub mod utils;
 pub mod zcr;
 
+pub use chroma::ChromaFeatureExtractor;
 pub use extractor::{AudioFeatureExtractor, FeatureExtractor};
 
 /// Number of features in the analysis vector (bliss v2 compatible).
 pub const FEATURES_COUNT: usize = 23;
+
+thread_local! {
+    static AUDIO_FEATURE_EXTRACTOR: std::cell::RefCell<AudioFeatureExtractor> =
+        std::cell::RefCell::new(AudioFeatureExtractor::new());
+}
 
 /// Minimum number of samples required for analysis (largest FFT window).
 pub const MIN_SAMPLES: usize = 8192;
@@ -60,8 +66,8 @@ pub fn analyze_audio_features(
     samples: &[f32],
     sample_rate: u32,
 ) -> Result<Vec<f32>, AnalysisError> {
-    AudioFeatureExtractor::new()
-        .analyze(samples, sample_rate)
+    AUDIO_FEATURE_EXTRACTOR
+        .with(|e| e.borrow_mut().analyze(samples, sample_rate))
         .map(|a| a.to_vec())
 }
 

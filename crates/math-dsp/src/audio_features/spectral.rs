@@ -4,13 +4,18 @@
 
 use super::extractor::FeatureExtractor;
 
+thread_local! {
+    static FEATURE_EXTRACTOR: std::cell::RefCell<FeatureExtractor> =
+        std::cell::RefCell::new(FeatureExtractor::new());
+}
+
 /// Compute spectral centroid, rolloff, and flatness.
 ///
 /// Returns `[centroid_mean, centroid_std, rolloff_mean, rolloff_std, flatness_mean, flatness_std]`
 /// all normalized to [-1, 1].
 pub fn compute_spectral_features(samples: &[f32], sample_rate: u32) -> Vec<f32> {
-    FeatureExtractor::new()
-        .compute_spectral_features(samples, sample_rate)
+    FEATURE_EXTRACTOR
+        .with(|e| e.borrow_mut().compute_spectral_features(samples, sample_rate))
         .to_vec()
 }
 

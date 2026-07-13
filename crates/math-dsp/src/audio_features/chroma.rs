@@ -4,8 +4,13 @@
 //! Computes 13 interval/triad features from the chromagram.
 
 use super::utils::{hz_to_octs_inplace, normalize, stft};
-use ndarray::{Array, Array1, Array2, Axis, Zip, arr1, arr2, s};
-use oxiblas_ndarray::blas::{dot_view, matmul};
+use crate::stft::generate_hann_window;
+use ndarray::{Array, Array1, Array2, Axis, Zip, arr2, s};
+use oxiblas_ndarray::blas::dot_view;
+use realfft::{RealFftPlanner, RealToComplex};
+use rustfft::num_complex::Complex;
+use std::collections::HashMap;
+use std::sync::Arc;
 
 const WINDOW_SIZE: usize = 8192;
 const MAX_VALUE: f32 = 1.0;
@@ -26,6 +31,306 @@ impl std::fmt::Display for ChromaError {
 
 impl std::error::Error for ChromaError {}
 
+/// Reusable chroma feature extractor.
+///
+/// Caches the Hann window, FFT plan, STFT scratch buffers, and the chroma
+/// filter matrix so repeated analysis on the same window size does not
+/// re-allocate or re-compute them on every call.
+///
+/// The cached filter is stored in transposed form `(n_bins, n_chroma)` as
+/// `f32` so the bin-major matmul loop reads half the data and accumulates in
+/// the faster single-precision path.
+pub struct ChromaFeatureExtractor {
+    window_size: usize,
+    hop_length: usize,
+    hann_window: Vec<f32>,
+    fft: Arc<dyn RealToComplex<f32>>,
+    fft_input: Vec<f32>,
+    fft_output: Vec<Complex<f32>>,
+    spectrum_buf: Option<Array2<f64>>,
+    padded_buf: Vec<f32>,
+    filter_cache: HashMap<(u32, usize, u32, i64), Array2<f32>>,
+    chroma_buf: Vec<f32>,
+}
+
+impl ChromaFeatureExtractor {
+    /// Create a new extractor with the default chroma window size (8192 samples).
+    pub fn new() -> Self {
+        Self::with_window_size(WINDOW_SIZE, 2205)
+    }
+
+    /// Create a new extractor with a custom window and hop size.
+    pub fn with_window_size(window_size: usize, hop_length: usize) -> Self {
+        let mut planner = RealFftPlanner::<f32>::new();
+        let fft = planner.plan_fft_forward(window_size);
+        let hann_window = generate_hann_window(window_size);
+        let n_bins = window_size / 2 + 1;
+        Self {
+            window_size,
+            hop_length,
+            hann_window,
+            fft,
+            fft_input: vec![0.0; window_size],
+            fft_output: vec![Complex::new(0.0, 0.0); n_bins],
+            spectrum_buf: None,
+            padded_buf: Vec::new(),
+            filter_cache: HashMap::new(),
+            chroma_buf: Vec::new(),
+        }
+    }
+
+    /// Reset internal state (currently a no-op; buffers are overwritten each analysis).
+    pub fn reset(&mut self) {}
+
+    /// Compute the STFT magnitude spectrum for the configured window/hop,
+    /// reusing internal buffers.
+    fn compute_stft(&mut self, signal: &[f32]) -> Array2<f64> {
+        let window_length = self.window_size;
+        let hop_length = self.hop_length;
+        let n_frames = (signal.len() as f32 / hop_length as f32).ceil() as usize;
+        let n_bins = window_length / 2 + 1;
+
+        let mut spectrum = match self.spectrum_buf.take() {
+            Some(mut s) => {
+                if s.dim() == (n_bins, n_frames) {
+                    s.fill(0.0);
+                    s
+                } else {
+                    Array2::zeros((n_bins, n_frames))
+                }
+            }
+            None => Array2::zeros((n_bins, n_frames)),
+        };
+
+        // Reuse the reflect-pad buffer instead of allocating each call.
+        let pad = window_length / 2;
+        let padded_len = signal.len() + 2 * pad;
+        self.padded_buf.resize(padded_len, 0.0);
+        for i in 0..pad {
+            self.padded_buf[i] = signal[pad - i];
+        }
+        self.padded_buf[pad..pad + signal.len()].copy_from_slice(signal);
+        let suffix_start = pad + signal.len();
+        for i in 0..pad {
+            self.padded_buf[suffix_start + i] = signal[signal.len() - 2 - i];
+        }
+
+        for (window, mut stft_col) in self.padded_buf
+            .windows(window_length)
+            .step_by(hop_length)
+            .zip(spectrum.axis_iter_mut(Axis(1)))
+        {
+            for (i, &w) in window.iter().enumerate() {
+                self.fft_input[i] = w * self.hann_window[i];
+            }
+            self.fft
+                .process(&mut self.fft_input, &mut self.fft_output)
+                .expect("real FFT forward failed");
+            for i in 0..n_bins {
+                let x = self.fft_output[i];
+                // Store squared magnitude; chroma_stft_with_filter expects it,
+                // and pip_track works on squared values with an adjusted threshold.
+                stft_col[i] = (x.re * x.re + x.im * x.im) as f64;
+            }
+        }
+
+        spectrum
+    }
+
+    /// Compute 13 chroma interval features from the full song samples.
+    ///
+    /// Returns a Vec of 13 normalized features (6 interval classes + 4 triads + 2 L2 norms + 1 ratio).
+    pub fn compute(&mut self, samples: &[f32], sample_rate: u32) -> Result<Vec<f32>, ChromaError> {
+        let n_chroma = 12u32;
+
+        let spectrum = self.compute_stft(samples);
+        let tuning = estimate_tuning(sample_rate, &spectrum, self.window_size, 0.01, n_chroma)?;
+        let cache_key = (sample_rate, self.window_size, n_chroma, Self::quantize_tuning(tuning));
+
+        let filter = match self.filter_cache.get(&cache_key) {
+            Some(f) => f,
+            None => {
+                let f = chroma_filter(sample_rate, self.window_size, n_chroma, tuning)?;
+                // Store in transposed, contiguous, single-precision form for the
+                // cache-friendly f32 matmul fast path.
+                let f_t = f.t().mapv(|x| x as f32);
+                self.filter_cache.insert(cache_key, f_t);
+                self.filter_cache.get(&cache_key).unwrap()
+            }
+        };
+
+        let n_frames = spectrum.shape()[1];
+        self.chroma_buf.resize(n_chroma as usize * n_frames, 0.0);
+        let chroma = chroma_stft_with_filter(filter, &spectrum, &mut self.chroma_buf)?;
+        self.spectrum_buf = Some(spectrum);
+
+        let mut raw_features = chroma_interval_features(chroma)?;
+
+        let (mut interval_class, mut interval_class_mode) =
+            raw_features.view_mut().split_at(Axis(0), 6);
+
+        let l2_norm_interval_class = dot_view(&interval_class.view(), &interval_class.view()).sqrt();
+        let l2_norm_interval_class_mode =
+            dot_view(&interval_class_mode.view(), &interval_class_mode.view()).sqrt();
+
+        if l2_norm_interval_class > 0. {
+            interval_class /= l2_norm_interval_class;
+        }
+        if l2_norm_interval_class_mode > 0. {
+            interval_class_mode /= l2_norm_interval_class_mode;
+        }
+
+        let mut features: Vec<f32> = raw_features
+            .mapv_into_any(|x| normalize(x as f32, MIN_VALUE, MAX_VALUE))
+            .to_vec();
+
+        let normalized_l2_norm_interval_class =
+            (2. * (l2_norm_interval_class as f32 - 0.) / (MAX_L2_INTERVAL - 0.) - 1.).min(1.);
+        features.push(normalized_l2_norm_interval_class);
+
+        let normalized_l2_norm_interval_class_mode =
+            (2. * (l2_norm_interval_class_mode as f32 - 0.) / (MAX_L2_TRIAD - 0.) - 1.).min(1.);
+        features.push(normalized_l2_norm_interval_class_mode);
+
+        let angle = (20. * l2_norm_interval_class_mode).atan2(l2_norm_interval_class + 1e-12_f64);
+        let normalized_ratio = 2. * (angle as f32 - 0.) / (MAX_TRIAD_INTERVAL_RATIO - 0.) - 1.;
+        features.push(normalized_ratio);
+
+        Ok(features)
+    }
+
+    fn quantize_tuning(tuning: f64) -> i64 {
+        // Tuning is in the range [-0.5, 0.5) bins; quantize to 1e-4 bins.
+        (tuning * 10_000.0).round() as i64
+    }
+}
+
+impl Default for ChromaFeatureExtractor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Compute chroma STFT using a pre-computed, transposed, single-precision
+/// filter matrix.
+///
+/// `filter` must have shape `(n_bins, n_chroma)` (the transpose of the
+/// canonical `(n_chroma, n_bins)` filter). `spectrum` must contain squared
+/// magnitudes (as produced by `ChromaFeatureExtractor::compute_stft`).
+/// `chroma_buf` is a reusable scratch buffer large enough to hold
+/// `n_chroma * n_frames` `f32` values.
+fn chroma_stft_with_filter(
+    filter: &Array2<f32>,
+    spectrum: &Array2<f64>,
+    chroma_buf: &mut [f32],
+) -> Result<Array2<f64>, ChromaError> {
+    chroma_matmul(filter, spectrum, chroma_buf);
+
+    let n_chroma = filter.shape()[1];
+    let n_frames = spectrum.shape()[1];
+
+    // Normalize columns while still in f32, then convert to f64 for the
+    // downstream pipeline. This keeps the normalization pass in the faster
+    // precision and avoids allocating a second copy of the chromagram.
+    let mut sums = vec![0.0_f32; n_frames];
+    for r in 0..n_chroma {
+        let row = &chroma_buf[r * n_frames..(r + 1) * n_frames];
+        for j in 0..n_frames {
+            sums[j] += row[j].abs();
+        }
+    }
+    for sum in &mut sums {
+        if *sum < f32::MIN_POSITIVE {
+            *sum = 1.0;
+        }
+    }
+
+    let mut raw_chroma = Array2::<f64>::zeros((n_chroma, n_frames));
+    if let Some(out) = raw_chroma.as_slice_memory_order_mut() {
+        // Fuse column-normalization and f32->f64 conversion into one pass.
+        for r in 0..n_chroma {
+            let row = &chroma_buf[r * n_frames..(r + 1) * n_frames];
+            let out_row = &mut out[r * n_frames..(r + 1) * n_frames];
+            for j in 0..n_frames {
+                out_row[j] = f64::from(row[j] / sums[j]);
+            }
+        }
+    } else {
+        for r in 0..n_chroma {
+            let row = &chroma_buf[r * n_frames..(r + 1) * n_frames];
+            for j in 0..n_frames {
+                raw_chroma[[r, j]] = f64::from(row[j] / sums[j]);
+            }
+        }
+    }
+
+    Ok(raw_chroma)
+}
+
+/// Cache-friendly dense multiply for the small chroma filter shape.
+///
+/// `filter` is passed in already-transposed form with shape `(n_bins, n_chroma)`
+/// and contiguous rows. `spectrum` has shape `(n_bins, n_frames)`. The result
+/// is written into `chroma_buf` as `n_chroma * n_frames` `f32` values. The
+/// bin-major loop reads both operands contiguously and accumulates into a small
+/// result that stays in L1 cache.
+fn chroma_matmul(filter: &Array2<f32>, spectrum: &Array2<f64>, chroma_buf: &mut [f32]) {
+    let n_bins = filter.shape()[0];
+    let n_chroma = filter.shape()[1];
+    let n_frames = spectrum.shape()[1];
+    let out_len = n_chroma * n_frames;
+
+    chroma_buf[..out_len].fill(0.0);
+
+    // Fast path: flat slices for contiguous memory-order access. Process four
+    // chroma rows per inner pass so the spectrum row (the largest operand) is
+    // read once per quadruple instead of once per row.
+    if let (Some(f), Some(s)) = (
+        filter.as_slice_memory_order(),
+        spectrum.as_slice_memory_order(),
+    ) {
+        for i in 0..n_bins {
+            let f_row = &f[i * n_chroma..(i + 1) * n_chroma];
+            let s_row = &s[i * n_frames..(i + 1) * n_frames];
+            for r in (0..n_chroma).step_by(4) {
+                let fc0 = f_row[r];
+                let fc1 = f_row[r + 1];
+                let fc2 = f_row[r + 2];
+                let fc3 = f_row[r + 3];
+                if fc0 == 0.0 && fc1 == 0.0 && fc2 == 0.0 && fc3 == 0.0 {
+                    continue;
+                }
+                let (chunk, _) = chroma_buf.split_at_mut((r + 4) * n_frames);
+                let (a, b) = chunk.split_at_mut((r + 2) * n_frames);
+                let (out0_part, out1) = a.split_at_mut((r + 1) * n_frames);
+                let out0 = &mut out0_part[r * n_frames..];
+                let out1 = &mut out1[..n_frames];
+                let (out2, out3) = b.split_at_mut(n_frames);
+                for j in 0..n_frames {
+                    let v = s_row[j] as f32;
+                    out0[j] += fc0 * v;
+                    out1[j] += fc1 * v;
+                    out2[j] += fc2 * v;
+                    out3[j] += fc3 * v;
+                }
+            }
+        }
+    } else {
+        // Fallback for non-contiguous inputs (e.g. the standalone
+        // `compute_chroma_features` path whose spectrum is permuted).
+        for i in 0..n_bins {
+            let f_row = filter.row(i);
+            let s_row = spectrum.row(i);
+            for (r, &fc) in f_row.iter().enumerate() {
+                let out_row = &mut chroma_buf[r * n_frames..(r + 1) * n_frames];
+                for j in 0..n_frames {
+                    out_row[j] += fc * (s_row[j] as f32);
+                }
+            }
+        }
+    }
+}
+
 /// Compute 13 chroma interval features from the full song samples.
 ///
 /// Returns a Vec of 13 normalized features (6 interval classes + 4 triads + 2 L2 norms + 1 ratio).
@@ -36,7 +341,7 @@ pub fn compute_chroma_features(samples: &[f32], sample_rate: u32) -> Result<Vec<
     let tuning = estimate_tuning(sample_rate, &spectrum, WINDOW_SIZE, 0.01, 12)?;
     let chroma = chroma_stft(sample_rate, &mut spectrum, WINDOW_SIZE, n_chroma, tuning)?;
 
-    let mut raw_features = chroma_interval_features(&chroma)?;
+    let mut raw_features = chroma_interval_features(chroma)?;
 
     let (mut interval_class, mut interval_class_mode) =
         raw_features.view_mut().split_at(Axis(0), 6);
@@ -71,8 +376,17 @@ pub fn compute_chroma_features(samples: &[f32], sample_rate: u32) -> Result<Vec<
     Ok(features)
 }
 
-fn chroma_interval_features(chroma: &Array2<f64>) -> Result<Array1<f64>, ChromaError> {
-    let chroma = normalize_feature_sequence(&chroma.mapv(|x| (x * 15.).exp()));
+fn chroma_interval_features(mut chroma: Array2<f64>) -> Result<Array1<f64>, ChromaError> {
+    // Apply the exponential transform and normalize each frame in-place.
+    chroma.mapv_inplace(|x| (x * 15.).exp());
+    for mut column in chroma.columns_mut() {
+        let mut sum = column.iter().map(|&x| x.abs()).sum();
+        if sum < 0.0001 {
+            sum = 1.;
+        }
+        column /= sum;
+    }
+
     let templates = arr2(&[
         [1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
         [1, 0, 0, 0, 0, 0, 0, 0, 0, 0],
@@ -93,26 +407,42 @@ fn chroma_interval_features(chroma: &Array2<f64>) -> Result<Array1<f64>, ChromaE
     })
 }
 
-fn extract_interval_features(chroma: &Array2<f64>, templates: &Array2<i32>) -> Array2<f64> {
-    let mut f_intervals: Array2<f64> = Array::zeros((chroma.shape()[1], templates.shape()[1]));
-    for (template, mut f_interval) in templates
-        .axis_iter(Axis(1))
-        .zip(f_intervals.axis_iter_mut(Axis(1)))
-    {
+/// 12-bit masks for the 10 interval templates (columns of the template matrix).
+const TEMPLATE_MASKS: [u16; 10] = [
+    0xFFF, // all bins
+    0x001, // bin 0
+    0x002, // bin 1
+    0x184, // bins 2, 7, 8
+    0x248, // bins 3, 6, 9
+    0x010, // bin 4
+    0x120, // bins 5, 8
+    0x0C0, // bins 6, 7
+    0x200, // bin 9
+    0x000, // none
+];
+
+fn extract_interval_features(chroma: &Array2<f64>, _templates: &Array2<i32>) -> Array2<f64> {
+    let n_frames = chroma.shape()[1];
+    let mut result = Array2::<f64>::zeros((TEMPLATE_MASKS.len(), n_frames));
+    for (t_idx, &mask) in TEMPLATE_MASKS.iter().enumerate() {
         for shift in 0..12 {
-            let mut vec: Vec<i32> = template.to_vec();
-            vec.rotate_right(shift);
-            let rolled = arr1(&vec);
-            let power = Zip::from(chroma.t())
-                .and_broadcast(&rolled)
-                .map_collect(|&f, &s| f.powi(s))
-                .map_axis_mut(Axis(1), |x| x.product());
-            f_interval += &power;
+            let rotated = ((mask << shift) | (mask >> (12 - shift))) & 0xFFF;
+            for frame in 0..n_frames {
+                let mut prod = 1.0_f64;
+                let mut bits = rotated;
+                while bits != 0 {
+                    let bin = bits.trailing_zeros() as usize;
+                    prod *= chroma[[bin, frame]];
+                    bits &= bits - 1;
+                }
+                result[[t_idx, frame]] += prod;
+            }
         }
     }
-    f_intervals.t().to_owned()
+    result
 }
 
+#[cfg(test)]
 fn normalize_feature_sequence(feature: &Array2<f64>) -> Array2<f64> {
     let mut normalized_sequence = feature.to_owned();
     for mut column in normalized_sequence.columns_mut() {
@@ -164,7 +494,7 @@ fn chroma_filter(
 
     let mut wts = d;
     for mut col in wts.columns_mut() {
-        let mut sum = col.mapv(|x| x * x).sum().sqrt();
+        let mut sum = col.iter().map(|&x| x * x).sum::<f64>().sqrt();
         if sum < f64::MIN_POSITIVE {
             sum = 1.;
         }
@@ -192,7 +522,9 @@ fn pip_track(
     let sample_rate_float = f64::from(sample_rate);
     let fmin = 150.0_f64;
     let fmax = 4000.0_f64.min(sample_rate_float / 2.0);
-    let threshold = 0.1;
+    // Spectrum contains squared magnitudes; keep the same effective threshold
+    // in the squared domain: (0.1 * max_magnitude)^2 = 0.01 * max_sq.
+    let threshold = 0.01;
 
     let fft_freqs = Array::linspace(0., sample_rate_float / 2., 1 + n_fft / 2);
 
@@ -236,7 +568,8 @@ fn pip_track(
             }
             shift = avg / shift;
             pitches.push(((i + beginning + 1) as f64 + shift) * sample_rate_float / n_fft as f64);
-            mags.push(elem + 0.5 * avg * shift);
+            // `elem` is a squared magnitude; return the linear magnitude for tuning.
+            mags.push((elem + 0.5 * avg * shift).sqrt());
         }
     });
 
@@ -318,18 +651,16 @@ fn chroma_stft(
     n_chroma: u32,
     tuning: f64,
 ) -> Result<Array2<f64>, ChromaError> {
-    spectrum.par_mapv_inplace(|x| x * x);
-    let mut raw_chroma = chroma_filter(sample_rate, n_fft, n_chroma, tuning)?;
-
-    raw_chroma = matmul(&raw_chroma, spectrum);
-    for mut row in raw_chroma.columns_mut() {
-        let mut sum = row.mapv(|x| x.abs()).sum();
-        if sum < f64::MIN_POSITIVE {
-            sum = 1.;
-        }
-        row /= sum;
-    }
-    Ok(raw_chroma)
+    // Standalone path receives linear magnitudes from `stft`; square them to
+    // match the input contract of `chroma_stft_with_filter`.
+    spectrum.mapv_inplace(|x| x * x);
+    let filter = chroma_filter(sample_rate, n_fft, n_chroma, tuning)?;
+    // Transpose to the contiguous `(n_bins, n_chroma)` layout and convert to
+    // the single-precision form expected by the matmul fast path.
+    let filter_t = filter.t().mapv(|x| x as f32);
+    let n_frames = spectrum.shape()[1];
+    let mut chroma_buf = vec![0.0_f32; n_chroma as usize * n_frames];
+    chroma_stft_with_filter(&filter_t, spectrum, &mut chroma_buf)
 }
 
 #[cfg(test)]

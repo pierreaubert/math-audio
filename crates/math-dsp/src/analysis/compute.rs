@@ -6,38 +6,252 @@ use super::misc::next_power_of_two;
 use super::misc::unwrap_phase_deg;
 use super::plan::plan_fft_forward;
 use super::plan::plan_fft_inverse;
+use super::plan::plan_real_fft_forward;
 use super::smooth::smooth_response_f32;
 use super::types::SpectrumResult;
 use super::types::WindowType;
 use super::types::WindowedFrequencyResponse;
 use math_audio_iir_fir::{Biquad, BiquadFilterType};
 use rustfft::num_complex::Complex;
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::f32::consts::PI;
+use std::sync::Arc;
+
+/// Reusable per-size buffers for Welch spectrum estimation.
+///
+/// Kept in a thread-local cache so repeated calls with the same FFT size do
+/// not reallocate the Hann window, FFT input/scratch buffers, or accumulation
+/// arrays. The cache is keyed by `fft_size`.
+pub(super) struct WelchBuffers {
+    pub(super) hann_window: Vec<f32>,
+    pub(super) scaled_window: Vec<f32>,
+    pub(super) real_buffer: Vec<f32>,
+    pub(super) spectrum: Vec<Complex<f32>>,
+    pub(super) real_scratch: Vec<Complex<f32>>,
+    pub(super) magnitude_sum: Vec<f32>,
+    pub(super) phase_real_sum: Vec<f32>,
+    pub(super) phase_imag_sum: Vec<f32>,
+    pub(super) freqs: Vec<f32>,
+    pub(super) magnitudes_db: Vec<f32>,
+    pub(super) phases_deg: Vec<f32>,
+}
+
+impl WelchBuffers {
+    fn new(fft_size: usize) -> Self {
+        let num_bins = fft_size / 2;
+        let hann_window = crate::stft::generate_hann_window_symmetric(fft_size);
+        let coherent_sum: f32 = hann_window.iter().sum();
+        let scale_rest = 2.0 / coherent_sum;
+        let scaled_window: Vec<f32> = hann_window.iter().map(|w| w * scale_rest).collect();
+        Self {
+            hann_window,
+            scaled_window,
+            real_buffer: vec![0.0_f32; fft_size],
+            spectrum: vec![Complex::new(0.0, 0.0); fft_size / 2 + 1],
+            real_scratch: Vec::new(),
+            magnitude_sum: vec![0.0_f32; num_bins],
+            phase_real_sum: vec![0.0_f32; num_bins],
+            phase_imag_sum: vec![0.0_f32; num_bins],
+            freqs: vec![0.0_f32; num_bins],
+            magnitudes_db: vec![0.0_f32; num_bins],
+            phases_deg: vec![0.0_f32; num_bins],
+        }
+    }
+
+    /// Make sure the real-to-complex FFT scratch buffer is large enough.
+    fn ensure_scratch(&mut self, fft: &Arc<dyn realfft::RealToComplex<f32>>) {
+        let required = fft.get_scratch_len();
+        if self.real_scratch.len() < required {
+            self.real_scratch.resize(required, Complex::new(0.0, 0.0));
+        }
+    }
+}
+
+thread_local! {
+    static WELCH_BUFFER_CACHE: RefCell<HashMap<usize, WelchBuffers>> =
+        RefCell::new(HashMap::new());
+}
+
+/// Borrow (creating if necessary) a `WelchBuffers` entry for `fft_size` and
+/// size its scratch buffer for the real-to-complex `fft`, then run `f` with
+/// mutable access.
+pub(super) fn with_welch_buffers<F, R>(
+    fft_size: usize,
+    fft: &Arc<dyn realfft::RealToComplex<f32>>,
+    f: F,
+) -> R
+where
+    F: FnOnce(&mut WelchBuffers) -> R,
+{
+    WELCH_BUFFER_CACHE.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        let buffers = cache
+            .entry(fft_size)
+            .or_insert_with(|| WelchBuffers::new(fft_size));
+        buffers.ensure_scratch(fft);
+        f(buffers)
+    })
+}
 
 /// Compute a peak-amplitude-calibrated spectrum using Welch RMS averaging.
 ///
 /// This is an amplitude spectrum, not a power spectral density: each frame is
 /// corrected for the Hann coherent gain before squared magnitudes are averaged.
+///
+/// This entry point reuses thread-local buffers for the window, FFT input and
+/// scratch, and accumulation/output arrays. It still allocates the three
+/// returned vectors so that the public call sites receive owned data.
+#[allow(dead_code)]
 pub(super) fn compute_welch_spectrum_internal(
     signal: &[f32],
     sample_rate: u32,
     fft_size: usize,
     overlap: f32,
 ) -> SpectrumResult {
-    let hann_window = crate::stft::generate_hann_window_symmetric(fft_size);
-    let fft = plan_fft_forward(fft_size);
-    let mut windowed = vec![0.0_f32; fft_size];
-    let mut buffer = vec![Complex::new(0.0, 0.0); fft_size];
-    compute_welch_spectrum_with_buffers(
-        signal,
-        sample_rate,
-        fft_size,
-        overlap,
-        &hann_window,
-        &fft,
-        &mut windowed,
-        &mut buffer,
-    )
+    if signal.is_empty() {
+        return Err("Signal is empty".to_string());
+    }
+    let fft = plan_real_fft_forward(fft_size);
+    let num_bins = fft_size / 2;
+    with_welch_buffers(fft_size, &fft, |bufs| {
+        compute_welch_spectrum_into(
+            signal,
+            sample_rate,
+            fft_size,
+            overlap,
+            &bufs.hann_window,
+            &bufs.scaled_window,
+            &fft,
+            &mut bufs.real_buffer,
+            &mut bufs.spectrum,
+            &mut bufs.real_scratch,
+            &mut bufs.magnitude_sum,
+            &mut bufs.phase_real_sum,
+            &mut bufs.phase_imag_sum,
+            &mut bufs.freqs,
+            &mut bufs.magnitudes_db,
+            &mut bufs.phases_deg,
+        )?;
+        Ok((
+            bufs.freqs[..num_bins].to_vec(),
+            bufs.magnitudes_db[..num_bins].to_vec(),
+            bufs.phases_deg[..num_bins].to_vec(),
+        ))
+    })
+}
+
+/// Low-level Welch spectrum computation that writes directly into caller-owned
+/// output slices, avoiding intermediate allocations.
+///
+/// All working slices are zeroed/reused as needed; their previous contents are
+/// overwritten. Output slices must be at least `fft_size / 2` long.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn compute_welch_spectrum_into(
+    signal: &[f32],
+    sample_rate: u32,
+    fft_size: usize,
+    overlap: f32,
+    hann_window: &[f32],
+    scaled_window: &[f32],
+    fft: &Arc<dyn realfft::RealToComplex<f32>>,
+    real_buffer: &mut [f32],
+    spectrum: &mut [Complex<f32>],
+    scratch: &mut [Complex<f32>],
+    magnitude_sum: &mut [f32],
+    phase_real_sum: &mut [f32],
+    phase_imag_sum: &mut [f32],
+    freqs_out: &mut [f32],
+    mags_db_out: &mut [f32],
+    phases_deg_out: &mut [f32],
+) -> Result<(), String> {
+    if signal.is_empty() {
+        return Err("Signal is empty".to_string());
+    }
+
+    let overlap_samples = (fft_size as f32 * overlap.clamp(0.0, 0.95)) as usize;
+    let hop_size = fft_size - overlap_samples;
+    let num_windows = 1 + signal.len().saturating_sub(1) / hop_size;
+    let num_bins = fft_size / 2;
+
+    magnitude_sum[..num_bins].fill(0.0);
+    phase_real_sum[..num_bins].fill(0.0);
+    phase_imag_sum[..num_bins].fill(0.0);
+
+    let full_coherent_sum: f32 = hann_window.iter().sum();
+    if full_coherent_sum <= 1e-10 {
+        return Err("Window has zero coherent gain".to_string());
+    }
+
+    let mut processed_windows = 0_usize;
+
+    for window_idx in 0..num_windows {
+        let start = window_idx * hop_size;
+        let end = (start + fft_size).min(signal.len());
+        let window_len = end - start;
+
+        if window_len == fft_size {
+            // Fast path: window and scale the signal directly into the real FFT buffer.
+            // The coherent-gain scaling is fused into the window so the per-bin
+            // post-FFT scaling can be removed.
+            for i in 0..fft_size {
+                real_buffer[i] = signal[start + i] * scaled_window[i];
+            }
+
+            fft.process_with_scratch(real_buffer, spectrum, scratch)
+                .map_err(|e| format!("Real FFT failed: {:?}", e))?;
+
+            // Accumulate squared magnitude directly via norm_sqr() to avoid the
+            // per-bin sqrt() that `norm()` performs inside the window loop.
+            for i in 0..num_bins {
+                magnitude_sum[i] += spectrum[i].norm_sqr();
+                phase_real_sum[i] += spectrum[i].re;
+                phase_imag_sum[i] += spectrum[i].im;
+            }
+        } else {
+            // Final partial window: only the overlapping region contributes.
+            let coherent_sum: f32 = hann_window[..window_len].iter().sum();
+            if coherent_sum <= 1e-10 {
+                continue;
+            }
+            let scale_rest = 2.0 / coherent_sum;
+            for i in 0..window_len {
+                real_buffer[i] = signal[start + i] * hann_window[i] * scale_rest;
+            }
+            real_buffer[window_len..fft_size].fill(0.0);
+
+            fft.process_with_scratch(real_buffer, spectrum, scratch)
+                .map_err(|e| format!("Real FFT failed: {:?}", e))?;
+
+            // Accumulate squared magnitude directly via norm_sqr().
+            for i in 0..num_bins {
+                magnitude_sum[i] += spectrum[i].norm_sqr();
+                phase_real_sum[i] += spectrum[i].re;
+                phase_imag_sum[i] += spectrum[i].im;
+            }
+        }
+        processed_windows += 1;
+    }
+
+    let processed_windows = processed_windows.max(1);
+
+    for i in 0..num_bins {
+        let mag_sq = magnitude_sum[i];
+        let mag = (mag_sq / processed_windows as f32).sqrt();
+        mags_db_out[i] = if mag > 1e-10 {
+            20.0 * mag.log10()
+        } else {
+            -200.0
+        };
+
+        let re = phase_real_sum[i] / processed_windows as f32;
+        let im = phase_imag_sum[i] / processed_windows as f32;
+        phases_deg_out[i] = im.atan2(re) * 180.0 / PI;
+
+        freqs_out[i] = i as f32 * sample_rate as f32 / fft_size as f32;
+    }
+
+    Ok(())
 }
 
 /// Compute a peak-amplitude-calibrated Welch spectrum with caller-provided buffers.
@@ -48,93 +262,42 @@ pub(super) fn compute_welch_spectrum_with_buffers(
     fft_size: usize,
     overlap: f32,
     hann_window: &[f32],
-    fft: &std::sync::Arc<dyn rustfft::Fft<f32>>,
-    windowed: &mut [f32],
-    buffer: &mut [Complex<f32>],
+    scaled_window: &[f32],
+    fft: &Arc<dyn realfft::RealToComplex<f32>>,
+    real_buffer: &mut [f32],
+    spectrum: &mut [Complex<f32>],
+    scratch: &mut [Complex<f32>],
+    magnitude_sum: &mut [f32],
+    phase_real_sum: &mut [f32],
+    phase_imag_sum: &mut [f32],
 ) -> SpectrumResult {
     if signal.is_empty() {
         return Err("Signal is empty".to_string());
     }
 
-    let overlap_samples = (fft_size as f32 * overlap.clamp(0.0, 0.95)) as usize;
-    let hop_size = fft_size - overlap_samples;
-
-    let num_windows = 1 + signal.len().saturating_sub(1) / hop_size;
-
     let num_bins = fft_size / 2;
-    let mut magnitude_sum = vec![0.0_f32; num_bins];
-    let mut phase_real_sum = vec![0.0_f32; num_bins];
-    let mut phase_imag_sum = vec![0.0_f32; num_bins];
+    let mut freqs = vec![0.0_f32; num_bins];
+    let mut magnitudes_db = vec![0.0_f32; num_bins];
+    let mut phases_deg = vec![0.0_f32; num_bins];
 
-    let mut processed_windows = 0_usize;
-
-    for window_idx in 0..num_windows {
-        let start = window_idx * hop_size;
-        let end = (start + fft_size).min(signal.len());
-        let window_len = end - start;
-
-        // Apply window
-        for i in 0..window_len {
-            windowed[i] = signal[start + i] * hann_window[i];
-        }
-        // Zero-pad the rest if necessary
-        windowed[window_len..fft_size].fill(0.0);
-
-        // Coherent-gain normalization recovers the peak amplitude of a
-        // bin-centred sinusoid. Use only the part of the window that actually
-        // overlaps the signal so a zero-padded trailing frame is calibrated
-        // like a complete frame rather than being attenuated by its padding.
-        let coherent_sum: f32 = hann_window[..window_len].iter().sum();
-        if coherent_sum <= 1e-10 {
-            continue;
-        }
-
-        // Convert to complex
-        for (i, &val) in windowed.iter().enumerate() {
-            buffer[i] = Complex::new(val, 0.0);
-        }
-
-        fft.process(buffer);
-
-        for i in 0..num_bins {
-            let one_sided_scale = if i == 0 {
-                1.0 / coherent_sum
-            } else {
-                2.0 / coherent_sum
-            };
-            let mag = buffer[i].norm() * one_sided_scale;
-            magnitude_sum[i] += mag * mag;
-            phase_real_sum[i] += buffer[i].re;
-            phase_imag_sum[i] += buffer[i].im;
-        }
-        processed_windows += 1;
-    }
-
-    let processed_windows = processed_windows.max(1);
-
-    let magnitudes_db: Vec<f32> = magnitude_sum
-        .iter()
-        .map(|&mag_sq| {
-            let mag = (mag_sq / processed_windows as f32).sqrt();
-            if mag > 1e-10 {
-                20.0 * mag.log10()
-            } else {
-                -200.0
-            }
-        })
-        .collect();
-
-    let phases_deg: Vec<f32> = phase_real_sum
-        .iter()
-        .zip(phase_imag_sum.iter())
-        .map(|(&re, &im)| {
-            (im / processed_windows as f32).atan2(re / processed_windows as f32) * 180.0 / PI
-        })
-        .collect();
-
-    let freqs: Vec<f32> = (0..num_bins)
-        .map(|i| i as f32 * sample_rate as f32 / fft_size as f32)
-        .collect();
+    compute_welch_spectrum_into(
+        signal,
+        sample_rate,
+        fft_size,
+        overlap,
+        hann_window,
+        scaled_window,
+        fft,
+        real_buffer,
+        spectrum,
+        scratch,
+        magnitude_sum,
+        phase_real_sum,
+        phase_imag_sum,
+        &mut freqs,
+        &mut magnitudes_db,
+        &mut phases_deg,
+    )?;
 
     Ok((freqs, magnitudes_db, phases_deg))
 }
