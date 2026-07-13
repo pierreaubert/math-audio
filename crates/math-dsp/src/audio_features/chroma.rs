@@ -244,21 +244,23 @@ fn chroma_stft_with_filter(
             *sum = 1.0;
         }
     }
-    for r in 0..n_chroma {
-        let row = &mut chroma_buf[r * n_frames..(r + 1) * n_frames];
-        for j in 0..n_frames {
-            row[j] /= sums[j];
-        }
-    }
 
     let mut raw_chroma = Array2::<f64>::zeros((n_chroma, n_frames));
     if let Some(out) = raw_chroma.as_slice_memory_order_mut() {
-        for (dst, &src) in out.iter_mut().zip(chroma_buf.iter()) {
-            *dst = f64::from(src);
+        // Fuse column-normalization and f32->f64 conversion into one pass.
+        for r in 0..n_chroma {
+            let row = &chroma_buf[r * n_frames..(r + 1) * n_frames];
+            let out_row = &mut out[r * n_frames..(r + 1) * n_frames];
+            for j in 0..n_frames {
+                out_row[j] = f64::from(row[j] / sums[j]);
+            }
         }
     } else {
-        for ((r, j), dst) in raw_chroma.indexed_iter_mut() {
-            *dst = f64::from(chroma_buf[r * n_frames + j]);
+        for r in 0..n_chroma {
+            let row = &chroma_buf[r * n_frames..(r + 1) * n_frames];
+            for j in 0..n_frames {
+                raw_chroma[[r, j]] = f64::from(row[j] / sums[j]);
+            }
         }
     }
 
