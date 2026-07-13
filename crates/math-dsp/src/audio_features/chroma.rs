@@ -3,12 +3,11 @@
 //! Ported from bliss-audio chroma.rs — already pure Rust, no aubio dependency.
 //! Computes 13 interval/triad features from the chromagram.
 
-use super::utils::{hz_to_octs_inplace, normalize, reflect_pad, stft};
-use crate::analysis;
+use super::utils::{hz_to_octs_inplace, normalize, stft};
 use crate::stft::generate_hann_window;
 use ndarray::{Array, Array1, Array2, Axis, Zip, arr2, s};
 use oxiblas_ndarray::blas::{dot_view, matmul};
-use rustfft::Fft;
+use realfft::{RealFftPlanner, RealToComplex};
 use rustfft::num_complex::Complex;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -41,9 +40,11 @@ pub struct ChromaFeatureExtractor {
     window_size: usize,
     hop_length: usize,
     hann_window: Vec<f32>,
-    fft: Arc<dyn Fft<f32>>,
-    fft_input: Vec<Complex<f32>>,
+    fft: Arc<dyn RealToComplex<f32>>,
+    fft_input: Vec<f32>,
+    fft_output: Vec<Complex<f32>>,
     spectrum_buf: Option<Array2<f64>>,
+    padded_buf: Vec<f32>,
     filter_cache: HashMap<(u32, usize, u32, i64), Array2<f64>>,
 }
 
@@ -55,15 +56,19 @@ impl ChromaFeatureExtractor {
 
     /// Create a new extractor with a custom window and hop size.
     pub fn with_window_size(window_size: usize, hop_length: usize) -> Self {
-        let fft = analysis::plan_fft_forward(window_size);
+        let mut planner = RealFftPlanner::<f32>::new();
+        let fft = planner.plan_fft_forward(window_size);
         let hann_window = generate_hann_window(window_size);
+        let n_bins = window_size / 2 + 1;
         Self {
             window_size,
             hop_length,
             hann_window,
             fft,
-            fft_input: vec![Complex::new(0.0, 0.0); window_size],
+            fft_input: vec![0.0; window_size],
+            fft_output: vec![Complex::new(0.0, 0.0); n_bins],
             spectrum_buf: None,
+            padded_buf: Vec::new(),
             filter_cache: HashMap::new(),
         }
     }
@@ -91,19 +96,32 @@ impl ChromaFeatureExtractor {
             None => Array2::zeros((n_bins, n_frames)),
         };
 
-        let padded = reflect_pad(signal, window_length / 2);
+        // Reuse the reflect-pad buffer instead of allocating each call.
+        let pad = window_length / 2;
+        let padded_len = signal.len() + 2 * pad;
+        self.padded_buf.resize(padded_len, 0.0);
+        for i in 0..pad {
+            self.padded_buf[i] = signal[pad - i];
+        }
+        self.padded_buf[pad..pad + signal.len()].copy_from_slice(signal);
+        let suffix_start = pad + signal.len();
+        for i in 0..pad {
+            self.padded_buf[suffix_start + i] = signal[signal.len() - 2 - i];
+        }
 
-        for (window, mut stft_col) in padded
+        for (window, mut stft_col) in self.padded_buf
             .windows(window_length)
             .step_by(hop_length)
             .zip(spectrum.axis_iter_mut(Axis(1)))
         {
             for i in 0..window_length {
-                self.fft_input[i] = Complex::new(window[i] * self.hann_window[i], 0.0);
+                self.fft_input[i] = window[i] * self.hann_window[i];
             }
-            self.fft.process(&mut self.fft_input);
+            self.fft
+                .process(&mut self.fft_input, &mut self.fft_output)
+                .expect("real FFT forward failed");
             for i in 0..n_bins {
-                let x = self.fft_input[i];
+                let x = self.fft_output[i];
                 stft_col[i] = (x.re * x.re + x.im * x.im).sqrt() as f64;
             }
         }
@@ -188,7 +206,7 @@ fn chroma_stft_with_filter(
     spectrum.mapv_inplace(|x| x * x);
     let mut raw_chroma = matmul(filter, spectrum);
     for mut row in raw_chroma.columns_mut() {
-        let mut sum = row.mapv(|x| x.abs()).sum();
+        let mut sum = row.iter().map(|&x| x.abs()).sum::<f64>();
         if sum < f64::MIN_POSITIVE {
             sum = 1.;
         }
@@ -360,7 +378,7 @@ fn chroma_filter(
 
     let mut wts = d;
     for mut col in wts.columns_mut() {
-        let mut sum = col.mapv(|x| x * x).sum().sqrt();
+        let mut sum = col.iter().map(|&x| x * x).sum::<f64>().sqrt();
         if sum < f64::MIN_POSITIVE {
             sum = 1.;
         }
