@@ -7,11 +7,17 @@
 
 use super::extractor::FeatureExtractor;
 
+thread_local! {
+    static FEATURE_EXTRACTOR: std::cell::RefCell<FeatureExtractor> =
+        std::cell::RefCell::new(FeatureExtractor::new());
+}
+
 /// Compute tempo (BPM) from audio samples.
 ///
 /// Returns a single normalized value in [-1, 1].
 pub fn compute_tempo(samples: &[f32], sample_rate: u32) -> f32 {
-    FeatureExtractor::new().compute_tempo(samples, sample_rate)
+    FEATURE_EXTRACTOR
+        .with(|e| e.borrow_mut().compute_tempo(samples, sample_rate))
 }
 
 #[cfg(test)]

@@ -3,9 +3,15 @@
 //! Ported from bliss-audio chroma.rs — already pure Rust, no aubio dependency.
 //! Computes 13 interval/triad features from the chromagram.
 
-use super::utils::{hz_to_octs_inplace, normalize, stft};
+use super::utils::{hz_to_octs_inplace, normalize, reflect_pad, stft};
+use crate::analysis;
+use crate::stft::generate_hann_window;
 use ndarray::{Array, Array1, Array2, Axis, Zip, arr1, arr2, s};
 use oxiblas_ndarray::blas::{dot_view, matmul};
+use rustfft::Fft;
+use rustfft::num_complex::Complex;
+use std::collections::HashMap;
+use std::sync::Arc;
 
 const WINDOW_SIZE: usize = 8192;
 const MAX_VALUE: f32 = 1.0;
@@ -25,6 +31,171 @@ impl std::fmt::Display for ChromaError {
 }
 
 impl std::error::Error for ChromaError {}
+
+/// Reusable chroma feature extractor.
+///
+/// Caches the Hann window, FFT plan, STFT scratch buffers, and the chroma
+/// filter matrix so repeated analysis on the same window size does not
+/// re-allocate or re-compute them on every call.
+pub struct ChromaFeatureExtractor {
+    window_size: usize,
+    hop_length: usize,
+    hann_window: Vec<f32>,
+    fft: Arc<dyn Fft<f32>>,
+    fft_input: Vec<Complex<f32>>,
+    spectrum_buf: Option<Array2<f64>>,
+    filter_cache: HashMap<(u32, usize, u32, i64), Array2<f64>>,
+}
+
+impl ChromaFeatureExtractor {
+    /// Create a new extractor with the default chroma window size (8192 samples).
+    pub fn new() -> Self {
+        Self::with_window_size(WINDOW_SIZE, 2205)
+    }
+
+    /// Create a new extractor with a custom window and hop size.
+    pub fn with_window_size(window_size: usize, hop_length: usize) -> Self {
+        let fft = analysis::plan_fft_forward(window_size);
+        let hann_window = generate_hann_window(window_size);
+        Self {
+            window_size,
+            hop_length,
+            hann_window,
+            fft,
+            fft_input: vec![Complex::new(0.0, 0.0); window_size],
+            spectrum_buf: None,
+            filter_cache: HashMap::new(),
+        }
+    }
+
+    /// Reset internal state (currently a no-op; buffers are overwritten each analysis).
+    pub fn reset(&mut self) {}
+
+    /// Compute the STFT magnitude spectrum for the configured window/hop,
+    /// reusing internal buffers.
+    fn compute_stft(&mut self, signal: &[f32]) -> Array2<f64> {
+        let window_length = self.window_size;
+        let hop_length = self.hop_length;
+        let n_frames = (signal.len() as f32 / hop_length as f32).ceil() as usize;
+        let n_bins = window_length / 2 + 1;
+
+        let mut spectrum = match self.spectrum_buf.take() {
+            Some(mut s) => {
+                if s.dim() == (n_bins, n_frames) {
+                    s.fill(0.0);
+                    s
+                } else {
+                    Array2::zeros((n_bins, n_frames))
+                }
+            }
+            None => Array2::zeros((n_bins, n_frames)),
+        };
+
+        let padded = reflect_pad(signal, window_length / 2);
+
+        for (window, mut stft_col) in padded
+            .windows(window_length)
+            .step_by(hop_length)
+            .zip(spectrum.axis_iter_mut(Axis(1)))
+        {
+            for i in 0..window_length {
+                self.fft_input[i] = Complex::new(window[i] * self.hann_window[i], 0.0);
+            }
+            self.fft.process(&mut self.fft_input);
+            for i in 0..n_bins {
+                let x = self.fft_input[i];
+                stft_col[i] = (x.re * x.re + x.im * x.im).sqrt() as f64;
+            }
+        }
+
+        spectrum
+    }
+
+    /// Compute 13 chroma interval features from the full song samples.
+    ///
+    /// Returns a Vec of 13 normalized features (6 interval classes + 4 triads + 2 L2 norms + 1 ratio).
+    pub fn compute(&mut self, samples: &[f32], sample_rate: u32) -> Result<Vec<f32>, ChromaError> {
+        let n_chroma = 12u32;
+
+        let mut spectrum = self.compute_stft(samples);
+        let tuning = estimate_tuning(sample_rate, &spectrum, self.window_size, 0.01, n_chroma)?;
+        let cache_key = (sample_rate, self.window_size, n_chroma, Self::quantize_tuning(tuning));
+
+        let filter = match self.filter_cache.get(&cache_key) {
+            Some(f) => f,
+            None => {
+                let f = chroma_filter(sample_rate, self.window_size, n_chroma, tuning)?;
+                self.filter_cache.insert(cache_key, f);
+                self.filter_cache.get(&cache_key).unwrap()
+            }
+        };
+
+        let chroma = chroma_stft_with_filter(filter, &mut spectrum)?;
+        self.spectrum_buf = Some(spectrum);
+
+        let mut raw_features = chroma_interval_features(&chroma)?;
+
+        let (mut interval_class, mut interval_class_mode) =
+            raw_features.view_mut().split_at(Axis(0), 6);
+
+        let l2_norm_interval_class = dot_view(&interval_class.view(), &interval_class.view()).sqrt();
+        let l2_norm_interval_class_mode =
+            dot_view(&interval_class_mode.view(), &interval_class_mode.view()).sqrt();
+
+        if l2_norm_interval_class > 0. {
+            interval_class /= l2_norm_interval_class;
+        }
+        if l2_norm_interval_class_mode > 0. {
+            interval_class_mode /= l2_norm_interval_class_mode;
+        }
+
+        let mut features: Vec<f32> = raw_features
+            .mapv_into_any(|x| normalize(x as f32, MIN_VALUE, MAX_VALUE))
+            .to_vec();
+
+        let normalized_l2_norm_interval_class =
+            (2. * (l2_norm_interval_class as f32 - 0.) / (MAX_L2_INTERVAL - 0.) - 1.).min(1.);
+        features.push(normalized_l2_norm_interval_class);
+
+        let normalized_l2_norm_interval_class_mode =
+            (2. * (l2_norm_interval_class_mode as f32 - 0.) / (MAX_L2_TRIAD - 0.) - 1.).min(1.);
+        features.push(normalized_l2_norm_interval_class_mode);
+
+        let angle = (20. * l2_norm_interval_class_mode).atan2(l2_norm_interval_class + 1e-12_f64);
+        let normalized_ratio = 2. * (angle as f32 - 0.) / (MAX_TRIAD_INTERVAL_RATIO - 0.) - 1.;
+        features.push(normalized_ratio);
+
+        Ok(features)
+    }
+
+    fn quantize_tuning(tuning: f64) -> i64 {
+        // Tuning is in the range [-0.5, 0.5) bins; quantize to 1e-4 bins.
+        (tuning * 10_000.0).round() as i64
+    }
+}
+
+impl Default for ChromaFeatureExtractor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Compute chroma STFT using a pre-computed filter matrix.
+fn chroma_stft_with_filter(
+    filter: &Array2<f64>,
+    spectrum: &mut Array2<f64>,
+) -> Result<Array2<f64>, ChromaError> {
+    spectrum.par_mapv_inplace(|x| x * x);
+    let mut raw_chroma = matmul(filter, spectrum);
+    for mut row in raw_chroma.columns_mut() {
+        let mut sum = row.mapv(|x| x.abs()).sum();
+        if sum < f64::MIN_POSITIVE {
+            sum = 1.;
+        }
+        row /= sum;
+    }
+    Ok(raw_chroma)
+}
 
 /// Compute 13 chroma interval features from the full song samples.
 ///

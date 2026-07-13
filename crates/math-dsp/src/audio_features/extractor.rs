@@ -5,11 +5,12 @@
 //! call. `AudioFeatureExtractor` builds the full 23-element bliss-compatible
 //! feature vector on top of it.
 
-use super::chroma;
+use super::chroma::ChromaFeatureExtractor;
 use super::loudness;
 use super::utils::{geometric_mean, mean, normalize, std_deviation};
 use super::zcr;
 use super::{AnalysisError, FEATURES_COUNT, MIN_SAMPLES};
+use crate::analysis;
 use rustfft::Fft;
 use rustfft::num_complex::Complex;
 use std::f32::consts::PI;
@@ -34,6 +35,7 @@ pub struct FeatureExtractor {
     spectrum_buf: Vec<f32>,
     prev_spectrum: Vec<f32>,
     onset_buf: Vec<f32>,
+    centered_buf: Vec<f32>,
     centroid_values: Vec<f32>,
     rolloff_values: Vec<f32>,
     flatness_values: Vec<f32>,
@@ -47,8 +49,7 @@ impl FeatureExtractor {
 
     /// Create a new extractor with a custom window size.
     pub fn with_window_size(window_size: usize) -> Self {
-        let mut planner = rustfft::FftPlanner::<f32>::new();
-        let fft = planner.plan_fft_forward(window_size);
+        let fft = analysis::plan_fft_forward(window_size);
         let hann_window = build_hann_window(window_size);
         let n_bins = window_size / 2 + 1;
 
@@ -60,6 +61,7 @@ impl FeatureExtractor {
             spectrum_buf: vec![0.0; n_bins],
             prev_spectrum: vec![0.0; n_bins],
             onset_buf: Vec::new(),
+            centered_buf: Vec::new(),
             centroid_values: Vec::new(),
             rolloff_values: Vec::new(),
             flatness_values: Vec::new(),
@@ -123,7 +125,7 @@ impl FeatureExtractor {
             return -1.0; // No onsets detected (silence or near-silence)
         }
 
-        let bpm = estimate_bpm_autocorrelation(&self.onset_buf, sample_rate);
+        let bpm = self.estimate_bpm_autocorrelation(sample_rate);
 
         if bpm <= 0.0 {
             return -1.0;
@@ -218,11 +220,13 @@ impl Default for FeatureExtractor {
 /// Full 23-element audio feature extractor built on reusable
 /// [`FeatureExtractor`] instances.
 ///
-/// Keeps separate extractors for tempo and spectral descriptors so that both
-/// can run in parallel while still reusing FFT plans and scratch buffers.
+/// Keeps separate extractors for tempo, spectral, and chroma descriptors so
+/// that they can run in parallel while still reusing FFT plans and scratch
+/// buffers.
 pub struct AudioFeatureExtractor {
     tempo_features: FeatureExtractor,
     spectral_features: FeatureExtractor,
+    chroma_features: ChromaFeatureExtractor,
 }
 
 impl AudioFeatureExtractor {
@@ -231,6 +235,7 @@ impl AudioFeatureExtractor {
         Self {
             tempo_features: FeatureExtractor::new(),
             spectral_features: FeatureExtractor::new(),
+            chroma_features: ChromaFeatureExtractor::new(),
         }
     }
 
@@ -255,7 +260,8 @@ impl AudioFeatureExtractor {
             });
             let child_zcr = s.spawn(|| zcr::compute_zcr(samples));
             let child_loudness = s.spawn(|| loudness::compute_loudness(samples));
-            let child_chroma = s.spawn(|| chroma::compute_chroma_features(samples, sample_rate));
+            let child_chroma =
+                s.spawn(|| self.chroma_features.compute(samples, sample_rate));
 
             let tempo_val = child_tempo
                 .join()
@@ -298,49 +304,55 @@ fn build_hann_window(size: usize) -> Vec<f32> {
         .collect()
 }
 
-/// Estimate BPM using autocorrelation of the onset envelope.
-fn estimate_bpm_autocorrelation(onset_envelope: &[f32], sample_rate: u32) -> f32 {
-    let n = onset_envelope.len();
-    if n < 4 {
-        return 0.0;
-    }
-
-    let frame_rate = sample_rate as f32 / HOP_SIZE_TEMPO as f32;
-
-    let min_lag = (frame_rate * 60.0 / MAX_BPM).ceil() as usize;
-    let max_lag = (frame_rate * 60.0 / 30.0).floor() as usize; // 30 BPM lower bound
-    let max_lag = max_lag.min(n / 2);
-
-    if min_lag >= max_lag || max_lag >= n {
-        return 0.0;
-    }
-
-    // Remove mean
-    let mean_val = onset_envelope.iter().sum::<f32>() / n as f32;
-    let centered: Vec<f32> = onset_envelope.iter().map(|&x| x - mean_val).collect();
-
-    let mut best_lag = min_lag;
-    let mut best_score = f32::NEG_INFINITY;
-
-    for lag in min_lag..=max_lag {
-        let mut corr = 0.0f32;
-        for i in 0..n - lag {
-            corr += centered[i] * centered[i + lag];
+impl FeatureExtractor {
+    /// Estimate BPM using autocorrelation of the onset envelope.
+    fn estimate_bpm_autocorrelation(&mut self, sample_rate: u32) -> f32 {
+        let onset_envelope = &self.onset_buf;
+        let n = onset_envelope.len();
+        if n < 4 {
+            return 0.0;
         }
-        corr /= (n - lag) as f32;
 
-        // Apply tempo prior: prefer tempos near 120 BPM (Gaussian weighting)
-        let bpm = frame_rate * 60.0 / lag as f32;
-        let prior = (-0.5 * ((bpm - 120.0) / 40.0).powi(2)).exp();
-        let score = corr * prior;
+        let frame_rate = sample_rate as f32 / HOP_SIZE_TEMPO as f32;
 
-        if score > best_score {
-            best_score = score;
-            best_lag = lag;
+        let min_lag = (frame_rate * 60.0 / MAX_BPM).ceil() as usize;
+        let max_lag = (frame_rate * 60.0 / 30.0).floor() as usize; // 30 BPM lower bound
+        let max_lag = max_lag.min(n / 2);
+
+        if min_lag >= max_lag || max_lag >= n {
+            return 0.0;
         }
-    }
 
-    frame_rate * 60.0 / best_lag as f32
+        // Remove mean, reusing centered_buf
+        let mean_val = onset_envelope.iter().sum::<f32>() / n as f32;
+        self.centered_buf.resize(n, 0.0);
+        for (i, &x) in onset_envelope.iter().enumerate() {
+            self.centered_buf[i] = x - mean_val;
+        }
+
+        let mut best_lag = min_lag;
+        let mut best_score = f32::NEG_INFINITY;
+
+        for lag in min_lag..=max_lag {
+            let mut corr = 0.0f32;
+            for i in 0..n - lag {
+                corr += self.centered_buf[i] * self.centered_buf[i + lag];
+            }
+            corr /= (n - lag) as f32;
+
+            // Apply tempo prior: prefer tempos near 120 BPM (Gaussian weighting)
+            let bpm = frame_rate * 60.0 / lag as f32;
+            let prior = (-0.5 * ((bpm - 120.0) / 40.0).powi(2)).exp();
+            let score = corr * prior;
+
+            if score > best_score {
+                best_score = score;
+                best_lag = lag;
+            }
+        }
+
+        frame_rate * 60.0 / best_lag as f32
+    }
 }
 
 #[cfg(test)]
