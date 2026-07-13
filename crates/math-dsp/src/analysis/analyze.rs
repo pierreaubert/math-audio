@@ -4,7 +4,9 @@ use super::compute::compute_rt60_spectrum;
 use super::compute::compute_single_fft_spectrum_internal;
 use super::compute::compute_spectrogram;
 use super::compute::compute_thd_from_ir;
-use super::compute::compute_welch_spectrum_internal;
+use super::compute::compute_welch_spectrum_into;
+use super::compute::with_welch_buffers;
+use super::plan::plan_fft_forward;
 use super::estimate::estimate_lag;
 use super::interpolate::interpolate_log;
 use super::interpolate::interpolate_log_phase;
@@ -49,19 +51,48 @@ pub fn analyze_wav_buffer(
         config.fft_size.unwrap_or(16384)
     };
 
-    // Compute spectrum
-    let (freqs, magnitudes_db, phases_deg) = if config.single_fft {
-        compute_single_fft_spectrum_internal(samples, sample_rate, fft_size, config.no_window)?
-    } else {
-        compute_welch_spectrum_internal(samples, sample_rate, fft_size, config.overlap)?
-    };
-
     // Generate logarithmically spaced frequency points
     let log_freqs = generate_log_frequencies(config.num_points, config.min_freq, config.max_freq);
 
-    // Interpolate magnitude and phase at log frequencies
-    let mut interp_mag = interpolate_log(&freqs, &magnitudes_db, &log_freqs);
-    let interp_phase = interpolate_log_phase(&freqs, &phases_deg, &log_freqs);
+    // Compute spectrum and interpolate magnitude/phase at log frequencies.
+    // For the Welch path we write into thread-local reusable buffers so that
+    // the full-size per-bin vectors are not allocated on every call.
+    let num_bins = fft_size / 2;
+    let (mut interp_mag, interp_phase) = if config.single_fft {
+        let (freqs, magnitudes_db, phases_deg) =
+            compute_single_fft_spectrum_internal(samples, sample_rate, fft_size, config.no_window)?;
+        (
+            interpolate_log(&freqs, &magnitudes_db, &log_freqs),
+            interpolate_log_phase(&freqs, &phases_deg, &log_freqs),
+        )
+    } else {
+        let fft = plan_fft_forward(fft_size);
+        with_welch_buffers(fft_size, &fft, |bufs| -> Result<(Vec<f32>, Vec<f32>), String> {
+            compute_welch_spectrum_into(
+                samples,
+                sample_rate,
+                fft_size,
+                config.overlap,
+                &bufs.hann_window,
+                &fft,
+                &mut bufs.scratch,
+                &mut bufs.buffer,
+                &mut bufs.magnitude_sum,
+                &mut bufs.phase_real_sum,
+                &mut bufs.phase_imag_sum,
+                &mut bufs.freqs,
+                &mut bufs.magnitudes_db,
+                &mut bufs.phases_deg,
+            )?;
+            let freqs = &bufs.freqs[..num_bins];
+            let magnitudes_db = &bufs.magnitudes_db[..num_bins];
+            let phases_deg = &bufs.phases_deg[..num_bins];
+            Ok((
+                interpolate_log(freqs, magnitudes_db, &log_freqs),
+                interpolate_log_phase(freqs, phases_deg, &log_freqs),
+            ))
+        })?
+    };
 
     // Apply pink compensation if requested (for log sweeps)
     if config.pink_compensation {

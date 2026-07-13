@@ -9,26 +9,34 @@ use crate::stft::generate_hann_window_symmetric;
 
 /// Reusable analyzer for FFT-based spectral estimation.
 ///
-/// Keeps the FFT plan, window buffer, and FFT scratch buffers across calls
-/// so that repeated analysis of same-sized blocks does not allocate.
+/// Keeps the FFT plan, window buffer, FFT scratch buffers, and per-bin
+/// accumulation arrays across calls so that repeated analysis of same-sized
+/// blocks does not allocate.
 pub struct SpectrumAnalyzer {
     fft_size: usize,
     hann_window: Vec<f32>,
-    windowed: Vec<f32>,
     buffer: Vec<Complex<f32>>,
+    scratch: Vec<Complex<f32>>,
     fft: std::sync::Arc<dyn rustfft::Fft<f32>>,
+    magnitude_sum: Vec<f32>,
+    phase_real_sum: Vec<f32>,
+    phase_imag_sum: Vec<f32>,
 }
 
 impl SpectrumAnalyzer {
     /// Create a reusable analyzer for the given FFT size.
     #[must_use]
     pub fn new(fft_size: usize) -> Self {
+        let fft = plan_fft_forward(fft_size);
         Self {
             fft_size,
             hann_window: generate_hann_window_symmetric(fft_size),
-            windowed: vec![0.0_f32; fft_size],
             buffer: vec![Complex::new(0.0, 0.0); fft_size],
-            fft: plan_fft_forward(fft_size),
+            scratch: vec![Complex::new(0.0, 0.0); fft.get_inplace_scratch_len()],
+            fft,
+            magnitude_sum: vec![0.0_f32; fft_size / 2],
+            phase_real_sum: vec![0.0_f32; fft_size / 2],
+            phase_imag_sum: vec![0.0_f32; fft_size / 2],
         }
     }
 
@@ -45,8 +53,11 @@ impl SpectrumAnalyzer {
             overlap,
             &self.hann_window,
             &self.fft,
-            &mut self.windowed,
+            &mut self.scratch,
             &mut self.buffer,
+            &mut self.magnitude_sum,
+            &mut self.phase_real_sum,
+            &mut self.phase_imag_sum,
         )
     }
 }
