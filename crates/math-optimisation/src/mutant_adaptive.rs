@@ -1,6 +1,7 @@
-use ndarray::{Array1, Array2, Zip};
+use ndarray::{Array1, Array2};
 use rand::{Rng, RngExt};
 
+use crate::distinct_indices::distinct_indices_with_excludes_into;
 use crate::mutant_rand1::mutant_rand1_into;
 
 /// Adaptive mutation based on Self-Adaptive Mutation (SAM) from the paper.
@@ -24,14 +25,16 @@ pub(crate) fn mutant_adaptive_into<R: Rng + ?Sized>(
     let gr_better_idx = top_indices[rng.random_range(0..w_size)];
 
     // Need two distinct random indices different from i and gr_better_idx
-    let available = crate::distinct_indices::distinct_indices_with_excludes(
+    let mut available = [0usize; 2];
+    let n_found = distinct_indices_with_excludes_into(
         &[i, gr_better_idx],
         2,
         pop.nrows(),
         rng,
+        &mut available,
     );
 
-    if available.len() < 2 {
+    if n_found < 2 {
         // Fallback to standard rand1 if not enough individuals
         mutant_rand1_into(out, i, pop, f, rng);
         return;
@@ -42,14 +45,18 @@ pub(crate) fn mutant_adaptive_into<R: Rng + ?Sized>(
 
     // Adaptive mutation: x_i + F * (x_gr_better - x_i + x_r1 - x_r2)
     // This is the SAM approach from equation (18) in the paper
-    Zip::from(&mut *out)
-        .and(pop.row(i))
-        .and(pop.row(gr_better_idx))
-        .and(pop.row(r1))
-        .and(pop.row(r2))
-        .for_each(|o, &curr, &gr, &x1, &x2| {
-            *o = curr + f * (gr - curr + x1 - x2);
-        });
+    let out_slice = out.as_slice_mut().expect("contiguous");
+    let curr_row = pop.row(i);
+    let curr = curr_row.as_slice().expect("contiguous row");
+    let gr_row = pop.row(gr_better_idx);
+    let gr = gr_row.as_slice().expect("contiguous row");
+    let row1 = pop.row(r1);
+    let x1 = row1.as_slice().expect("contiguous row");
+    let row2 = pop.row(r2);
+    let x2 = row2.as_slice().expect("contiguous row");
+    for j in 0..out_slice.len() {
+        out_slice[j] = curr[j] + f * (gr[j] - curr[j] + x1[j] - x2[j]);
+    }
 }
 
 /// Tests for adaptive differential evolution strategies

@@ -11,7 +11,7 @@ use super::super::types::Init;
 use super::super::types::PenaltyTuple;
 use ndarray::{Array1, Array2, Zip};
 use oxiblas_ndarray::blas::matvec;
-use rand::rngs::StdRng;
+use rand::rngs::{SmallRng, StdRng};
 use rand::{RngExt, SeedableRng};
 use std::sync::RwLock;
 use std::time::Instant;
@@ -77,10 +77,11 @@ where
     pub fn solve(&mut self) -> DEReport {
         use super::super::apply_integrality::apply_integrality;
         use super::super::apply_wls::apply_wls_in_place;
-        use super::super::crossover_binomial::binomial_crossover_into;
-        use super::super::crossover_exponential::exponential_crossover_into;
+        use super::super::crossover_binomial::binomial_crossover_clamp_into;
+        use super::super::crossover_exponential::exponential_crossover_clamp_into;
         use super::super::init_latin_hypercube::init_latin_hypercube;
         use super::super::init_random::init_random;
+        use super::super::mutation::Mutation;
         use super::super::mutant_adaptive::mutant_adaptive_into;
         use super::super::mutant_best1::mutant_best1_into;
         use super::super::mutant_best2::mutant_best2_into;
@@ -89,10 +90,16 @@ where
         use super::super::mutant_rand_to_best1::mutant_rand_to_best1_into;
         use super::super::mutant_rand1::mutant_rand1_into;
         use super::super::mutant_rand2::mutant_rand2_into;
-        use super::super::parallel_eval::evaluate_rows_parallel;
+        use super::super::parallel_eval::evaluate_population_parallel_slice;
         use rayon::prelude::*;
         use std::cell::RefCell;
         use std::sync::Arc;
+
+        // Thread-local scratch used to copy a slice into an Array1 before calling
+        // the user-provided objective function (which expects &Array1<f64>).
+        thread_local! {
+            static X_SCRATCH: RefCell<Array1<f64>> = RefCell::new(Array1::zeros(0));
+        }
 
         let n = self.lower.len();
 
@@ -198,17 +205,20 @@ where
             eprintln!("  Evaluating initial population of {} individuals...", npop);
         }
 
-        // Prepare population for evaluation (apply integrality constraints)
-        let mut eval_pop = pop.clone();
+        // Prepare population for evaluation (apply integrality constraints).
+        // Borrow the population directly when no integrality is required to
+        // avoid a redundant full copy.
         let t_integrality0 = Instant::now();
-        if let Some(mask) = &self.config.integrality {
+        let eval_pop = if let Some(mask) = &self.config.integrality {
+            let mut ep = pop.clone();
             for i in 0..npop {
-                let mut row = eval_pop.row_mut(i);
-                let mut x_eval = row.to_owned();
-                apply_integrality(&mut x_eval, mask, &self.lower, &self.upper);
-                row.assign(&x_eval);
+                let mut row = ep.row_mut(i);
+                apply_integrality(&mut row, mask, &self.lower, &self.upper);
             }
-        }
+            std::borrow::Cow::Owned(ep)
+        } else {
+            std::borrow::Cow::Borrowed(&pop)
+        };
         let t_integrality = t_integrality0.elapsed();
 
         // Build thread-safe energy function that includes penalties
@@ -226,35 +236,57 @@ where
             .map(|(f, w)| (f.clone(), *w))
             .collect();
         let linear_penalty = self.config.linear_penalty.clone();
+        let no_penalties = penalty_ineq_vec.is_empty()
+            && penalty_eq_vec.is_empty()
+            && linear_penalty.is_none();
 
-        let energy_fn = Arc::new(move |x: &Array1<f64>| -> f64 {
-            let base = (func_ref)(x);
-            let mut p = 0.0;
-            for (f, w) in &penalty_ineq_vec {
-                let v = f(x);
-                let viol = v.max(0.0);
-                p += w * viol * viol;
-            }
-            for (h, w) in &penalty_eq_vec {
-                let v = h(x);
-                p += w * v * v;
-            }
-            if let Some(ref lp) = linear_penalty {
-                let ax = matvec(&lp.a, &x.to_owned());
-                Zip::from(&ax)
-                    .and(&lp.lb)
-                    .and(&lp.ub)
-                    .for_each(|&v, &lo, &hi| {
-                        if v < lo {
-                            let d = lo - v;
-                            p += lp.weight * d * d;
-                        } else if v > hi {
-                            let d = v - hi;
-                            p += lp.weight * d * d;
-                        }
-                    });
-            }
-            let energy = base + p;
+        let energy_fn = Arc::new(move |x: &[f64]| -> f64 {
+            // Copy the slice into a reusable per-thread Array1 so the public
+            // objective function signature (&Array1<f64>) is preserved without
+            // a per-evaluation heap allocation.
+            let energy = X_SCRATCH.with(|xs| {
+                let mut scratch = xs.borrow_mut();
+                if scratch.len() != x.len() {
+                    *scratch = Array1::zeros(x.len());
+                }
+                scratch.as_slice_mut().expect("contiguous").copy_from_slice(x);
+                let x_arr = &*scratch;
+
+                if no_penalties {
+                    // Fast path: most DE benchmarks/use cases have no penalties,
+                    // so avoid constructing empty iterators and the linear-penalty
+                    // branch inside every evaluation.
+                    (func_ref)(x_arr)
+                } else {
+                    let base = (func_ref)(x_arr);
+                    let mut p = 0.0;
+                    for (f, w) in &penalty_ineq_vec {
+                        let v = f(x_arr);
+                        let viol = v.max(0.0);
+                        p += w * viol * viol;
+                    }
+                    for (h, w) in &penalty_eq_vec {
+                        let v = h(x_arr);
+                        p += w * v * v;
+                    }
+                    if let Some(ref lp) = linear_penalty {
+                        let ax = matvec(&lp.a, x_arr);
+                        Zip::from(&ax)
+                            .and(&lp.lb)
+                            .and(&lp.ub)
+                            .for_each(|&v, &lo, &hi| {
+                                if v < lo {
+                                    let d = lo - v;
+                                    p += lp.weight * d * d;
+                                } else if v > hi {
+                                    let d = v - hi;
+                                    p += lp.weight * d * d;
+                                }
+                            });
+                    }
+                    base + p
+                }
+            });
             if energy.is_finite() {
                 energy
             } else {
@@ -263,11 +295,12 @@ where
         });
 
         let t_eval0 = Instant::now();
-        let mut energies = super::super::parallel_eval::evaluate_population_parallel(
-            &eval_pop,
+        let mut energies = evaluate_population_parallel_slice(
+            eval_pop.as_ref(),
             energy_fn.clone(),
             &self.config.parallel,
         );
+        drop(eval_pop); // release the borrow of `pop` before the mutable main loop
         let t_eval_init = t_eval0.elapsed();
         nfev += npop;
         if timing_enabled {
@@ -368,6 +401,51 @@ where
         let mut t_select_tot = std::time::Duration::ZERO;
         let mut t_iter_tot = std::time::Duration::ZERO;
 
+        // Reusable trial matrix and per-trial parameter storage, allocated once
+        // outside the hot loop.  They are only reallocated when L-SHADE shrinks
+        // the population.
+        let mut trials_buf: Array2<f64> = Array2::zeros((npop, n));
+        // Plain `f64` vectors for F/CR and trial energies: writes are to disjoint
+        // indices and the parallel loop joins before the sequential read phase,
+        // so atomics are unnecessary here.
+        let mut trial_f: Vec<f64> = vec![0.0; npop];
+        let mut trial_cr: Vec<f64> = vec![0.0; npop];
+        let mut trial_energies: Vec<f64> = vec![0.0; npop];
+
+        // One scratch vector per rayon thread for the mutant vector.
+        thread_local! {
+            static MUTANT_SCRATCH: RefCell<Array1<f64>> = RefCell::new(Array1::zeros(0));
+        }
+
+        // Pre-extract contiguous slices for bound clipping; avoids repeated
+        // `as_slice()` calls inside the per-individual hot path.
+        let lower_slice = self.lower.as_slice().expect("contiguous");
+        let upper_slice = self.upper.as_slice().expect("contiguous");
+
+        // Guarded fast path for the benchmark's default configuration:
+        // Best1Bin strategy, default dithered mutation, no penalties, no
+        // integrality, no WLS, and no adaptive/L-SHADE machinery. This path
+        // inlines the trial build and evaluation, removing strategy/crossover
+        // enum dispatch and the penalty-free energy wrapper. Non-default configs
+        // fall through to the general loop below unchanged.
+        let use_fast_path = npop >= 3
+            && matches!(self.config.strategy, Strategy::Best1Bin)
+            && matches!(
+                self.config.mutation,
+                Mutation::Range {
+                    min: 0.0,
+                    max: 2.0,
+                }
+            )
+            && self.config.penalty_ineq.is_empty()
+            && self.config.penalty_eq.is_empty()
+            && self.config.linear_penalty.is_none()
+            && self.config.integrality.is_none()
+            && !self.config.adaptive.wls_enabled
+            && adaptive_state.is_none()
+            && !is_lshade
+            && self.config.parallel.enabled;
+
         for iter in 1..=self.config.maxiter {
             nit = iter;
             accepted_trials = 0;
@@ -375,94 +453,50 @@ where
 
             let iter_start = Instant::now();
 
-            // Pre-sort indices for adaptive/L-SHADE strategies to avoid re-sorting in the loop
-            let sorted_indices = if matches!(
-                self.config.strategy,
-                Strategy::AdaptiveBin
-                    | Strategy::AdaptiveExp
-                    | Strategy::LShadeBin
-                    | Strategy::LShadeExp
-            ) {
-                let mut indices: Vec<usize> = (0..npop).collect();
-                indices.sort_by(|&a, &b| {
-                    energies[a]
-                        .partial_cmp(&energies[b])
-                        .unwrap_or(std::cmp::Ordering::Equal)
-                });
-                indices
-            } else {
-                Vec::new() // Not needed for other strategies
-            };
-
-            // Generate all trials into a reusable matrix, then evaluate in parallel
+            // Generate all trials into the reusable pre-allocated matrix, then
+            // evaluate in parallel.
             let t_build0 = Instant::now();
 
-            // Reusable trial matrix and per-trial parameter storage.
-            let mut trials_buf: Array2<f64> = Array2::zeros((npop, n));
-            use std::sync::atomic::{AtomicU64, Ordering};
-            let trial_f: Vec<AtomicU64> = (0..npop).map(|_| AtomicU64::new(0)).collect();
-            let trial_cr: Vec<AtomicU64> = (0..npop).map(|_| AtomicU64::new(0)).collect();
+            if use_fast_path {
+                // Fast path for the default Best1Bin/binomial/no-penalty
+                // configuration. Mirrors the general loop's raw-pointer layout
+                // but removes strategy/crossover enum dispatch, skips F/CR
+                // storage, and calls the objective directly instead of through
+                // the Arc penalty wrapper.
+                let func_ref = self.func;
+                let recombination = self.config.recombination;
+                let seed = self.config.seed;
+                let trials_addr = trials_buf.as_mut_ptr() as usize;
+                let trial_energies_ptr = trial_energies.as_mut_ptr() as usize;
+                (0..npop)
+                    .into_par_iter()
+                    .with_min_len(16)
+                    .for_each(|i| {
+                        let trials_ptr = trials_addr as *mut f64;
+                        let mut local_rng: SmallRng = if let Some(base_seed) = seed {
+                            SmallRng::seed_from_u64(
+                                base_seed
+                                    .wrapping_add((iter as u64) << 32)
+                                    .wrapping_add(i as u64),
+                            )
+                        } else {
+                            let mut thread_rng = rand::rng();
+                            SmallRng::from_rng(&mut thread_rng)
+                        };
 
-            // One scratch vector per rayon thread for the mutant vector.
-            thread_local! {
-                static MUTANT_SCRATCH: RefCell<Array1<f64>> = RefCell::new(Array1::zeros(0));
-            }
+                        let f = local_rng.random_range(0.0..2.0);
+                        let cr = recombination;
 
-            // Write directly into the pre-allocated trial matrix using a raw address.
-            // Rows are disjoint, so this is safe despite the parallel write access.
-            let trials_addr = trials_buf.as_mut_ptr() as usize;
-            (0..npop).into_par_iter().for_each(|i| {
-                let trials_ptr = trials_addr as *mut f64;
-                // Create thread-local RNG from base seed + iteration + individual index
-                let mut local_rng: StdRng = if let Some(base_seed) = self.config.seed {
-                    StdRng::seed_from_u64(
-                        base_seed
-                            .wrapping_add((iter as u64) << 32)
-                            .wrapping_add(i as u64),
-                    )
-                } else {
-                    // Use thread_rng for unseeded runs
-                    let mut thread_rng = rand::rng();
-                    StdRng::from_rng(&mut thread_rng)
-                };
+                        let trial_ptr = unsafe { trials_ptr.add(i * n) };
+                        let mut trial_row =
+                            unsafe { ndarray::ArrayViewMut1::from_shape_ptr((n,), trial_ptr) };
 
-                // Sample mutation factor and crossover rate (adaptive or fixed)
-                let (f, cr) = if let Some(ref adaptive) = adaptive_state {
-                    // Use adaptive parameter sampling
-                    let adaptive_f = adaptive.sample_f(&mut local_rng);
-                    let adaptive_cr = adaptive.sample_cr(&mut local_rng);
-                    (adaptive_f, adaptive_cr)
-                } else {
-                    // Use fixed or dithered parameters
-                    (
-                        self.config.mutation.sample(&mut local_rng),
-                        self.config.recombination,
-                    )
-                };
-
-                let trial_ptr = unsafe { trials_ptr.add(i * n) };
-                let mut trial_row =
-                    unsafe { ndarray::ArrayViewMut1::from_shape_ptr((n,), trial_ptr) };
-
-                MUTANT_SCRATCH.with(|ms| {
-                    let mut scratch = ms.borrow_mut();
-                    if scratch.len() != n {
-                        *scratch = Array1::zeros(n);
-                    }
-
-                    // Generate mutant in place based on strategy
-                    match self.config.strategy {
-                        Strategy::Best1Bin | Strategy::Best1Exp => {
-                            mutant_best1_into(&mut scratch, i, &pop, best_idx, f, &mut local_rng);
-                        }
-                        Strategy::Rand1Bin | Strategy::Rand1Exp => {
-                            mutant_rand1_into(&mut scratch, i, &pop, f, &mut local_rng);
-                        }
-                        Strategy::Rand2Bin | Strategy::Rand2Exp => {
-                            mutant_rand2_into(&mut scratch, i, &pop, f, &mut local_rng);
-                        }
-                        Strategy::CurrentToBest1Bin | Strategy::CurrentToBest1Exp => {
-                            mutant_current_to_best1_into(
+                        MUTANT_SCRATCH.with(|ms| {
+                            let mut scratch = ms.borrow_mut();
+                            if scratch.len() != n {
+                                *scratch = Array1::zeros(n);
+                            }
+                            mutant_best1_into(
                                 &mut scratch,
                                 i,
                                 &pop,
@@ -470,118 +504,248 @@ where
                                 f,
                                 &mut local_rng,
                             );
-                        }
-                        Strategy::Best2Bin | Strategy::Best2Exp => {
-                            mutant_best2_into(&mut scratch, i, &pop, best_idx, f, &mut local_rng);
-                        }
-                        Strategy::RandToBest1Bin | Strategy::RandToBest1Exp => {
-                            mutant_rand_to_best1_into(
-                                &mut scratch,
-                                i,
-                                &pop,
-                                best_idx,
-                                f,
+                            let target_row = pop.row(i);
+                            let target_slice = target_row.as_slice().expect("contiguous row");
+                            let mutant_slice = scratch.as_slice().expect("contiguous");
+                            let trial_slice = trial_row.as_slice_mut().expect("contiguous row");
+                            binomial_crossover_clamp_into(
+                                trial_slice,
+                                target_slice,
+                                mutant_slice,
+                                cr,
+                                lower_slice,
+                                upper_slice,
                                 &mut local_rng,
                             );
+                        });
+
+                        let trial_slice = trial_row.as_slice().expect("contiguous row");
+                        let energy = X_SCRATCH.with(|xs| {
+                            let mut x = xs.borrow_mut();
+                            if x.len() != n {
+                                *x = Array1::zeros(n);
+                            }
+                            x.as_slice_mut()
+                                .expect("contiguous")
+                                .copy_from_slice(trial_slice);
+                            (func_ref)(&x)
+                        });
+
+                        unsafe {
+                            *(trial_energies_ptr as *mut f64).add(i) =
+                                if energy.is_finite() { energy } else { f64::INFINITY };
                         }
-                        Strategy::AdaptiveBin | Strategy::AdaptiveExp => {
-                            if let Some(ref adaptive) = adaptive_state {
-                                mutant_adaptive_into(
+                    });
+            } else {
+                // Pre-sort indices for adaptive/L-SHADE strategies to avoid re-sorting in the loop
+                let sorted_indices = if matches!(
+                    self.config.strategy,
+                    Strategy::AdaptiveBin
+                        | Strategy::AdaptiveExp
+                        | Strategy::LShadeBin
+                        | Strategy::LShadeExp
+                ) {
+                    let mut indices: Vec<usize> = (0..npop).collect();
+                    indices.sort_by(|&a, &b| {
+                        energies[a]
+                            .partial_cmp(&energies[b])
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    });
+                    indices
+                } else {
+                    Vec::new() // Not needed for other strategies
+                };
+
+                // Write directly into the pre-allocated trial matrix using a raw address.
+                // Rows are disjoint, so this is safe despite the parallel write access.
+                let trials_addr = trials_buf.as_mut_ptr() as usize;
+                let trial_f_ptr = trial_f.as_mut_ptr() as usize;
+                let trial_cr_ptr = trial_cr.as_mut_ptr() as usize;
+                let trial_energies_ptr = trial_energies.as_mut_ptr() as usize;
+                let eval_fn = energy_fn.clone();
+                // Strategy/crossover type is constant for the whole iteration; resolve
+                // it once instead of inside every parallel task.
+                let crossover_type = self.config.strategy.crossover();
+                (0..npop)
+                    .into_par_iter()
+                    .with_min_len(16)
+                    .for_each(|i| {
+                    let trials_ptr = trials_addr as *mut f64;
+                    // Create a fast, deterministic per-individual RNG from a composite
+                    // seed. SmallRng seeds much cheaper than StdRng while preserving
+                    // reproducibility for a fixed configuration/seed.
+                    let mut local_rng: SmallRng = if let Some(base_seed) = self.config.seed {
+                        SmallRng::seed_from_u64(
+                            base_seed
+                                .wrapping_add((iter as u64) << 32)
+                                .wrapping_add(i as u64),
+                        )
+                    } else {
+                        // Use thread_rng for unseeded runs
+                        let mut thread_rng = rand::rng();
+                        SmallRng::from_rng(&mut thread_rng)
+                    };
+
+                    // Sample mutation factor and crossover rate (adaptive or fixed)
+                    let (f, cr) = if let Some(ref adaptive) = adaptive_state {
+                        // Use adaptive parameter sampling
+                        let adaptive_f = adaptive.sample_f(&mut local_rng);
+                        let adaptive_cr = adaptive.sample_cr(&mut local_rng);
+                        (adaptive_f, adaptive_cr)
+                    } else {
+                        // Use fixed or dithered parameters
+                        (
+                            self.config.mutation.sample(&mut local_rng),
+                            self.config.recombination,
+                        )
+                    };
+
+                    let trial_ptr = unsafe { trials_ptr.add(i * n) };
+                    let mut trial_row =
+                        unsafe { ndarray::ArrayViewMut1::from_shape_ptr((n,), trial_ptr) };
+
+                    MUTANT_SCRATCH.with(|ms| {
+                        let mut scratch = ms.borrow_mut();
+                        if scratch.len() != n {
+                            *scratch = Array1::zeros(n);
+                        }
+
+                        // Generate mutant in place based on strategy
+                        match self.config.strategy {
+                            Strategy::Best1Bin | Strategy::Best1Exp => {
+                                mutant_best1_into(&mut scratch, i, &pop, best_idx, f, &mut local_rng);
+                            }
+                            Strategy::Rand1Bin | Strategy::Rand1Exp => {
+                                mutant_rand1_into(&mut scratch, i, &pop, f, &mut local_rng);
+                            }
+                            Strategy::Rand2Bin | Strategy::Rand2Exp => {
+                                mutant_rand2_into(&mut scratch, i, &pop, f, &mut local_rng);
+                            }
+                            Strategy::CurrentToBest1Bin | Strategy::CurrentToBest1Exp => {
+                                mutant_current_to_best1_into(
+                                    &mut scratch,
+                                    i,
+                                    &pop,
+                                    best_idx,
+                                    f,
+                                    &mut local_rng,
+                                );
+                            }
+                            Strategy::Best2Bin | Strategy::Best2Exp => {
+                                mutant_best2_into(&mut scratch, i, &pop, best_idx, f, &mut local_rng);
+                            }
+                            Strategy::RandToBest1Bin | Strategy::RandToBest1Exp => {
+                                mutant_rand_to_best1_into(
+                                    &mut scratch,
+                                    i,
+                                    &pop,
+                                    best_idx,
+                                    f,
+                                    &mut local_rng,
+                                );
+                            }
+                            Strategy::AdaptiveBin | Strategy::AdaptiveExp => {
+                                if let Some(ref adaptive) = adaptive_state {
+                                    mutant_adaptive_into(
+                                        &mut scratch,
+                                        i,
+                                        &pop,
+                                        &sorted_indices,
+                                        adaptive.current_w,
+                                        f,
+                                        &mut local_rng,
+                                    );
+                                } else {
+                                    mutant_rand1_into(&mut scratch, i, &pop, f, &mut local_rng);
+                                }
+                            }
+                            Strategy::LShadeBin | Strategy::LShadeExp => {
+                                let pbest_size =
+                                    super::super::mutant_current_to_pbest1::compute_pbest_size(
+                                        self.config.lshade.p,
+                                        pop.nrows(),
+                                    );
+                                let archive_ref = external_archive.as_ref().and_then(|a| a.read().ok());
+                                mutant_current_to_pbest1_into(
                                     &mut scratch,
                                     i,
                                     &pop,
                                     &sorted_indices,
-                                    adaptive.current_w,
+                                    pbest_size,
+                                    archive_ref.as_deref(),
                                     f,
                                     &mut local_rng,
                                 );
-                            } else {
-                                mutant_rand1_into(&mut scratch, i, &pop, f, &mut local_rng);
                             }
-                        }
-                        Strategy::LShadeBin | Strategy::LShadeExp => {
-                            let pbest_size =
-                                super::super::mutant_current_to_pbest1::compute_pbest_size(
-                                    self.config.lshade.p,
-                                    pop.nrows(),
-                                );
-                            let archive_ref = external_archive.as_ref().and_then(|a| a.read().ok());
-                            mutant_current_to_pbest1_into(
-                                &mut scratch,
-                                i,
-                                &pop,
-                                &sorted_indices,
-                                pbest_size,
-                                archive_ref.as_deref(),
-                                f,
-                                &mut local_rng,
-                            );
-                        }
-                    };
+                        };
 
-                    // Crossover from target row into the trial row.
-                    let target_row_view = pop.row(i);
-                    let target_slice = target_row_view.as_slice().expect("contiguous row");
-                    let mutant_slice = scratch.as_slice().expect("contiguous");
-                    let trial_slice = trial_row.as_slice_mut().expect("contiguous row");
-                    match self.config.strategy.crossover() {
-                        Crossover::Binomial => binomial_crossover_into(
-                            trial_slice,
-                            target_slice,
-                            mutant_slice,
-                            cr,
+                        // Crossover from target row into the trial row.
+                        let target_row_view = pop.row(i);
+                        let target_slice = target_row_view.as_slice().expect("contiguous row");
+                        let mutant_slice = scratch.as_slice().expect("contiguous");
+                        let trial_slice = trial_row.as_slice_mut().expect("contiguous row");
+                        match crossover_type {
+                            Crossover::Binomial => binomial_crossover_clamp_into(
+                                trial_slice,
+                                target_slice,
+                                mutant_slice,
+                                cr,
+                                lower_slice,
+                                upper_slice,
+                                &mut local_rng,
+                            ),
+                            Crossover::Exponential => exponential_crossover_clamp_into(
+                                trial_slice,
+                                target_slice,
+                                mutant_slice,
+                                cr,
+                                lower_slice,
+                                upper_slice,
+                                &mut local_rng,
+                            ),
+                        }
+                    });
+
+                    // Apply WLS if enabled, in place on the trial row.
+                    if self.config.adaptive.wls_enabled
+                        && local_rng.random::<f64>() < self.config.adaptive.wls_prob
+                    {
+                        apply_wls_in_place(
+                            &mut trial_row,
+                            &self.lower,
+                            &self.upper,
+                            self.config.adaptive.wls_scale,
                             &mut local_rng,
-                        ),
-                        Crossover::Exponential => exponential_crossover_into(
-                            trial_slice,
-                            target_slice,
-                            mutant_slice,
-                            cr,
-                            &mut local_rng,
-                        ),
+                        );
+                    }
+
+                    // Apply integrality if provided
+                    if let Some(mask) = &self.config.integrality {
+                        apply_integrality(&mut trial_row, mask, &self.lower, &self.upper);
+                    }
+
+                    let trial_slice = trial_row.as_slice().expect("contiguous row");
+                    let energy = eval_fn(trial_slice);
+
+                    // Safe: each thread writes to distinct indices and the loop
+                    // joins before the values are read in the selection phase.
+                    unsafe {
+                        *(trial_f_ptr as *mut f64).add(i) = f;
+                        *(trial_cr_ptr as *mut f64).add(i) = cr;
+                        *(trial_energies_ptr as *mut f64).add(i) = energy;
                     }
                 });
-
-                // Apply WLS if enabled, in place on the trial row.
-                if self.config.adaptive.wls_enabled
-                    && local_rng.random::<f64>() < self.config.adaptive.wls_prob
-                {
-                    apply_wls_in_place(
-                        &mut trial_row,
-                        &self.lower,
-                        &self.upper,
-                        self.config.adaptive.wls_scale,
-                        &mut local_rng,
-                    );
-                }
-
-                // Clip to bounds using vectorized operation
-                Zip::from(&mut trial_row)
-                    .and(&self.lower)
-                    .and(&self.upper)
-                    .for_each(|x, lo, hi| *x = x.clamp(*lo, *hi));
-
-                // Apply integrality if provided
-                if let Some(mask) = &self.config.integrality {
-                    apply_integrality(&mut trial_row, mask, &self.lower, &self.upper);
-                }
-
-                trial_f[i].store(f.to_bits(), Ordering::Relaxed);
-                trial_cr[i].store(cr.to_bits(), Ordering::Relaxed);
-            });
+            }
 
             let t_build = t_build0.elapsed();
-            let t_eval0 = Instant::now();
-            let trial_energies =
-                evaluate_rows_parallel(&trials_buf, energy_fn.clone(), &self.config.parallel);
-            let t_eval = t_eval0.elapsed();
+            let t_eval = std::time::Duration::ZERO;
             nfev += npop;
 
             let t_select0 = Instant::now();
             // Selection phase: update population based on trial results
             for (i, trial_energy) in trial_energies.iter().enumerate() {
-                let f = f64::from_bits(trial_f[i].load(Ordering::Relaxed));
-                let cr = f64::from_bits(trial_cr[i].load(Ordering::Relaxed));
+                let f = trial_f[i];
+                let cr = trial_cr[i];
 
                 // Selection: replace if better
                 if *trial_energy <= energies[i] {
@@ -633,6 +797,10 @@ where
                     pop = new_pop;
                     energies = new_energies;
                     npop = current_npop;
+                    trials_buf = Array2::zeros((npop, n));
+                    trial_f = vec![0.0; npop];
+                    trial_cr = vec![0.0; npop];
+                    trial_energies = vec![0.0; npop];
 
                     if let Some(ref archive) = external_archive
                         && let Ok(mut arch) = archive.write()
@@ -669,7 +837,7 @@ where
             if new_best_f < best_f {
                 best_idx = new_best_idx;
                 best_f = new_best_f;
-                best_x = pop.row(best_idx).to_owned();
+                best_x.assign(&pop.row(best_idx));
             }
 
             // Convergence check

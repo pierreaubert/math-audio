@@ -121,6 +121,41 @@ where
         .collect()
 }
 
+/// Slice-based variant of [`evaluate_population_parallel`] used by the DE hot
+/// path.  The evaluator receives a contiguous row slice instead of an owned
+/// `Array1`, avoiding a per-row heap allocation.
+pub(crate) fn evaluate_population_parallel_slice<F>(
+    population: &Array2<f64>,
+    eval_fn: Arc<F>,
+    config: &ParallelConfig,
+) -> Array1<f64>
+where
+    F: Fn(&[f64]) -> f64 + Send + Sync,
+{
+    let npop = population.nrows();
+
+    if !config.enabled || npop < 4 {
+        let mut energies = Array1::zeros(npop);
+        for i in 0..npop {
+            let row = population.row(i);
+            let individual = row.as_slice().expect("contiguous row");
+            energies[i] = eval_fn(individual);
+        }
+        return energies;
+    }
+
+    let results = (0..npop)
+        .into_par_iter()
+        .map(|i| {
+            let row = population.row(i);
+            let individual = row.as_slice().expect("contiguous row");
+            eval_fn(individual)
+        })
+        .collect::<Vec<f64>>();
+
+    Array1::from_vec(results)
+}
+
 /// Structure to batch evaluate individuals with their indices.
 pub struct IndexedEvaluation {
     /// Index of the individual in the population.
