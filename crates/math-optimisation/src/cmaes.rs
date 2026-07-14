@@ -117,17 +117,6 @@ impl std::fmt::Debug for CmaEsReport {
     }
 }
 
-#[derive(Clone)]
-struct Candidate {
-    y: DVector<f64>,
-    fun: f64,
-}
-
-struct Sample {
-    y: DVector<f64>,
-    x: Array1<f64>,
-}
-
 /// Minimise `f` with bounded full-covariance CMA-ES.
 ///
 /// The objective receives parameters in the original coordinate system. Bounds
@@ -188,6 +177,7 @@ where
     let chi_n = n_f.sqrt() * (1.0 - 1.0 / (4.0 * n_f) + 1.0 / (21.0 * n_f * n_f));
 
     let mut mean = initial_mean(&config);
+    let mut old_mean = DVector::<f64>::zeros(n);
     let mut sigma = config.sigma0.unwrap_or(0.3).clamp(1e-12, 2.0);
     let mut covariance = DMatrix::<f64>::identity(n, n);
     let mut b = DMatrix::<f64>::identity(n, n);
@@ -195,6 +185,23 @@ where
     let mut invsqrt_c = DMatrix::<f64>::identity(n, n);
     let mut pc = DVector::<f64>::zeros(n);
     let mut ps = DVector::<f64>::zeros(n);
+
+    // Reusable per-generation scratch buffers.
+    let mut z_buf = DVector::<f64>::zeros(n);
+    let mut scaled_z = DVector::<f64>::zeros(n);
+    let mut step_buf = DVector::<f64>::zeros(n);
+    let mut y_w = DVector::<f64>::zeros(n);
+    let mut tmp_n = DVector::<f64>::zeros(n);
+    let mut rank_mu = DMatrix::<f64>::zeros(n, n);
+
+    // Pre-allocated population storage so offspring `DVector`s are reused across
+    // generations instead of re-allocated each iteration.
+    let mut y_pool: Vec<DVector<f64>> = Vec::with_capacity(lambda);
+    for _ in 0..lambda {
+        y_pool.push(DVector::<f64>::zeros(n));
+    }
+    let mut funs: Vec<f64> = vec![0.0; lambda];
+    let mut order: Vec<usize> = (0..lambda).collect();
 
     let mut rng: StdRng = match config.seed {
         Some(s) => StdRng::seed_from_u64(s),
@@ -222,90 +229,144 @@ where
     }
 
     while nfev < config.maxeval {
-        let old_mean = mean.clone();
-        let transform = &b * DMatrix::<f64>::from_diagonal(&d);
+        std::mem::swap(&mut mean, &mut old_mean);
         let eval_budget = (config.maxeval - nfev).min(lambda);
-        let mut samples: Vec<Sample> = Vec::with_capacity(eval_budget);
 
-        for _ in 0..eval_budget {
-            let z = standard_normal_vector(n, &mut rng);
-            let step = &transform * z;
-            let y = clamp_unit_vector(&(old_mean.clone() + step * sigma));
-            let x = denormalise(&y, &config.bounds);
-            samples.push(Sample { y, x });
-        }
-
-        let mut candidates: Vec<Candidate> = if config.parallel.enabled && samples.len() >= 4 {
-            samples
-                .par_iter()
-                .map(|sample| Candidate {
-                    y: sample.y.clone(),
-                    fun: finite_or_infinity(f(&sample.x)),
-                })
-                .collect()
-        } else {
-            samples
-                .iter()
-                .map(|sample| Candidate {
-                    y: sample.y.clone(),
-                    fun: finite_or_infinity(f(&sample.x)),
-                })
-                .collect()
-        };
-        nfev += candidates.len();
-
-        for (sample, candidate) in samples.iter().zip(candidates.iter()) {
-            if candidate.fun < best_fun {
-                best_fun = candidate.fun;
-                best_x = sample.x.clone();
+        // Generate offspring in normalised coordinates.  Instead of forming the
+        // full `B * diag(D)` transform matrix, sample `z ~ N(0, I)` and apply
+        // the equivalent cheaper operation `B * (D .* z)`.
+        for y_i in y_pool.iter_mut().take(eval_budget) {
+            fill_standard_normal(&mut z_buf, &mut rng);
+            for j in 0..n {
+                scaled_z[j] = d[j] * z_buf[j];
+            }
+            gemv_inplace(&b, &scaled_z, &mut step_buf);
+            for j in 0..n {
+                y_i[j] = (old_mean[j] + step_buf[j] * sigma).clamp(0.0, 1.0);
             }
         }
 
-        if candidates.is_empty() {
+        // Evaluate offspring.
+        if config.parallel.enabled && eval_budget >= 4 {
+            funs[..eval_budget]
+                .par_iter_mut()
+                .enumerate()
+                .with_min_len(16)
+                .for_each(|(i, fun)| {
+                    *fun = finite_or_infinity(f(&denormalise(&y_pool[i], &config.bounds)));
+                });
+        } else {
+            let mut x_array = Array1::<f64>::zeros(n);
+            for i in 0..eval_budget {
+                denormalise_into(&y_pool[i], &config.bounds, &mut x_array);
+                funs[i] = finite_or_infinity(f(&x_array));
+            }
+        }
+        nfev += eval_budget;
+
+        // Track the best point seen so far.
+        for i in 0..eval_budget {
+            if funs[i] < best_fun {
+                best_fun = funs[i];
+                denormalise_into(&y_pool[i], &config.bounds, &mut best_x);
+            }
+        }
+
+        if eval_budget == 0 {
             break;
         }
-        candidates.sort_by(|a, b| a.fun.total_cmp(&b.fun));
 
+        // Sort by fitness and select the best `mu_used` parents.
+        order[..eval_budget].sort_by(|&a, &b| funs[a].total_cmp(&funs[b]));
+        let mu_used = mu.min(eval_budget);
+
+        // Recombine parents into the new mean.
         mean.fill(0.0);
-        for i in 0..mu.min(candidates.len()) {
-            mean += candidates[i].y.clone() * weights[i];
+        for i in 0..mu_used {
+            let idx = order[i];
+            let w = weights[i];
+            let y_i = &y_pool[idx];
+            for j in 0..n {
+                mean[j] += w * y_i[j];
+            }
         }
-        mean = clamp_unit_vector(&mean);
+        clamp_unit_vector_inplace(&mut mean);
 
-        let y_w = (&mean - &old_mean) / sigma.max(1e-30);
-        ps = ps * (1.0 - cs) + (&invsqrt_c * &y_w) * (cs * (2.0 - cs) * mueff).sqrt();
+        // Evolution paths.
+        for j in 0..n {
+            y_w[j] = (mean[j] - old_mean[j]) / sigma.max(1e-30);
+        }
+
+        gemv_inplace(&invsqrt_c, &y_w, &mut tmp_n);
+        let ps_factor = (cs * (2.0 - cs) * mueff).sqrt();
+        for j in 0..n {
+            ps[j] = ps[j] * (1.0 - cs) + tmp_n[j] * ps_factor;
+        }
         let norm_ps = ps.norm();
+
         let hsig_den = (1.0 - (1.0 - cs).powi(2 * (nit as i32 + 1))).sqrt() * chi_n;
         let hsig = if hsig_den > 0.0 {
             norm_ps / hsig_den < 1.4 + 2.0 / (n_f + 1.0)
         } else {
             true
         };
-        pc *= 1.0 - cc;
-        if hsig {
-            pc += y_w.clone() * (cc * (2.0 - cc) * mueff).sqrt();
+
+        let pc_factor = (cc * (2.0 - cc) * mueff).sqrt();
+        for j in 0..n {
+            pc[j] *= 1.0 - cc;
+            if hsig {
+                pc[j] += y_w[j] * pc_factor;
+            }
         }
 
-        let mut rank_mu = DMatrix::<f64>::zeros(n, n);
-        for i in 0..mu.min(candidates.len()) {
-            let y_i = (&candidates[i].y - &old_mean) / sigma.max(1e-30);
-            rank_mu += (&y_i * y_i.transpose()) * weights[i];
+        // Rank-mu update matrix.
+        rank_mu.fill(0.0);
+        let inv_sigma = 1.0 / sigma.max(1e-30);
+        for i in 0..mu_used {
+            let idx = order[i];
+            let w = weights[i];
+            let y_i = &y_pool[idx];
+            for j in 0..n {
+                let diff_j = (y_i[j] - old_mean[j]) * inv_sigma;
+                for k in 0..n {
+                    let diff_k = (y_i[k] - old_mean[k]) * inv_sigma;
+                    rank_mu[(j, k)] += w * diff_j * diff_k;
+                }
+            }
         }
 
+        // Covariance matrix update.
         let hsig_correction = if hsig { 0.0 } else { c1 * cc * (2.0 - cc) };
-        covariance = covariance * (1.0 - c1 - cmu + hsig_correction)
-            + (&pc * pc.transpose()) * c1
-            + rank_mu * cmu;
+        let cov_scale = 1.0 - c1 - cmu + hsig_correction;
+        for j in 0..n {
+            for k in 0..n {
+                covariance[(j, k)] = covariance[(j, k)] * cov_scale
+                    + c1 * pc[j] * pc[k]
+                    + cmu * rank_mu[(j, k)];
+            }
+        }
         symmetrise_and_regularise(&mut covariance);
 
+        // Step-size update.
         sigma *= ((cs / damps) * (norm_ps / chi_n - 1.0)).exp();
         sigma = sigma.clamp(1e-14, 10.0);
 
+        // Eigen-decomposition of the updated covariance matrix.
         let eig = SymmetricEigen::new(covariance.clone());
         b = eig.eigenvectors;
         d = eig.eigenvalues.map(|v| v.max(1e-30).sqrt());
-        let inv_d = d.map(|v| 1.0 / v.max(1e-30));
-        invsqrt_c = &b * DMatrix::<f64>::from_diagonal(&inv_d) * b.transpose();
+
+        // Recompute C^{-1/2} = B * diag(1/d) * B^T without materialising the
+        // intermediate diagonal matrix.
+        for j in 0..n {
+            for k in 0..n {
+                let mut sum = 0.0;
+                for l in 0..n {
+                    sum += b[(j, l)] * b[(k, l)] / d[l].max(1e-30);
+                }
+                invsqrt_c[(j, k)] = sum;
+            }
+        }
 
         nit += 1;
         if (last_improvement_fun - best_fun).abs() <= config.f_tol {
@@ -398,12 +459,20 @@ fn denormalise(y: &DVector<f64>, bounds: &[(f64, f64)]) -> Array1<f64> {
     Array1::from(x)
 }
 
-fn clamp_unit_vector(y: &DVector<f64>) -> DVector<f64> {
-    y.map(|v| v.clamp(0.0, 1.0))
+fn denormalise_into(y: &DVector<f64>, bounds: &[(f64, f64)], out: &mut Array1<f64>) {
+    for (i, (lo, hi)) in bounds.iter().enumerate() {
+        out[i] = lo + y[i].clamp(0.0, 1.0) * (hi - lo);
+    }
 }
 
-fn standard_normal_vector<R: Rng + ?Sized>(n: usize, rng: &mut R) -> DVector<f64> {
-    let mut out = DVector::<f64>::zeros(n);
+fn clamp_unit_vector_inplace(y: &mut DVector<f64>) {
+    for v in y.iter_mut() {
+        *v = v.clamp(0.0, 1.0);
+    }
+}
+
+fn fill_standard_normal<R: Rng + ?Sized>(out: &mut DVector<f64>, rng: &mut R) {
+    let n = out.len();
     let mut i = 0usize;
     while i < n {
         let u1 = rng.random::<f64>().max(f64::MIN_POSITIVE);
@@ -416,11 +485,23 @@ fn standard_normal_vector<R: Rng + ?Sized>(n: usize, rng: &mut R) -> DVector<f64
         }
         i += 2;
     }
-    out
 }
 
 fn finite_or_infinity(v: f64) -> f64 {
     if v.is_finite() { v } else { f64::INFINITY }
+}
+
+/// In-place dense matrix-vector multiply `y = A * x` without allocating an
+/// intermediate result vector.
+fn gemv_inplace(a: &DMatrix<f64>, x: &DVector<f64>, y: &mut DVector<f64>) {
+    let n = a.nrows();
+    for i in 0..n {
+        let mut sum = 0.0;
+        for j in 0..n {
+            sum += a[(i, j)] * x[j];
+        }
+        y[i] = sum;
+    }
 }
 
 fn symmetrise_and_regularise(c: &mut DMatrix<f64>) {

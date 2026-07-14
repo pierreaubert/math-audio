@@ -37,3 +37,30 @@ pub(crate) fn binomial_crossover_into<R: Rng + ?Sized>(
         }
     }
 }
+
+/// Binomial crossover fused with per-element bound clipping.
+/// Equivalent to `binomial_crossover_into` followed by clamping each element to
+/// `[lower[j], upper[j]]`, but performed in a single pass.
+pub(crate) fn binomial_crossover_clamp_into<R: Rng + ?Sized>(
+    out: &mut [f64],
+    target: &[f64],
+    mutant: &[f64],
+    cr: f64,
+    lower: &[f64],
+    upper: &[f64],
+    rng: &mut R,
+) {
+    let n = out.len();
+    debug_assert_eq!(n, target.len());
+    debug_assert_eq!(n, mutant.len());
+    debug_assert_eq!(n, lower.len());
+    debug_assert_eq!(n, upper.len());
+    let jrand = rng.random_range(0..n);
+    out.copy_from_slice(target);
+    for j in 0..n {
+        if j == jrand || rng.random::<f64>() < cr {
+            let v = mutant[j];
+            out[j] = v.clamp(lower[j], upper[j]);
+        }
+    }
+}

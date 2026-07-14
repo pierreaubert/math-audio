@@ -4,10 +4,12 @@
 //! It blends the current individual with one of the top-p% best individuals,
 //! plus a difference vector that can include archive solutions.
 
-use ndarray::{Array1, Array2, Zip};
+use ndarray::{Array1, Array2};
 use rand::{Rng, RngExt};
 
-use crate::distinct_indices::{distinct_indices, distinct_indices_with_excludes};
+use crate::distinct_indices::{
+    distinct_indices_into, distinct_indices_with_excludes_into,
+};
 use crate::external_archive::ExternalArchive;
 
 /// Current-to-pbest/1 mutation with optional archive
@@ -37,48 +39,51 @@ pub(crate) fn mutant_current_to_pbest1_into<R: Rng + ?Sized>(
         sorted_indices[rng.random_range(0..p_best_size)]
     };
 
-    let r1 = distinct_indices(i, 1, npop, rng)[0];
+    let mut r1_buf = [0usize; 1];
+    distinct_indices_into(i, 1, npop, rng, &mut r1_buf);
+    let r1 = r1_buf[0];
 
     // Choose r2 from the archive with 50% probability, otherwise from the
     // population, excluding i and r1.
-    let r2_pop_idx = if let Some(arch) = archive {
-        if !arch.is_empty() && rng.random::<f64>() < 0.5 {
-            if let Some(sol) = arch.random_select(rng) {
-                Zip::from(&mut *out)
-                    .and(pop.row(i))
-                    .and(pop.row(pbest_idx))
-                    .and(pop.row(r1))
-                    .and(sol.view())
-                    .for_each(|o, &curr, &pbest, &x1, &x2| {
-                        *o = curr + f * (pbest - curr) + f * (x1 - x2);
-                    });
-                return;
-            }
-            None
-        } else {
-            None
-        }
-    } else {
-        None
-    };
+    let out_slice = out.as_slice_mut().expect("contiguous");
+    let curr_row = pop.row(i);
+    let curr = curr_row.as_slice().expect("contiguous row");
+    let pbest_row = pop.row(pbest_idx);
+    let pbest = pbest_row.as_slice().expect("contiguous row");
+    let x1_row = pop.row(r1);
+    let x1 = x1_row.as_slice().expect("contiguous row");
 
-    let r2_idx = r2_pop_idx.unwrap_or_else(|| {
-        let available = distinct_indices_with_excludes(&[i, r1], 1, npop, rng);
-        if available.is_empty() {
+    // Choose r2 from the archive with 50% probability, otherwise from the
+    // population, excluding i and r1.
+    if let Some(arch) = archive
+        && !arch.is_empty()
+        && rng.random::<f64>() < 0.5
+        && let Some(sol) = arch.random_select(rng)
+    {
+        let x2 = sol.as_slice().expect("contiguous archive row");
+        for j in 0..out_slice.len() {
+            out_slice[j] =
+                curr[j] + f * (pbest[j] - curr[j]) + f * (x1[j] - x2[j]);
+        }
+        return;
+    }
+
+    let r2_idx = {
+        let mut available = [0usize; 1];
+        let n_found =
+            distinct_indices_with_excludes_into(&[i, r1], 1, npop, rng, &mut available);
+        if n_found == 0 {
             r1
         } else {
             available[0]
         }
-    });
+    };
 
-    Zip::from(&mut *out)
-        .and(pop.row(i))
-        .and(pop.row(pbest_idx))
-        .and(pop.row(r1))
-        .and(pop.row(r2_idx))
-        .for_each(|o, &curr, &pbest, &x1, &x2| {
-            *o = curr + f * (pbest - curr) + f * (x1 - x2);
-        });
+    let x2_row = pop.row(r2_idx);
+    let x2 = x2_row.as_slice().expect("contiguous row");
+    for j in 0..out_slice.len() {
+        out_slice[j] = curr[j] + f * (pbest[j] - curr[j]) + f * (x1[j] - x2[j]);
+    }
 }
 
 /// Compute p_best_size from p parameter (0 < p <= 1)

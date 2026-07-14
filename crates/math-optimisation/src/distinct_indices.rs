@@ -1,38 +1,50 @@
 use rand::{Rng, RngExt};
 
-/// Return `count` distinct indices from `0..pool_size` excluding `exclude`.
+/// Stack-friendly variant that writes `count` distinct indices from
+/// `0..pool_size` excluding `exclude` into a caller-supplied buffer.
 ///
-/// This uses a small linear scan instead of a `HashSet`, which is faster for
-/// the tiny `count` values typical of DE mutation strategies (2–5) and avoids
-/// a per-mutant HashSet allocation.
-pub(crate) fn distinct_indices<R: Rng + ?Sized>(
+/// The buffer must be large enough for the requested `count`; if it is smaller,
+/// only the leading `out.len()` entries are filled.
+///
+/// Returns the number of indices actually written.
+pub(crate) fn distinct_indices_into<R: Rng + ?Sized>(
     exclude: usize,
     count: usize,
     pool_size: usize,
     rng: &mut R,
-) -> Vec<usize> {
-    distinct_indices_with_excludes(std::slice::from_ref(&exclude), count, pool_size, rng)
+    out: &mut [usize],
+) -> usize {
+    distinct_indices_with_excludes_into(std::slice::from_ref(&exclude), count, pool_size, rng, out)
 }
 
-/// Return `count` distinct indices from `0..pool_size` excluding every index
-/// in `excludes`.
+/// Stack-friendly variant that writes `count` distinct indices from
+/// `0..pool_size` excluding every index in `excludes` into a caller-supplied
+/// buffer.
 ///
-/// If `pool_size - excludes.len()` is smaller than `count`, the function
-/// returns as many distinct indices as possible after applying the exclusions.
-pub(crate) fn distinct_indices_with_excludes<R: Rng + ?Sized>(
+/// If `pool_size - excludes.len()` is smaller than `count`, only the available
+/// distinct indices are written.
+///
+/// Returns the number of indices actually written.
+pub(crate) fn distinct_indices_with_excludes_into<R: Rng + ?Sized>(
     excludes: &[usize],
     count: usize,
     pool_size: usize,
     rng: &mut R,
-) -> Vec<usize> {
+    out: &mut [usize],
+) -> usize {
     let max_available = pool_size.saturating_sub(excludes.len());
-    let target = count.min(max_available);
-    let mut selected = Vec::with_capacity(target);
-    while selected.len() < target {
+    let target = count.min(max_available).min(out.len());
+    let mut selected = 0usize;
+    'outer: while selected < target {
         let idx = rng.random_range(0..pool_size);
-        if !excludes.contains(&idx) && !selected.contains(&idx) {
-            selected.push(idx);
+        if excludes.contains(&idx) {
+            continue;
         }
+        if out[..selected].contains(&idx) {
+            continue 'outer;
+        }
+        out[selected] = idx;
+        selected += 1;
     }
     selected
 }

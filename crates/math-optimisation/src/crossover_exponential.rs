@@ -42,3 +42,33 @@ pub(crate) fn exponential_crossover_into<R: Rng + ?Sized>(
         }
     }
 }
+
+/// Exponential crossover fused with per-element bound clipping.
+pub(crate) fn exponential_crossover_clamp_into<R: Rng + ?Sized>(
+    out: &mut [f64],
+    target: &[f64],
+    mutant: &[f64],
+    cr: f64,
+    lower: &[f64],
+    upper: &[f64],
+    rng: &mut R,
+) {
+    let n = out.len();
+    debug_assert_eq!(n, target.len());
+    debug_assert_eq!(n, mutant.len());
+    debug_assert_eq!(n, lower.len());
+    debug_assert_eq!(n, upper.len());
+    out.copy_from_slice(target);
+    let mut j = rng.random_range(0..n);
+    let mut l = 0usize;
+    // ensure at least one parameter from mutant
+    loop {
+        let v = mutant[j];
+        out[j] = v.clamp(lower[j], upper[j]);
+        l += 1;
+        j = (j + 1) % n;
+        if rng.random::<f64>() >= cr || l >= n {
+            break;
+        }
+    }
+}
