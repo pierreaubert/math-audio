@@ -74,10 +74,6 @@ path = "bin/benchmark_convergence.rs"
 name = "run-de"
 path = "bin/run_de.rs"
 
-[[bin]]
-name = "benchmark_convergence"
-path = "bin/benchmark_convergence.rs"
-
 [lib]
 name = "math_audio_optimisation"
 path = "src/mod.rs"
