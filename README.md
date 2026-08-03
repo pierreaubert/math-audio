@@ -38,10 +38,10 @@ just qa
 | [`math-convex-hull`](crates/math-convex-hull/README.md) | 3D convex hull (Quickhull) | stable |
 | [`math-delaunay`](crates/math-delaunay/README.md) | 2D Delaunay triangulation and Voronoi diagrams | stable |
 | [`math-dsp`](crates/math-dsp/README.md) | DSP utilities: signal generation, FFT analysis, loudness (EBU R128, binaural), dynamics, STFT, RTPGHI, ESPRIT | stable |
-| [`math-autodiff`](crates/math-autodiff/README.md) | Frequency-domain differentiable audio DSP: FFT/IFFT, delays, gains, matrices, IIR/SOS filters, feedback systems, and analytical gradients | stable |
+| [`math-autodiff`](crates/math-autodiff/README.md) | Frequency-domain differentiable audio DSP: FFT/IFFT, delays, gains, matrices, IIR/SOS filters, feedback systems, and analytical gradients | beta |
 | [`math-optimisation`](crates/math-optimisation/README.md) | Non-linear optimisation: DE, L-SHADE, CMA-ES, NSGA-II/III, COBYLA, ISRES, Levenberg-Marquardt, Bayesian | stable |
 | [`math-iir-fir`](crates/math-iir-fir/README.md) | IIR/FIR/SVF filters, biquads, PEQ, crossovers, filtfilt, EqualizerAPO/RME/etc. export | stable |
-| [`math-rir`](crates/math-rir/README.md) | Room Impulse Response analysis: SSIR segmentation, ISO 3382 metrics | stable |
+| [`math-rir`](crates/math-rir/README.md) | Room Impulse Response analysis: SSIR segmentation, ISO 3382 metrics | beta |
 | [`math-test-functions`](crates/math-test-functions/README.md) | 56+ benchmark functions for optimisation algorithms | stable |
 
 ### Key dependency flow
