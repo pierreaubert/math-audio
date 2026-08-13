@@ -16,8 +16,7 @@ thread_local! {
 ///
 /// Returns a single normalized value in [-1, 1].
 pub fn compute_tempo(samples: &[f32], sample_rate: u32) -> f32 {
-    FEATURE_EXTRACTOR
-        .with(|e| e.borrow_mut().compute_tempo(samples, sample_rate))
+    FEATURE_EXTRACTOR.with(|e| e.borrow_mut().compute_tempo(samples, sample_rate))
 }
 
 #[cfg(test)]

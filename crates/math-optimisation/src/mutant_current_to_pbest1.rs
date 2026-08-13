@@ -7,9 +7,7 @@
 use ndarray::{Array1, Array2};
 use rand::{Rng, RngExt};
 
-use crate::distinct_indices::{
-    distinct_indices_into, distinct_indices_with_excludes_into,
-};
+use crate::distinct_indices::{distinct_indices_into, distinct_indices_with_excludes_into};
 use crate::external_archive::ExternalArchive;
 
 /// Current-to-pbest/1 mutation with optional archive
@@ -62,21 +60,15 @@ pub(crate) fn mutant_current_to_pbest1_into<R: Rng + ?Sized>(
     {
         let x2 = sol.as_slice().expect("contiguous archive row");
         for j in 0..out_slice.len() {
-            out_slice[j] =
-                curr[j] + f * (pbest[j] - curr[j]) + f * (x1[j] - x2[j]);
+            out_slice[j] = curr[j] + f * (pbest[j] - curr[j]) + f * (x1[j] - x2[j]);
         }
         return;
     }
 
     let r2_idx = {
         let mut available = [0usize; 1];
-        let n_found =
-            distinct_indices_with_excludes_into(&[i, r1], 1, npop, rng, &mut available);
-        if n_found == 0 {
-            r1
-        } else {
-            available[0]
-        }
+        let n_found = distinct_indices_with_excludes_into(&[i, r1], 1, npop, rng, &mut available);
+        if n_found == 0 { r1 } else { available[0] }
     };
 
     let x2_row = pop.row(r2_idx);

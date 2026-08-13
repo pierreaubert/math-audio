@@ -81,7 +81,6 @@ where
         use super::super::crossover_exponential::exponential_crossover_clamp_into;
         use super::super::init_latin_hypercube::init_latin_hypercube;
         use super::super::init_random::init_random;
-        use super::super::mutation::Mutation;
         use super::super::mutant_adaptive::mutant_adaptive_into;
         use super::super::mutant_best1::mutant_best1_into;
         use super::super::mutant_best2::mutant_best2_into;
@@ -90,6 +89,7 @@ where
         use super::super::mutant_rand_to_best1::mutant_rand_to_best1_into;
         use super::super::mutant_rand1::mutant_rand1_into;
         use super::super::mutant_rand2::mutant_rand2_into;
+        use super::super::mutation::Mutation;
         use super::super::parallel_eval::evaluate_population_parallel_slice;
         use rayon::prelude::*;
         use std::cell::RefCell;
@@ -236,9 +236,8 @@ where
             .map(|(f, w)| (f.clone(), *w))
             .collect();
         let linear_penalty = self.config.linear_penalty.clone();
-        let no_penalties = penalty_ineq_vec.is_empty()
-            && penalty_eq_vec.is_empty()
-            && linear_penalty.is_none();
+        let no_penalties =
+            penalty_ineq_vec.is_empty() && penalty_eq_vec.is_empty() && linear_penalty.is_none();
 
         let energy_fn = Arc::new(move |x: &[f64]| -> f64 {
             // Copy the slice into a reusable per-thread Array1 so the public
@@ -249,7 +248,10 @@ where
                 if scratch.len() != x.len() {
                     *scratch = Array1::zeros(x.len());
                 }
-                scratch.as_slice_mut().expect("contiguous").copy_from_slice(x);
+                scratch
+                    .as_slice_mut()
+                    .expect("contiguous")
+                    .copy_from_slice(x);
                 let x_arr = &*scratch;
 
                 if no_penalties {
@@ -430,13 +432,7 @@ where
         // fall through to the general loop below unchanged.
         let use_fast_path = npop >= 3
             && matches!(self.config.strategy, Strategy::Best1Bin)
-            && matches!(
-                self.config.mutation,
-                Mutation::Range {
-                    min: 0.0,
-                    max: 2.0,
-                }
-            )
+            && matches!(self.config.mutation, Mutation::Range { min: 0.0, max: 2.0 })
             && self.config.penalty_ineq.is_empty()
             && self.config.penalty_eq.is_empty()
             && self.config.linear_penalty.is_none()
@@ -468,74 +464,67 @@ where
                 let seed = self.config.seed;
                 let trials_addr = trials_buf.as_mut_ptr() as usize;
                 let trial_energies_ptr = trial_energies.as_mut_ptr() as usize;
-                (0..npop)
-                    .into_par_iter()
-                    .with_min_len(16)
-                    .for_each(|i| {
-                        let trials_ptr = trials_addr as *mut f64;
-                        let mut local_rng: SmallRng = if let Some(base_seed) = seed {
-                            SmallRng::seed_from_u64(
-                                base_seed
-                                    .wrapping_add((iter as u64) << 32)
-                                    .wrapping_add(i as u64),
-                            )
-                        } else {
-                            let mut thread_rng = rand::rng();
-                            SmallRng::from_rng(&mut thread_rng)
-                        };
+                (0..npop).into_par_iter().with_min_len(16).for_each(|i| {
+                    let trials_ptr = trials_addr as *mut f64;
+                    let mut local_rng: SmallRng = if let Some(base_seed) = seed {
+                        SmallRng::seed_from_u64(
+                            base_seed
+                                .wrapping_add((iter as u64) << 32)
+                                .wrapping_add(i as u64),
+                        )
+                    } else {
+                        let mut thread_rng = rand::rng();
+                        SmallRng::from_rng(&mut thread_rng)
+                    };
 
-                        let f = local_rng.random_range(0.0..2.0);
-                        let cr = recombination;
+                    let f = local_rng.random_range(0.0..2.0);
+                    let cr = recombination;
 
-                        let trial_ptr = unsafe { trials_ptr.add(i * n) };
-                        let mut trial_row =
-                            unsafe { ndarray::ArrayViewMut1::from_shape_ptr((n,), trial_ptr) };
+                    let trial_ptr = unsafe { trials_ptr.add(i * n) };
+                    let mut trial_row =
+                        unsafe { ndarray::ArrayViewMut1::from_shape_ptr((n,), trial_ptr) };
 
-                        MUTANT_SCRATCH.with(|ms| {
-                            let mut scratch = ms.borrow_mut();
-                            if scratch.len() != n {
-                                *scratch = Array1::zeros(n);
-                            }
-                            mutant_best1_into(
-                                &mut scratch,
-                                i,
-                                &pop,
-                                best_idx,
-                                f,
-                                &mut local_rng,
-                            );
-                            let target_row = pop.row(i);
-                            let target_slice = target_row.as_slice().expect("contiguous row");
-                            let mutant_slice = scratch.as_slice().expect("contiguous");
-                            let trial_slice = trial_row.as_slice_mut().expect("contiguous row");
-                            binomial_crossover_clamp_into(
-                                trial_slice,
-                                target_slice,
-                                mutant_slice,
-                                cr,
-                                lower_slice,
-                                upper_slice,
-                                &mut local_rng,
-                            );
-                        });
-
-                        let trial_slice = trial_row.as_slice().expect("contiguous row");
-                        let energy = X_SCRATCH.with(|xs| {
-                            let mut x = xs.borrow_mut();
-                            if x.len() != n {
-                                *x = Array1::zeros(n);
-                            }
-                            x.as_slice_mut()
-                                .expect("contiguous")
-                                .copy_from_slice(trial_slice);
-                            (func_ref)(&x)
-                        });
-
-                        unsafe {
-                            *(trial_energies_ptr as *mut f64).add(i) =
-                                if energy.is_finite() { energy } else { f64::INFINITY };
+                    MUTANT_SCRATCH.with(|ms| {
+                        let mut scratch = ms.borrow_mut();
+                        if scratch.len() != n {
+                            *scratch = Array1::zeros(n);
                         }
+                        mutant_best1_into(&mut scratch, i, &pop, best_idx, f, &mut local_rng);
+                        let target_row = pop.row(i);
+                        let target_slice = target_row.as_slice().expect("contiguous row");
+                        let mutant_slice = scratch.as_slice().expect("contiguous");
+                        let trial_slice = trial_row.as_slice_mut().expect("contiguous row");
+                        binomial_crossover_clamp_into(
+                            trial_slice,
+                            target_slice,
+                            mutant_slice,
+                            cr,
+                            lower_slice,
+                            upper_slice,
+                            &mut local_rng,
+                        );
                     });
+
+                    let trial_slice = trial_row.as_slice().expect("contiguous row");
+                    let energy = X_SCRATCH.with(|xs| {
+                        let mut x = xs.borrow_mut();
+                        if x.len() != n {
+                            *x = Array1::zeros(n);
+                        }
+                        x.as_slice_mut()
+                            .expect("contiguous")
+                            .copy_from_slice(trial_slice);
+                        (func_ref)(&x)
+                    });
+
+                    unsafe {
+                        *(trial_energies_ptr as *mut f64).add(i) = if energy.is_finite() {
+                            energy
+                        } else {
+                            f64::INFINITY
+                        };
+                    }
+                });
             } else {
                 // Pre-sort indices for adaptive/L-SHADE strategies to avoid re-sorting in the loop
                 let sorted_indices = if matches!(
@@ -566,10 +555,7 @@ where
                 // Strategy/crossover type is constant for the whole iteration; resolve
                 // it once instead of inside every parallel task.
                 let crossover_type = self.config.strategy.crossover();
-                (0..npop)
-                    .into_par_iter()
-                    .with_min_len(16)
-                    .for_each(|i| {
+                (0..npop).into_par_iter().with_min_len(16).for_each(|i| {
                     let trials_ptr = trials_addr as *mut f64;
                     // Create a fast, deterministic per-individual RNG from a composite
                     // seed. SmallRng seeds much cheaper than StdRng while preserving
@@ -613,7 +599,14 @@ where
                         // Generate mutant in place based on strategy
                         match self.config.strategy {
                             Strategy::Best1Bin | Strategy::Best1Exp => {
-                                mutant_best1_into(&mut scratch, i, &pop, best_idx, f, &mut local_rng);
+                                mutant_best1_into(
+                                    &mut scratch,
+                                    i,
+                                    &pop,
+                                    best_idx,
+                                    f,
+                                    &mut local_rng,
+                                );
                             }
                             Strategy::Rand1Bin | Strategy::Rand1Exp => {
                                 mutant_rand1_into(&mut scratch, i, &pop, f, &mut local_rng);
@@ -632,7 +625,14 @@ where
                                 );
                             }
                             Strategy::Best2Bin | Strategy::Best2Exp => {
-                                mutant_best2_into(&mut scratch, i, &pop, best_idx, f, &mut local_rng);
+                                mutant_best2_into(
+                                    &mut scratch,
+                                    i,
+                                    &pop,
+                                    best_idx,
+                                    f,
+                                    &mut local_rng,
+                                );
                             }
                             Strategy::RandToBest1Bin | Strategy::RandToBest1Exp => {
                                 mutant_rand_to_best1_into(
@@ -665,7 +665,8 @@ where
                                         self.config.lshade.p,
                                         pop.nrows(),
                                     );
-                                let archive_ref = external_archive.as_ref().and_then(|a| a.read().ok());
+                                let archive_ref =
+                                    external_archive.as_ref().and_then(|a| a.read().ok());
                                 mutant_current_to_pbest1_into(
                                     &mut scratch,
                                     i,

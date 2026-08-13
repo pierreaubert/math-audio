@@ -440,8 +440,7 @@ impl<T: FilterFloat> Fir<T> {
         let scratch_len = n_taps - 1 + len;
         self.scratch.resize(scratch_len, T::zero());
         let prev_start = self.state_pos - n_taps + 1;
-        self.scratch[..n_taps - 1]
-            .copy_from_slice(&self.state[prev_start..self.state_pos]);
+        self.scratch[..n_taps - 1].copy_from_slice(&self.state[prev_start..self.state_pos]);
         self.scratch[n_taps - 1..].copy_from_slice(samples);
 
         for (i, sample) in samples.iter_mut().enumerate().take(len) {
@@ -455,8 +454,7 @@ impl<T: FilterFloat> Fir<T> {
         }
 
         let tail_start = len;
-        self.state[1..n_taps]
-            .copy_from_slice(&self.scratch[tail_start..tail_start + n_taps - 1]);
+        self.state[1..n_taps].copy_from_slice(&self.scratch[tail_start..tail_start + n_taps - 1]);
         self.state[0] = T::zero();
         self.state_pos = n_taps;
     }
@@ -932,8 +930,7 @@ impl<T: FilterFloat> Fir<T> {
             let scratch_len = n_taps - 1 + len;
             self.scratch.resize(scratch_len, T::zero());
             let prev_start = self.state_pos - n_taps + 1;
-            self.scratch[..n_taps - 1]
-                .copy_from_slice(&self.state[prev_start..self.state_pos]);
+            self.scratch[..n_taps - 1].copy_from_slice(&self.state[prev_start..self.state_pos]);
             self.scratch[n_taps - 1..].copy_from_slice(samples);
 
             let coeffs_ptr = self.coeffs.as_ptr() as *const f64;

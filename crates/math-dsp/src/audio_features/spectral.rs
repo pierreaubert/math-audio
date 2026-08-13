@@ -15,7 +15,10 @@ thread_local! {
 /// all normalized to [-1, 1].
 pub fn compute_spectral_features(samples: &[f32], sample_rate: u32) -> Vec<f32> {
     FEATURE_EXTRACTOR
-        .with(|e| e.borrow_mut().compute_spectral_features(samples, sample_rate))
+        .with(|e| {
+            e.borrow_mut()
+                .compute_spectral_features(samples, sample_rate)
+        })
         .to_vec()
 }
 

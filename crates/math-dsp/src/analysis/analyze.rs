@@ -6,7 +6,6 @@ use super::compute::compute_spectrogram;
 use super::compute::compute_thd_from_ir;
 use super::compute::compute_welch_spectrum_into;
 use super::compute::with_welch_buffers;
-use super::plan::plan_real_fft_forward;
 use super::estimate::estimate_lag;
 use super::interpolate::interpolate_log;
 use super::interpolate::interpolate_log_phase;
@@ -16,6 +15,7 @@ use super::misc::generate_log_frequencies;
 use super::misc::next_power_of_two;
 use super::misc::wav_next_power_of_two;
 use super::plan::plan_fft_inverse;
+use super::plan::plan_real_fft_forward;
 use super::types::AnalysisResult;
 use super::types::WavAnalysisOutput;
 use super::types::WindowType;
@@ -67,33 +67,37 @@ pub fn analyze_wav_buffer(
         )
     } else {
         let fft = plan_real_fft_forward(fft_size);
-        with_welch_buffers(fft_size, &fft, |bufs| -> Result<(Vec<f32>, Vec<f32>), String> {
-            compute_welch_spectrum_into(
-                samples,
-                sample_rate,
-                fft_size,
-                config.overlap,
-                &bufs.hann_window,
-                &bufs.scaled_window,
-                &fft,
-                &mut bufs.real_buffer,
-                &mut bufs.spectrum,
-                &mut bufs.real_scratch,
-                &mut bufs.magnitude_sum,
-                &mut bufs.phase_real_sum,
-                &mut bufs.phase_imag_sum,
-                &mut bufs.freqs,
-                &mut bufs.magnitudes_db,
-                &mut bufs.phases_deg,
-            )?;
-            let freqs = &bufs.freqs[..num_bins];
-            let magnitudes_db = &bufs.magnitudes_db[..num_bins];
-            let phases_deg = &bufs.phases_deg[..num_bins];
-            Ok((
-                interpolate_log(freqs, magnitudes_db, &log_freqs),
-                interpolate_log_phase(freqs, phases_deg, &log_freqs),
-            ))
-        })?
+        with_welch_buffers(
+            fft_size,
+            &fft,
+            |bufs| -> Result<(Vec<f32>, Vec<f32>), String> {
+                compute_welch_spectrum_into(
+                    samples,
+                    sample_rate,
+                    fft_size,
+                    config.overlap,
+                    &bufs.hann_window,
+                    &bufs.scaled_window,
+                    &fft,
+                    &mut bufs.real_buffer,
+                    &mut bufs.spectrum,
+                    &mut bufs.real_scratch,
+                    &mut bufs.magnitude_sum,
+                    &mut bufs.phase_real_sum,
+                    &mut bufs.phase_imag_sum,
+                    &mut bufs.freqs,
+                    &mut bufs.magnitudes_db,
+                    &mut bufs.phases_deg,
+                )?;
+                let freqs = &bufs.freqs[..num_bins];
+                let magnitudes_db = &bufs.magnitudes_db[..num_bins];
+                let phases_deg = &bufs.phases_deg[..num_bins];
+                Ok((
+                    interpolate_log(freqs, magnitudes_db, &log_freqs),
+                    interpolate_log_phase(freqs, phases_deg, &log_freqs),
+                ))
+            },
+        )?
     };
 
     // Apply pink compensation if requested (for log sweeps)

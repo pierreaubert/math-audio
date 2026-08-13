@@ -685,8 +685,7 @@ impl<T: FilterFloat> Biquad<T> {
 
             while ptr < end {
                 let xi = *ptr;
-                let yi = b0.mul_add(xi, b1.mul_add(x1, b2 * x2))
-                    - a1.mul_add(y1, a2 * y2);
+                let yi = b0.mul_add(xi, b1.mul_add(x1, b2 * x2)) - a1.mul_add(y1, a2 * y2);
                 *ptr = yi;
                 x2 = x1;
                 x1 = xi;

@@ -128,11 +128,7 @@ impl FeatureExtractor {
     /// Returns a single normalized value in [-1, 1], or -1 for silence or
     /// signals that are too short.
     pub fn compute_tempo(&mut self, samples: &[f32], sample_rate: u32) -> f32 {
-        let expected_onsets = samples
-            .len()
-            .saturating_sub(self.window_size)
-            / HOP_SIZE_TEMPO
-            + 1;
+        let expected_onsets = samples.len().saturating_sub(self.window_size) / HOP_SIZE_TEMPO + 1;
         self.onset_buf.clear();
         self.onset_buf.reserve(expected_onsets);
         self.prev_spectrum.fill(0.0);
@@ -255,9 +251,21 @@ impl FeatureExtractor {
         }
 
         let count = n as f32;
-        let centroid_std = if n > 0 { (centroid_m2 / count).sqrt() } else { 0.0 };
-        let rolloff_std = if n > 0 { (rolloff_m2 / count).sqrt() } else { 0.0 };
-        let flatness_std = if n > 0 { (flatness_m2 / count).sqrt() } else { 0.0 };
+        let centroid_std = if n > 0 {
+            (centroid_m2 / count).sqrt()
+        } else {
+            0.0
+        };
+        let rolloff_std = if n > 0 {
+            (rolloff_m2 / count).sqrt()
+        } else {
+            0.0
+        };
+        let flatness_std = if n > 0 {
+            (flatness_m2 / count).sqrt()
+        } else {
+            0.0
+        };
 
         [
             normalize(centroid_mean, 0.0, half_sr),
@@ -317,8 +325,7 @@ impl AudioFeatureExtractor {
                 self.spectral_features
                     .compute_spectral_features(samples, sample_rate)
             });
-            let child_chroma =
-                s.spawn(|| self.chroma_features.compute(samples, sample_rate));
+            let child_chroma = s.spawn(|| self.chroma_features.compute(samples, sample_rate));
 
             // These are cheap; run them on the caller thread while the heavy
             // feature threads are in flight.
@@ -401,8 +408,7 @@ impl FeatureExtractor {
             self.tempo_prior.resize(max_lag + 1, 0.0);
             for lag in min_lag..=max_lag {
                 let bpm = frame_rate * 60.0 / lag as f32;
-                self.tempo_prior[lag] =
-                    (-0.5 * ((bpm - 120.0) / 40.0).powi(2)).exp();
+                self.tempo_prior[lag] = (-0.5 * ((bpm - 120.0) / 40.0).powi(2)).exp();
             }
             self.tempo_prior_sr = sample_rate;
         }

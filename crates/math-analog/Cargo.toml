@@ -1,0 +1,28 @@
+[package]
+name = "math-analog"
+version = "0.5.0"
+edition = { workspace = true }
+authors = { workspace = true }
+description = "Host-independent analog-style coloration models for audio DSP"
+readme = "README.md"
+license = { workspace = true }
+repository = { workspace = true }
+keywords = ["audio", "dsp", "analog", "waveshaping"]
+categories = ["multimedia::audio", "science"]
+
+[lib]
+name = "math_audio_analog"
+path = "src/lib.rs"
+
+[dependencies]
+math-dsp = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+approx = { workspace = true }
+criterion = { workspace = true }
+stats_alloc = "0.1.10"
+
+[[bench]]
+name = "harmonics"
+harness = false

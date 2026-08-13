@@ -115,7 +115,8 @@ impl ChromaFeatureExtractor {
             self.padded_buf[suffix_start + i] = signal[signal.len() - 2 - i];
         }
 
-        for (window, mut stft_col) in self.padded_buf
+        for (window, mut stft_col) in self
+            .padded_buf
             .windows(window_length)
             .step_by(hop_length)
             .zip(spectrum.axis_iter_mut(Axis(1)))
@@ -145,7 +146,12 @@ impl ChromaFeatureExtractor {
 
         let spectrum = self.compute_stft(samples);
         let tuning = estimate_tuning(sample_rate, &spectrum, self.window_size, 0.01, n_chroma)?;
-        let cache_key = (sample_rate, self.window_size, n_chroma, Self::quantize_tuning(tuning));
+        let cache_key = (
+            sample_rate,
+            self.window_size,
+            n_chroma,
+            Self::quantize_tuning(tuning),
+        );
 
         let filter = match self.filter_cache.get(&cache_key) {
             Some(f) => f,
@@ -169,7 +175,8 @@ impl ChromaFeatureExtractor {
         let (mut interval_class, mut interval_class_mode) =
             raw_features.view_mut().split_at(Axis(0), 6);
 
-        let l2_norm_interval_class = dot_view(&interval_class.view(), &interval_class.view()).sqrt();
+        let l2_norm_interval_class =
+            dot_view(&interval_class.view(), &interval_class.view()).sqrt();
         let l2_norm_interval_class_mode =
             dot_view(&interval_class_mode.view(), &interval_class_mode.view()).sqrt();
 

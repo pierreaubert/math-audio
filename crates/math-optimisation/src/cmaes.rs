@@ -340,9 +340,8 @@ where
         let cov_scale = 1.0 - c1 - cmu + hsig_correction;
         for j in 0..n {
             for k in 0..n {
-                covariance[(j, k)] = covariance[(j, k)] * cov_scale
-                    + c1 * pc[j] * pc[k]
-                    + cmu * rank_mu[(j, k)];
+                covariance[(j, k)] =
+                    covariance[(j, k)] * cov_scale + c1 * pc[j] * pc[k] + cmu * rank_mu[(j, k)];
             }
         }
         symmetrise_and_regularise(&mut covariance);
