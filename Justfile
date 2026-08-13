@@ -57,8 +57,8 @@ prod-workspace:
 bench: bench-math
 
 bench-math:
-	cargo run --release --bin biquad-bench -p math-iir-fir
-	cargo bench --release -p math-autodiff --bench biquad_bench
+	cargo run --release --bin filter_bench -p math-iir-fir
+	cargo bench -p math-autodiff --bench biquad_bench
 
 # ----------------------------------------------------------------------
 # CLEAN
