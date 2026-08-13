@@ -4,7 +4,8 @@
 
 Math-Audio is a Rust workspace of numerical computing libraries for audio
 processing and acoustic analysis: DSP utilities, IIR/FIR filters, optimisation
-algorithms, test functions, computational geometry, and room-acoustics analysis.
+algorithms, analog-style coloration models, test functions, computational
+geometry, and room-acoustics analysis.
 
 ## Install
 
@@ -38,6 +39,7 @@ just qa
 | [`math-convex-hull`](crates/math-convex-hull/README.md) | 3D convex hull (Quickhull) | stable |
 | [`math-delaunay`](crates/math-delaunay/README.md) | 2D Delaunay triangulation and Voronoi diagrams | stable |
 | [`math-dsp`](crates/math-dsp/README.md) | DSP utilities: signal generation, FFT analysis, loudness (EBU R128, binaural), dynamics, STFT, RTPGHI, ESPRIT | stable |
+| [`math-analog`](crates/math-analog/README.md) | Host-independent analog-style coloration models for realtime audio DSP | alpha |
 | [`math-autodiff`](crates/math-autodiff/README.md) | Frequency-domain differentiable audio DSP: FFT/IFFT, delays, gains, matrices, IIR/SOS filters, feedback systems, and analytical gradients | beta |
 | [`math-optimisation`](crates/math-optimisation/README.md) | Non-linear optimisation: DE, L-SHADE, CMA-ES, NSGA-II/III, COBYLA, ISRES, Levenberg-Marquardt, Bayesian | stable |
 | [`math-iir-fir`](crates/math-iir-fir/README.md) | IIR/FIR/SVF filters, biquads, PEQ, crossovers, filtfilt, EqualizerAPO/RME/etc. export | stable |
@@ -50,6 +52,7 @@ just qa
 math-dsp → math-iir-fir
 math-rir → math-iir-fir
 math-optimisation → math-test-functions
+math-analog → math-dsp
 math-autodiff → math-dsp, math-iir-fir
 ```
 
