@@ -5,6 +5,15 @@ use super::iso3382_metrics::EMPTY_METRICS;
 use super::misc::estimate_noise_cutoff;
 use super::misc::linear_fit;
 
+#[test]
+fn empty_iso_metrics_have_an_explicit_quality_verdict() {
+    let verdict = EMPTY_METRICS.quality_verdict();
+    assert!(!verdict.usable);
+    assert!(!verdict.decay_fits_valid);
+    assert_eq!(verdict.finite_metric_count, 3);
+    assert!(!verdict.issues.is_empty());
+}
+
 /// Synthetic exponentially-decaying noise burst whose −60 dB time
 /// equals `t60_s`. Useful as ground truth for T20/T30/EDT.
 fn exponential_decay_rir(sample_rate: f64, t60_s: f64, duration_s: f64) -> Vec<f32> {

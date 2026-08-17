@@ -1,22 +1,25 @@
 use super::compute::compute_clarity_spectrum;
 use super::compute::compute_fft;
+use super::compute::compute_group_delay;
 use super::compute::compute_rt60_spectrum;
 use super::compute::compute_single_fft_spectrum_internal;
 use super::compute::compute_spectrogram;
 use super::compute::compute_thd_from_ir;
 use super::compute::compute_welch_spectrum_into;
 use super::compute::with_welch_buffers;
-use super::estimate::estimate_lag;
+use super::estimate::estimate_lag_with_confidence;
 use super::interpolate::interpolate_log;
 use super::interpolate::interpolate_log_phase;
 use super::load::load_wav_mono;
 use super::load::load_wav_mono_with_rate;
+use super::measurement::{analyze_ess_recording, effective_sweep_duration_seconds};
 use super::misc::generate_log_frequencies;
 use super::misc::next_power_of_two;
 use super::misc::wav_next_power_of_two;
 use super::plan::plan_fft_inverse;
 use super::plan::plan_real_fft_forward;
 use super::types::AnalysisResult;
+use super::types::EssAnalysisResult;
 use super::types::WavAnalysisOutput;
 use super::types::WindowType;
 use super::wav_analysis_config::WavAnalysisConfig;
@@ -101,7 +104,11 @@ pub fn analyze_wav_buffer(
     };
 
     // Apply pink compensation if requested (for log sweeps)
-    if config.pink_compensation {
+    // Pink compensation is a correction for the raw magnitude of a log
+    // sweep. Guard it to the single-FFT, rectangular-window mode selected by
+    // `for_log_sweep`; applying the same slope to a stationary/Welch analysis
+    // would silently manufacture a frequency tilt.
+    if config.pink_compensation && config.single_fft && config.no_window {
         let ref_freq = 1000.0;
         for (i, freq) in log_freqs.iter().enumerate() {
             if *freq > 0.0 {
@@ -155,6 +162,78 @@ pub(crate) fn align_signals<'a>(
     }
 }
 
+/// Adapt the canonical ESS result to the legacy, log-spaced `AnalysisResult`
+/// surface. Keeping this conversion here means the recording entry point no
+/// longer has a second ESS deconvolution implementation while preserving the
+/// metrics and CSV shape expected by existing callers.
+fn analysis_result_from_ess(ess: EssAnalysisResult, sample_rate: u32) -> AnalysisResult {
+    let frequencies = generate_log_frequencies(2000, 20.0, 20_000.0);
+    let magnitudes_db: Vec<f32> = ess
+        .frequency_response
+        .iter()
+        .map(|value| {
+            let magnitude = value.norm();
+            if magnitude > 1e-10 {
+                20.0 * magnitude.log10()
+            } else {
+                -200.0
+            }
+        })
+        .collect();
+    let phases_deg: Vec<f32> = ess
+        .frequency_response
+        .iter()
+        .map(|value| value.arg().to_degrees())
+        .collect();
+    let spl_db = interpolate_log(&ess.frequencies, &magnitudes_db, &frequencies);
+    let phase_deg = interpolate_log_phase(&ess.frequencies, &phases_deg, &frequencies);
+
+    let mut impulse_response = ess.impulse_response;
+    let peak_idx = impulse_response
+        .iter()
+        .enumerate()
+        .max_by(|(_, left), (_, right)| left.abs().total_cmp(&right.abs()))
+        .map(|(index, _)| index)
+        .unwrap_or(0);
+    let pre_ring_samples = (0.005 * sample_rate as f32) as usize;
+    let shift_amount = peak_idx.saturating_sub(pre_ring_samples);
+    if shift_amount > 0 {
+        impulse_response.rotate_left(shift_amount);
+    }
+
+    let impulse_time_ms: Vec<f32> = (0..impulse_response.len())
+        .map(|index| index as f32 / sample_rate as f32 * 1000.0)
+        .collect();
+    let thd_percent = interpolate_log(&ess.frequencies, &ess.thd_percent, &frequencies);
+    let harmonic_distortion_db = ess
+        .harmonic_distortion_db
+        .iter()
+        .map(|curve| interpolate_log(&ess.frequencies, curve, &frequencies))
+        .collect();
+    let excess_group_delay_ms = compute_group_delay(&frequencies, &phase_deg);
+    let rt60_ms = compute_rt60_spectrum(&impulse_response, sample_rate as f32, &frequencies);
+    let (clarity_c50_db, clarity_c80_db) =
+        compute_clarity_spectrum(&impulse_response, sample_rate as f32, &frequencies);
+    let (spectrogram_db, _, _) =
+        compute_spectrogram(&impulse_response, sample_rate as f32, 512, 128);
+
+    AnalysisResult {
+        frequencies,
+        spl_db,
+        phase_deg,
+        estimated_lag_samples: ess.lag.lag_samples,
+        impulse_response,
+        impulse_time_ms,
+        excess_group_delay_ms,
+        thd_percent,
+        harmonic_distortion_db,
+        rt60_ms,
+        clarity_c50_db,
+        clarity_c80_db,
+        spectrogram_db,
+    }
+}
+
 /// Analyze a recorded WAV file against a reference signal
 ///
 /// # Arguments
@@ -188,6 +267,11 @@ pub fn analyze_recording(
     }
     if reference_signal.is_empty() {
         return Err("Reference signal is empty!".to_string());
+    }
+
+    if let Some(sweep_range) = sweep_range {
+        let ess = analyze_ess_recording(&recorded, reference_signal, sample_rate, sweep_range)?;
+        return Ok(analysis_result_from_ess(ess, sample_rate));
     }
 
     // Don't truncate yet - we need full signals for lag estimation
@@ -246,7 +330,8 @@ pub fn analyze_recording(
     }
 
     // Estimate lag using cross-correlation
-    let lag = estimate_lag(reference, recorded)?;
+    let lag_estimate = estimate_lag_with_confidence(reference, recorded)?;
+    let lag = lag_estimate.lag_samples;
 
     log::debug!(
         "[FFT Analysis] Estimated lag: {} samples ({:.2} ms)",
@@ -286,12 +371,12 @@ pub fn analyze_recording(
     // with a misaligned sweep) produce unreliable transfer functions — division by
     // near-zero gives spurious high-dB peaks. We skip bins where the reference
     // energy is more than 60 dB below the peak.
-    let ref_peak_mag_sq = ref_spectrum[1..num_bins.min(ref_spectrum.len())]
+    let ref_peak_mag_sq = ref_spectrum[..num_bins.min(ref_spectrum.len())]
         .iter()
         .map(|c| c.norm_sqr())
         .fold(0.0_f32, |a, b| a.max(b));
     // 60 dB below peak = 10^(-6) in power
-    let ref_regularization_threshold = ref_peak_mag_sq * 1e-6;
+    let ref_regularization_threshold = (ref_peak_mag_sq * 1e-6).max(f32::MIN_POSITIVE);
 
     // Apply 1/24 octave smoothing for each target frequency
     let mut skipped_count = 0;
@@ -416,12 +501,13 @@ pub fn analyze_recording(
     // H(f) = Recorded(f) / Reference(f)
     let mut transfer_function = vec![Complex::new(0.0, 0.0); fft_size];
     for k in 0..fft_size {
-        // Handle DC and Nyquist specially if needed, but for complex FFT it's just bins
-        // Avoid division by zero
-        let ref_mag_sq = ref_spectrum[k].norm_sqr();
-        if ref_mag_sq > 1e-20 {
-            transfer_function[k] = rec_spectrum[k] / ref_spectrum[k];
-        }
+        // Use the same relative Tikhonov regularisation as the smoothed FR
+        // path. An absolute floor lets out-of-band reference noise dominate
+        // the IR, RT60, and THD calculations.
+        let reference_bin = ref_spectrum[k];
+        let ref_mag_sq = reference_bin.norm_sqr();
+        transfer_function[k] =
+            rec_spectrum[k] * reference_bin.conj() / (ref_mag_sq + ref_regularization_threshold);
     }
 
     // IFFT to get Impulse Response
@@ -441,7 +527,7 @@ pub fn analyze_recording(
     let peak_idx = impulse_response
         .iter()
         .enumerate()
-        .max_by(|(_, a), (_, b)| a.abs().partial_cmp(&b.abs()).unwrap())
+        .max_by(|(_, a), (_, b)| a.abs().total_cmp(&b.abs()))
         .map(|(i, _)| i)
         .unwrap_or(0);
 
@@ -468,7 +554,8 @@ pub fn analyze_recording(
     let (thd_percent, harmonic_distortion_db) = if let Some((start, end)) = sweep_range {
         // Assume sweep duration is same as impulse length (circular convolution)
         // or derived from reference signal length
-        let duration = reference_signal.len() as f32 / sample_rate as f32;
+        let duration = effective_sweep_duration_seconds(reference_signal, sample_rate)
+            .unwrap_or(reference_signal.len() as f32 / sample_rate as f32);
         compute_thd_from_ir(
             &impulse_response,
             sample_rate as f32,
@@ -483,8 +570,7 @@ pub fn analyze_recording(
     };
 
     // --- Compute Excess Group Delay ---
-    // (Placeholder)
-    let excess_group_delay_ms = vec![0.0; frequencies.len()];
+    let excess_group_delay_ms = compute_group_delay(&frequencies, &phase_deg);
 
     // --- Compute Acoustic Metrics ---
     // Debug: Log impulse response stats

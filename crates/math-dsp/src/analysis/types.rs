@@ -149,6 +149,146 @@ pub struct CrossCorrelationEnvelopeResult {
     pub peak_value: f32,
     /// Arrival time in milliseconds (sub-sample precision)
     pub arrival_ms: f64,
+    /// Peak correlation normalised by the energy of the overlapping signals.
+    pub normalized_peak: f32,
+    /// Peak-to-sidelobe ratio in dB. `INFINITY` means no measurable sidelobe.
+    pub peak_to_sidelobe_db: f32,
+    /// Combined bounded confidence score in the range `[0, 1]`.
+    pub confidence: f32,
+}
+
+/// A lag estimate together with enough diagnostics to reject an arbitrary
+/// peak from a noise-only or disconnected recording.
+#[derive(Debug, Clone, Copy)]
+pub struct LagEstimate {
+    /// Positive values mean that the recording starts later than the reference.
+    pub lag_samples: isize,
+    /// Normalised cross-correlation at the selected lag.
+    pub normalized_peak: f32,
+    /// Peak-to-sidelobe ratio in dB.
+    pub peak_to_sidelobe_db: f32,
+    /// Combined bounded confidence score in the range `[0, 1]`.
+    pub confidence: f32,
+}
+
+// Keep old in-crate assertions such as `assert_eq!(estimate_lag(...), 0)`
+// readable while the estimator now carries diagnostics.
+impl PartialEq<isize> for LagEstimate {
+    fn eq(&self, other: &isize) -> bool {
+        self.lag_samples == *other
+    }
+}
+
+/// Result of the canonical exponential-sine-sweep measurement path.
+#[derive(Debug, Clone)]
+pub struct EssAnalysisResult {
+    /// FFT-grid frequencies for `frequency_response`.
+    pub frequencies: Vec<f32>,
+    /// Complex positive-frequency transfer response.
+    pub frequency_response: Vec<rustfft::num_complex::Complex<f32>>,
+    /// Linear, non-circular deconvolved impulse response.
+    pub impulse_response: Vec<f32>,
+    /// One full-length, windowed impulse response per harmonic (H2..H5).
+    pub harmonic_impulse_responses: Vec<Vec<f32>>,
+    /// THD percentage evaluated at `frequencies`.
+    pub thd_percent: Vec<f32>,
+    /// Harmonic levels in dB, one curve per harmonic (H2..H5).
+    pub harmonic_distortion_db: Vec<Vec<f32>>,
+    /// Estimated playback-to-recording lag.
+    pub lag: LagEstimate,
+    /// Sweep duration used for Farina harmonic offsets, excluding silence padding.
+    pub sweep_duration_seconds: f32,
+}
+
+/// Result of robustly averaging repeated complex transfer responses.
+#[derive(Debug, Clone)]
+pub struct AveragedResponse {
+    /// Complex mean of the accepted responses.
+    pub response: Vec<rustfft::num_complex::Complex<f32>>,
+    /// Magnitude-squared coherence of the accepted responses, when at least
+    /// four captures remain; otherwise an empty vector.
+    pub coherence: Vec<f32>,
+    /// Original indices retained for the average.
+    pub accepted_indices: Vec<usize>,
+    /// Original indices rejected as global median/MAD outliers.
+    pub rejected_indices: Vec<usize>,
+}
+
+/// Result of aligning and averaging complete repeated ESS captures.
+#[derive(Debug, Clone)]
+pub struct AveragedEssResponse {
+    /// Averaged transfer response and capture-selection diagnostics.
+    pub averaged: AveragedResponse,
+    /// Lag diagnostics in the same order as the input captures.
+    pub lag_estimates: Vec<LagEstimate>,
+}
+
+/// Default thresholds used by [`assess_measurement_quality`].
+#[derive(Debug, Clone, Copy)]
+pub struct MeasurementQualityConfig {
+    /// Minimum lag confidence required for a trustworthy result.
+    pub minimum_lag_confidence: f32,
+    /// Minimum mean coherence required when coherence is available.
+    pub minimum_mean_coherence: f32,
+    /// Minimum median SNR in dB required when a noise floor is available.
+    pub minimum_median_snr_db: f32,
+    /// Maximum allowed fraction of clipped recording samples.
+    pub maximum_clip_fraction: f32,
+    /// Require coherence data before a result can be trustworthy.
+    pub require_coherence: bool,
+    /// Require measured and noise-floor spectra before a result can be trustworthy.
+    pub require_snr: bool,
+}
+
+impl Default for MeasurementQualityConfig {
+    fn default() -> Self {
+        Self {
+            minimum_lag_confidence: 0.2,
+            minimum_mean_coherence: 0.5,
+            minimum_median_snr_db: 10.0,
+            maximum_clip_fraction: 0.001,
+            require_coherence: false,
+            require_snr: false,
+        }
+    }
+}
+
+/// Recording clipping/overload diagnostics.
+#[derive(Debug, Clone, Copy)]
+pub struct ClippingInfo {
+    pub clipped_samples: usize,
+    pub non_finite_samples: usize,
+    pub total_samples: usize,
+    pub fraction: f32,
+}
+
+/// Combined measurement-quality verdict and the metrics supporting it.
+#[derive(Debug, Clone)]
+pub struct MeasurementQualityReport {
+    pub trustworthy: bool,
+    pub score: f32,
+    /// True when all optional quality inputs were supplied and usable.
+    /// `trustworthy` may still be true for a partial report when the caller
+    /// intentionally omitted optional inputs; this field makes that choice
+    /// explicit to downstream quality gates.
+    pub quality_data_complete: bool,
+    /// Names of optional quality inputs that were not supplied.
+    pub missing_metrics: Vec<String>,
+    pub lag_confidence: f32,
+    pub mean_coherence: Option<f32>,
+    pub snr_db: Vec<f32>,
+    pub median_snr_db: Option<f32>,
+    pub clipping: ClippingInfo,
+    pub issues: Vec<String>,
+}
+
+/// Estimated relative sample-clock drift between playback and capture.
+#[derive(Debug, Clone, Copy)]
+pub struct ClockDriftEstimate {
+    pub ppm: f64,
+    pub start_lag_samples: isize,
+    pub end_lag_samples: isize,
+    pub confidence: f32,
 }
 
 /// Frequency responses computed from different time windows of an impulse response.

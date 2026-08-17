@@ -9,15 +9,18 @@ use super::gen_::gen_impulse;
 use super::gen_::gen_log_sweep;
 use super::gen_::gen_log_sweep_octave_scaled;
 use super::gen_::gen_m_noise;
+use super::gen_::gen_m_noise_seeded;
 use super::gen_::gen_mls;
 use super::gen_::gen_narrowband_probe;
 use super::gen_::gen_pink_noise;
+use super::gen_::gen_pink_noise_seeded;
 use super::gen_::gen_probe_spectrum;
 use super::gen_::gen_steady_tone;
 use super::gen_::gen_step;
 use super::gen_::gen_tone;
 use super::gen_::gen_two_tone;
 use super::gen_::gen_white_noise;
+use super::gen_::gen_white_noise_seeded;
 use super::misc::add_silence_padding;
 use super::misc::clip;
 use super::misc::frames_for;
@@ -68,6 +71,28 @@ fn test_gen_log_sweep() {
     let signal = gen_log_sweep(20.0, 20000.0, 0.5, 48000, 1.0);
     assert_eq!(signal.len(), 48000);
     assert!(signal.iter().any(|&x| x.abs() > 0.1));
+}
+
+#[test]
+fn test_log_sweep_rejects_invalid_parameters() {
+    assert!(gen_log_sweep(0.0, 20_000.0, 0.5, 48_000, 1.0).is_empty());
+    assert!(super::gen_::try_gen_log_sweep(20.0, 20_000.0, 0.5, 0, 1.0).is_err());
+    assert!(super::gen_::try_gen_log_sweep(f32::NAN, 20_000.0, 0.5, 48_000, 1.0).is_err());
+}
+
+#[test]
+fn test_seeded_noise_decorrelates_repeated_captures() {
+    let first = gen_white_noise_seeded(0.5, 48_000, 0.05, 1);
+    let second = gen_white_noise_seeded(0.5, 48_000, 0.05, 2);
+    assert_ne!(first, second);
+    assert_ne!(
+        gen_pink_noise_seeded(0.5, 48_000, 0.05, 1),
+        gen_pink_noise_seeded(0.5, 48_000, 0.05, 2)
+    );
+    assert_ne!(
+        gen_m_noise_seeded(0.5, 48_000, 0.05, 1),
+        gen_m_noise_seeded(0.5, 48_000, 0.05, 2)
+    );
 }
 
 #[test]

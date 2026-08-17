@@ -31,11 +31,7 @@ pub(crate) fn estimate_mixing_time(rir: &[f32], sample_rate: f64) -> usize {
     let direct_peak = rir[..search_end.min(rir.len())]
         .iter()
         .enumerate()
-        .max_by(|(_, a), (_, b)| {
-            a.abs()
-                .partial_cmp(&b.abs())
-                .unwrap_or(std::cmp::Ordering::Equal)
-        })
+        .max_by(|(_, a), (_, b)| a.abs().total_cmp(&b.abs()))
         .map(|(i, _)| i)
         .unwrap_or(0);
 

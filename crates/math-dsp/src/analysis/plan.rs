@@ -2,7 +2,9 @@ use super::FFT_PLANNER;
 use super::REAL_FFT_PLANNER;
 use super::misc::next_power_of_two;
 use super::types::CrossCorrelationEnvelopeResult;
+use num_complex::Complex64;
 use realfft::RealToComplex;
+use rustfft::FftPlanner;
 use rustfft::num_complex::Complex;
 use std::sync::Arc;
 
@@ -27,6 +29,64 @@ pub fn plan_real_fft_forward(size: usize) -> Arc<dyn RealToComplex<f32>> {
     REAL_FFT_PLANNER.with(|p| p.borrow_mut().plan_fft_forward(size))
 }
 
+/// Shared f64 ESS deconvolution spectrum used by both the measurement
+/// pipeline and the low-level binaural-matrix adapter. Keeping the
+/// regularization and length rules here prevents the scalar paths from
+/// silently drifting apart again.
+pub(crate) fn deconvolve_sweep_f64_spectrum(
+    recording: &[f64],
+    reference: &[f64],
+    fft_size: usize,
+) -> Result<Vec<Complex64>, String> {
+    if recording.is_empty() || reference.is_empty() {
+        return Err("deconvolve_sweep: recording and reference must be non-empty".to_string());
+    }
+    if recording.len() < reference.len() {
+        return Err(format!(
+            "deconvolve_sweep: recording len {} != reference len {} (recording must not be shorter)",
+            recording.len(),
+            reference.len()
+        ));
+    }
+    if fft_size < recording.len().max(reference.len()).next_power_of_two() {
+        return Err("deconvolve_sweep: fft_size is too small".to_string());
+    }
+    if recording
+        .iter()
+        .chain(reference)
+        .any(|sample| !sample.is_finite())
+    {
+        return Err("deconvolve_sweep: inputs must contain only finite samples".to_string());
+    }
+
+    let mut y: Vec<Complex64> = recording
+        .iter()
+        .map(|&sample| Complex64::new(sample, 0.0))
+        .collect();
+    let mut x: Vec<Complex64> = reference
+        .iter()
+        .map(|&sample| Complex64::new(sample, 0.0))
+        .collect();
+    y.resize(fft_size, Complex64::new(0.0, 0.0));
+    x.resize(fft_size, Complex64::new(0.0, 0.0));
+
+    let mut planner = FftPlanner::<f64>::new();
+    let fft = planner.plan_fft_forward(fft_size);
+    fft.process(&mut y);
+    fft.process(&mut x);
+
+    let peak_power = x
+        .iter()
+        .map(|value| value.norm_sqr())
+        .fold(0.0_f64, f64::max)
+        .max(f64::MIN_POSITIVE);
+    let regularization = (peak_power * 1e-6).max(f64::MIN_POSITIVE);
+    for (output, input) in y.iter_mut().zip(&x) {
+        *output = *output * input.conj() / (input.norm_sqr() + regularization);
+    }
+    Ok(y)
+}
+
 /// Cross-correlate a probe with a recording and compute the analytic envelope.
 ///
 /// Uses FFT-based cross-correlation followed by the Hilbert transform
@@ -48,6 +108,16 @@ pub fn cross_correlate_envelope(
 ) -> Result<CrossCorrelationEnvelopeResult, String> {
     if probe.is_empty() || recorded.is_empty() {
         return Err("Probe and recorded signals must be non-empty".to_string());
+    }
+    if sample_rate == 0 {
+        return Err("Sample rate must be greater than zero".to_string());
+    }
+    if probe
+        .iter()
+        .chain(recorded)
+        .any(|sample| !sample.is_finite())
+    {
+        return Err("Probe and recorded signals must contain only finite samples".to_string());
     }
 
     // Zero-pad to avoid circular correlation artifacts
@@ -103,6 +173,47 @@ pub fn cross_correlate_envelope(
         }
     }
 
+    if peak_value <= f32::EPSILON {
+        return Err("Unable to detect a probe arrival: correlation has no energy".to_string());
+    }
+
+    let overlap = probe.len().min(recorded.len().saturating_sub(peak_sample));
+    let probe_energy: f32 = probe[..overlap].iter().map(|sample| sample * sample).sum();
+    let recorded_energy: f32 = recorded[peak_sample..peak_sample + overlap]
+        .iter()
+        .map(|sample| sample * sample)
+        .sum();
+    let normalized_peak = if probe_energy > f32::EPSILON && recorded_energy > f32::EPSILON {
+        // The peak was selected from the analytic envelope, not the real
+        // correlation sample. Use the envelope magnitude here as well;
+        // otherwise a quadrature-phase envelope peak can report a false zero
+        // confidence even when the matched filter is strong.
+        (peak_value / (probe_energy * recorded_energy).sqrt()).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let guard = (probe.len().min(recorded.len()) / 64).max(2);
+    let sidelobe = envelope
+        .iter()
+        .take(search_len)
+        .enumerate()
+        .filter(|(index, _)| index.abs_diff(peak_sample) > guard)
+        .map(|(_, value)| *value)
+        .fold(0.0_f32, f32::max);
+    let sidelobe_ratio = (sidelobe / peak_value).min(1.0);
+    let peak_to_sidelobe_db = if sidelobe <= f32::EPSILON {
+        f32::INFINITY
+    } else {
+        20.0 * (peak_value / sidelobe).log10()
+    };
+    let confidence = (normalized_peak * (1.0 - sidelobe_ratio)).clamp(0.0, 1.0);
+    if normalized_peak < 0.15 || confidence < 0.05 {
+        return Err(format!(
+            "Unable to detect a probe arrival confidently: normalized peak {:.3}, confidence {:.3}, PSR {:.1} dB",
+            normalized_peak, confidence, peak_to_sidelobe_db
+        ));
+    }
+
     // Parabolic interpolation for sub-sample precision
     let peak_refined = if peak_sample > 0 && peak_sample + 1 < search_len {
         let y_prev = envelope[peak_sample - 1] as f64;
@@ -126,6 +237,9 @@ pub fn cross_correlate_envelope(
         peak_sample_refined: peak_refined,
         peak_value,
         arrival_ms,
+        normalized_peak,
+        peak_to_sidelobe_db,
+        confidence,
     })
 }
 
@@ -157,53 +271,20 @@ pub fn deconvolve_sweep(
     reference: &[f32],
     sample_rate: u32,
 ) -> Result<Vec<Complex<f32>>, String> {
-    if recording.len() != reference.len() {
-        return Err(format!(
-            "deconvolve_sweep: recording len {} != reference len {}",
-            recording.len(),
-            reference.len()
-        ));
-    }
-    if recording.is_empty() {
-        return Err("deconvolve_sweep: empty input".to_string());
-    }
     if sample_rate == 0 {
         return Err("deconvolve_sweep: zero sample_rate".to_string());
     }
 
-    let n = recording.len();
+    // Keep the complete capture, including its reverberant tail. Padding only
+    // to this common FFT length prevents a truncated tail from wrapping into
+    // the start of the deconvolved impulse response.
+    let n = recording.len().max(reference.len());
     let fft_size = n.next_power_of_two();
-
-    let mut y: Vec<Complex<f32>> = recording.iter().map(|&s| Complex::new(s, 0.0)).collect();
-    y.resize(fft_size, Complex::new(0.0, 0.0));
-    let mut x: Vec<Complex<f32>> = reference.iter().map(|&s| Complex::new(s, 0.0)).collect();
-    x.resize(fft_size, Complex::new(0.0, 0.0));
-
-    let fft = plan_fft_forward(fft_size);
-    fft.process(&mut y);
-    fft.process(&mut x);
-
-    // Regularisation: 60 dB below the sweep's peak bin magnitude.
-    let x_peak_sq = x
+    let recording_f64: Vec<f64> = recording.iter().map(|&sample| sample as f64).collect();
+    let reference_f64: Vec<f64> = reference.iter().map(|&sample| sample as f64).collect();
+    let spectrum = deconvolve_sweep_f64_spectrum(&recording_f64, &reference_f64, fft_size)?;
+    Ok(spectrum[..fft_size / 2 + 1]
         .iter()
-        .map(|c| c.norm_sqr())
-        .fold(0.0_f32, f32::max)
-        .max(f32::MIN_POSITIVE);
-    // A 60 dB amplitude ratio is 1e-6 in squared magnitude. Clamp after
-    // multiplication so a silent reference cannot underflow the denominator
-    // to zero and produce NaNs.
-    let eps_sq = (x_peak_sq * 1e-6).max(f32::MIN_POSITIVE);
-
-    let spectrum_size = fft_size / 2 + 1;
-    let mut h = Vec::with_capacity(spectrum_size);
-    for k in 0..spectrum_size {
-        // H = Y / X with Tikhonov-style regularisation:
-        //   H = (Y · conj(X)) / (|X|² + ε²)
-        let yk = y[k];
-        let xk = x[k];
-        let num = yk * xk.conj();
-        let den = xk.norm_sqr() + eps_sq;
-        h.push(num / den);
-    }
-    Ok(h)
+        .map(|value| Complex::new(value.re as f32, value.im as f32))
+        .collect())
 }

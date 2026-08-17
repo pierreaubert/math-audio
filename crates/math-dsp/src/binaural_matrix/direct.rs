@@ -7,11 +7,7 @@ use std::f64::consts::PI;
 pub fn direct_peak_sample(ir: &[f64]) -> usize {
     ir.iter()
         .enumerate()
-        .max_by(|a, b| {
-            a.1.abs()
-                .partial_cmp(&b.1.abs())
-                .unwrap_or(std::cmp::Ordering::Equal)
-        })
+        .max_by(|a, b| a.1.abs().total_cmp(&b.1.abs()))
         .map(|(idx, _)| idx)
         .unwrap_or(0)
 }

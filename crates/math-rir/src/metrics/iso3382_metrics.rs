@@ -32,11 +32,60 @@ pub struct Iso3382Metrics {
     pub t30_r2: f64,
 }
 
+/// Compact verdict for one ISO 3382 band, avoiding a caller-side collection
+/// of NaN checks and fit thresholds.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Iso3382QualityVerdict {
+    /// True only when all decay fits and scalar energy metrics are usable.
+    pub usable: bool,
+    /// Whether EDT, T20, and T30 all meet the r² acceptance threshold.
+    pub decay_fits_valid: bool,
+    /// Number of finite scalar metrics out of the ten reported fields.
+    pub finite_metric_count: usize,
+    /// Human-readable reasons for an unusable result.
+    pub issues: Vec<String>,
+}
+
 impl Iso3382Metrics {
     /// Returns `true` if every fitted decay region had `r² ≥ 0.95` —
     /// the conventional ISO 3382-1 acceptance threshold.
     pub fn fit_is_valid(&self) -> bool {
         self.edt_r2 >= 0.95 && self.t20_r2 >= 0.95 && self.t30_r2 >= 0.95
+    }
+
+    /// Aggregate the NaN sentinel and decay-fit checks into one verdict.
+    pub fn quality_verdict(&self) -> Iso3382QualityVerdict {
+        let values = [
+            self.edt_s,
+            self.t20_s,
+            self.t30_s,
+            self.c50_db,
+            self.c80_db,
+            self.d50,
+            self.ts_s,
+            self.edt_r2,
+            self.t20_r2,
+            self.t30_r2,
+        ];
+        let finite_metric_count = values.iter().filter(|value| value.is_finite()).count();
+        let decay_fits_valid = self.fit_is_valid();
+        let mut issues = Vec::new();
+        if !decay_fits_valid {
+            issues.push("one or more decay fits have invalid or insufficient r²".to_string());
+        }
+        if finite_metric_count != values.len() {
+            issues.push(format!(
+                "{} of {} ISO 3382 metrics are non-finite",
+                values.len() - finite_metric_count,
+                values.len()
+            ));
+        }
+        Iso3382QualityVerdict {
+            usable: issues.is_empty(),
+            decay_fits_valid,
+            finite_metric_count,
+            issues,
+        }
     }
 }
 

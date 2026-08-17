@@ -57,7 +57,7 @@ pub use bands::{
 pub use config::SsirConfig;
 pub use math_audio_iir_fir::filtfilt;
 pub use metrics::{
-    DecayCurve, DecayWorkspace, Iso3382Metrics, analyze_iso3382,
+    DecayCurve, DecayWorkspace, Iso3382Metrics, Iso3382QualityVerdict, analyze_iso3382,
     analyze_iso3382_bands_with_contexts, analyze_iso3382_with_workspace, estimate_noise_cutoff,
     schroeder_curve,
 };

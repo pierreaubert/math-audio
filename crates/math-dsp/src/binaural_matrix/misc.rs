@@ -54,27 +54,25 @@ pub fn deconvolve_sweep_to_ir(
     if recording.is_empty() || reference.is_empty() {
         return Err("recording and reference must be non-empty".to_string());
     }
+    if recording.len() < reference.len() {
+        return Err(format!(
+            "recording len {} is shorter than reference len {}",
+            recording.len(),
+            reference.len()
+        ));
+    }
     if fft_size < recording.len().max(reference.len()).next_power_of_two() {
         return Err("fft_size is too small for recording/reference".to_string());
     }
-    let mut y = vec![Complex64::new(0.0, 0.0); fft_size];
-    let mut x = vec![Complex64::new(0.0, 0.0); fft_size];
-    for (idx, value) in recording.iter().enumerate() {
-        y[idx] = Complex64::new(*value, 0.0);
+    if recording
+        .iter()
+        .chain(reference)
+        .any(|sample| !sample.is_finite())
+    {
+        return Err("recording and reference must contain only finite samples".to_string());
     }
-    for (idx, value) in reference.iter().enumerate() {
-        x[idx] = Complex64::new(*value, 0.0);
-    }
+    let mut y = crate::analysis::deconvolve_sweep_f64_spectrum(recording, reference, fft_size)?;
     let mut planner = FftPlanner::<f64>::new();
-    let fft = planner.plan_fft_forward(fft_size);
-    fft.process(&mut y);
-    fft.process(&mut x);
-    let peak = x.iter().map(|v| v.norm()).fold(0.0, f64::max).max(1e-20);
-    let eps_sq = (peak * 1e-3).powi(2);
-    for idx in 0..fft_size {
-        let denom = x[idx].norm_sqr() + eps_sq;
-        y[idx] = y[idx] * x[idx].conj() / denom;
-    }
     let ifft = planner.plan_fft_inverse(fft_size);
     ifft.process(&mut y);
     Ok(y.into_iter().map(|v| v.re / fft_size as f64).collect())

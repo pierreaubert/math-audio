@@ -1,8 +1,14 @@
 /// Logarithmic interpolation
 pub(super) fn interpolate_log(x: &[f32], y: &[f32], x_new: &[f32]) -> Vec<f32> {
+    if x.is_empty() || y.is_empty() || x.len() != y.len() {
+        return vec![0.0; x_new.len()];
+    }
     x_new
         .iter()
         .map(|&freq| {
+            if !freq.is_finite() {
+                return 0.0;
+            }
             let idx = x.partition_point(|&f| f < freq).min(x.len() - 1);
 
             if idx == 0 {
@@ -27,9 +33,15 @@ pub(super) fn interpolate_log(x: &[f32], y: &[f32], x_new: &[f32]) -> Vec<f32> {
 /// Logarithmic interpolation for phase data (degrees).
 /// Uses circular interpolation to correctly handle ±180° wrap boundaries.
 pub(super) fn interpolate_log_phase(x: &[f32], phase_deg: &[f32], x_new: &[f32]) -> Vec<f32> {
+    if x.is_empty() || phase_deg.is_empty() || x.len() != phase_deg.len() {
+        return vec![0.0; x_new.len()];
+    }
     x_new
         .iter()
         .map(|&freq| {
+            if !freq.is_finite() {
+                return 0.0;
+            }
             let idx = x.partition_point(|&f| f < freq).min(x.len() - 1);
 
             if idx == 0 {
@@ -66,8 +78,14 @@ pub(super) fn interpolate_fr(
     unwrapped_phase_deg: &[f32],
     target_freq: f32,
 ) -> (f32, f32) {
-    if frequencies.is_empty() {
+    if frequencies.is_empty()
+        || frequencies.len() != magnitude_db.len()
+        || frequencies.len() != unwrapped_phase_deg.len()
+    {
         return (0.0, 0.0);
+    }
+    if !target_freq.is_finite() {
+        return (f32::NAN, f32::NAN);
     }
     if target_freq <= frequencies[0] {
         return (magnitude_db[0], unwrapped_phase_deg[0]);
@@ -78,7 +96,7 @@ pub(super) fn interpolate_fr(
     }
 
     // Binary search for the interval containing target_freq
-    let idx = match frequencies.binary_search_by(|f| f.partial_cmp(&target_freq).unwrap()) {
+    let idx = match frequencies.binary_search_by(|f| f.total_cmp(&target_freq)) {
         Ok(i) => return (magnitude_db[i], unwrapped_phase_deg[i]),
         Err(i) => i, // target_freq is between frequencies[i-1] and frequencies[i]
     };

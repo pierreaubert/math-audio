@@ -198,6 +198,41 @@ mod gd_1c_tests {
     }
 
     #[test]
+    fn deconvolve_accepts_and_retains_a_recording_tail() {
+        let reference = crate::signals::gen_log_sweep(100.0, 8_000.0, 0.5, 48_000, 0.04);
+        let mut recording = vec![0.0_f32; reference.len() + 512];
+        for (index, &sample) in reference.iter().enumerate() {
+            recording[index] = sample;
+        }
+        recording[reference.len() + 300] = 0.2;
+        let response = deconvolve_sweep(&recording, &reference, 48_000).unwrap();
+        assert_eq!(response.len(), recording.len().next_power_of_two() / 2 + 1);
+    }
+
+    #[test]
+    fn canonical_ess_returns_transfer_ir_and_harmonics() {
+        let sample_rate = 48_000;
+        let reference = crate::signals::gen_log_sweep(100.0, 8_000.0, 0.5, sample_rate, 0.08);
+        let delay = 37;
+        let mut recording = vec![0.0_f32; delay + reference.len() + 256];
+        for (index, &sample) in reference.iter().enumerate() {
+            recording[delay + index] = sample * 0.5;
+        }
+        recording[delay + reference.len() + 120] = 0.1;
+        let result = super::measurement::analyze_log_sweep_recording(
+            &recording,
+            &reference,
+            sample_rate,
+            (100.0, 8_000.0),
+        )
+        .unwrap();
+        assert!((result.lag.lag_samples - delay as isize).abs() <= 1);
+        assert_eq!(result.harmonic_impulse_responses.len(), 4);
+        assert_eq!(result.frequency_response.len(), result.frequencies.len());
+        assert!(result.thd_percent.iter().all(|value| value.is_finite()));
+    }
+
+    #[test]
     fn noise_floor_pure_silence_is_very_low() {
         let silence = vec![0.0_f32; 4096];
         let nf = estimate_noise_floor_db_from_silence(&silence, 48_000);
@@ -281,6 +316,271 @@ fn test_estimate_lag_zero() {
     let signal = vec![1.0, 2.0, 3.0, 4.0, 5.0];
     let lag = estimate_lag(&signal, &signal).unwrap();
     assert_eq!(lag, 0);
+}
+
+#[test]
+fn lag_confidence_rejects_silence() {
+    let silence = vec![0.0_f32; 128];
+    let error = super::estimate::estimate_lag_with_confidence(&silence, &silence).unwrap_err();
+    assert!(error.contains("no energy"), "unexpected error: {error}");
+}
+
+#[test]
+fn microphone_compensation_interpolates_on_log_frequency() {
+    let compensation =
+        MicrophoneCompensation::new(vec![10.0, 100.0, 1000.0], vec![0.0, 10.0, 20.0]).unwrap();
+    assert!((compensation.interpolate_at(100.0) - 10.0).abs() < 1e-6);
+    assert!((compensation.interpolate_at((10.0_f32 * 1000.0).sqrt()) - 10.0).abs() < 1e-5);
+    let corrected = compensation.apply_to_response(&[10.0, 100.0, 1000.0], &[1.0, 11.0, 21.0]);
+    assert_eq!(corrected, vec![1.0, 1.0, 1.0]);
+}
+
+#[test]
+fn linear_phase_fit_recovers_delay_from_wrapped_phase() {
+    let delay_seconds = 0.0025_f32;
+    let frequencies = [100.0_f32, 200.0, 300.0, 400.0];
+    let phases: Vec<f32> = frequencies
+        .iter()
+        .map(|frequency| {
+            (-2.0 * PI * *frequency * delay_seconds)
+                .to_degrees()
+                .rem_euclid(360.0)
+        })
+        .collect();
+    let fitted = super::measurement::fit_linear_phase_delay_seconds(&frequencies, &phases).unwrap();
+    assert!((fitted - delay_seconds as f64).abs() < 1e-6);
+}
+
+#[test]
+fn robust_average_rejects_a_bad_capture() {
+    let good = vec![Complex::new(1.0_f32, 0.0); 4];
+    let bad = vec![Complex::new(10.0_f32, 0.0); 4];
+    let averaged =
+        super::measurement::average_deconvolved_sweeps(&[good.clone(), good.clone(), good, bad])
+            .unwrap();
+    assert_eq!(averaged.accepted_indices, vec![0, 1, 2]);
+    assert_eq!(averaged.rejected_indices, vec![3]);
+    assert!(
+        averaged
+            .response
+            .iter()
+            .all(|value| (value.re - 1.0).abs() < 1e-6)
+    );
+    assert!(
+        averaged.coherence.is_empty(),
+        "three accepted captures do not support coherence"
+    );
+}
+
+#[test]
+fn lag_confidence_is_normalized_and_selects_the_normalized_peak() {
+    let mut reference = vec![0.0_f32; 128];
+    for (index, sample) in reference[12..44].iter_mut().enumerate() {
+        *sample = ((index as f32 + 1.0) * 0.17).sin();
+    }
+    let delay = 19;
+    let mut recorded = vec![0.0_f32; reference.len() + delay];
+    recorded[delay..].copy_from_slice(&reference);
+
+    let estimate = super::estimate::estimate_lag_with_confidence(&reference, &recorded)
+        .expect("delayed copy must have a confident lag");
+    assert_eq!(estimate.lag_samples, delay as isize);
+    assert!(estimate.normalized_peak > 0.99, "{estimate:?}");
+    assert!(estimate.confidence > 0.05, "{estimate:?}");
+}
+
+#[test]
+fn envelope_confidence_uses_the_envelope_peak() {
+    let sample_rate = 48_000_u32;
+    let probe = crate::signals::gen_narrowband_probe(1024, sample_rate, 0.5, 42, 800.0, 2_000.0);
+    let delay = 73;
+    let mut recorded = vec![0.0_f32; probe.len() + delay + 32];
+    for (index, &sample) in probe.iter().enumerate() {
+        recorded[index + delay] = sample * 0.4;
+    }
+
+    let result = cross_correlate_envelope(&probe, &recorded, sample_rate).unwrap();
+    assert!((result.peak_sample as isize - delay as isize).abs() <= 2);
+    assert!(result.normalized_peak > 0.5, "{result:?}");
+    assert!(result.confidence > 0.05, "{result:?}");
+}
+
+#[test]
+fn repeated_ess_recordings_align_before_averaging() {
+    let reference: Vec<f32> = (0..64)
+        .map(|index| ((index as f32 + 1.0) * 0.23).sin() * 0.5)
+        .collect();
+    let delays = [7_usize, 11, 13, 17];
+    let recordings: Vec<Vec<f32>> = delays
+        .iter()
+        .map(|&delay| {
+            let mut recording = vec![0.0_f32; delay + reference.len() + 16];
+            recording[delay..delay + reference.len()].copy_from_slice(&reference);
+            recording
+        })
+        .collect();
+
+    let result = super::measurement::average_ess_recordings(&recordings, &reference, 48_000)
+        .expect("repeated captures should be aligned and averaged");
+    assert_eq!(
+        result
+            .lag_estimates
+            .iter()
+            .map(|estimate| estimate.lag_samples as usize)
+            .collect::<Vec<_>>(),
+        delays
+    );
+    assert_eq!(result.averaged.accepted_indices, vec![0, 1, 2, 3]);
+    assert_eq!(result.averaged.rejected_indices, Vec::<usize>::new());
+    assert_eq!(result.averaged.response.len(), 65);
+}
+
+#[test]
+fn h1_transfer_estimator_averages_cross_spectra() {
+    let inputs = vec![
+        vec![Complex::new(1.0_f32, 0.0), Complex::new(2.0, 0.0)],
+        vec![Complex::new(0.5, 0.0), Complex::new(1.5, 0.0)],
+    ];
+    let outputs = inputs
+        .iter()
+        .map(|spectrum| spectrum.iter().map(|value| *value * 2.0).collect())
+        .collect::<Vec<Vec<Complex<f32>>>>();
+    let estimate = super::measurement::compute_h1_transfer_response(&inputs, &outputs).unwrap();
+    assert!(estimate.iter().all(|value| (value.re - 2.0).abs() < 1e-6));
+}
+
+#[test]
+fn quality_report_exposes_missing_data_and_rejects_non_finite_recordings() {
+    let lag = LagEstimate {
+        lag_samples: 0,
+        normalized_peak: 1.0,
+        peak_to_sidelobe_db: f32::INFINITY,
+        confidence: 1.0,
+    };
+    let partial = super::measurement::assess_measurement_quality(
+        &[0.0, 0.1],
+        &lag,
+        None,
+        None,
+        None,
+        MeasurementQualityConfig::default(),
+    );
+    assert!(partial.trustworthy);
+    assert!(!partial.quality_data_complete);
+    assert!(partial.missing_metrics.contains(&"coherence".to_string()));
+
+    let required = MeasurementQualityConfig {
+        require_coherence: true,
+        require_snr: true,
+        ..MeasurementQualityConfig::default()
+    };
+    let rejected = super::measurement::assess_measurement_quality(
+        &[f32::NAN, 0.1],
+        &lag,
+        None,
+        None,
+        None,
+        required,
+    );
+    assert!(!rejected.trustworthy);
+    assert!(rejected.score == 0.0);
+    assert!(
+        rejected
+            .issues
+            .iter()
+            .any(|issue| issue.contains("non-finite"))
+    );
+}
+
+#[test]
+fn quality_report_from_silence_derives_snr_data() {
+    let lag = LagEstimate {
+        lag_samples: 0,
+        normalized_peak: 1.0,
+        peak_to_sidelobe_db: f32::INFINITY,
+        confidence: 1.0,
+    };
+    let silence = vec![0.0_f32; 1024];
+    let measured = vec![0.0_f32; 1024 / 2 + 1];
+    let report = super::measurement::assess_measurement_quality_from_silence(
+        &[0.0, 0.1],
+        &lag,
+        Some(&vec![1.0_f32; 1024 / 2 + 1]),
+        Some(&measured),
+        &silence,
+        48_000,
+        MeasurementQualityConfig::default(),
+    );
+
+    assert!(report.quality_data_complete);
+    assert_eq!(report.snr_db.len(), measured.len());
+    assert!(report.median_snr_db.is_some());
+}
+
+#[test]
+fn clock_drift_correction_resamples_around_the_measured_lag() {
+    let mut recording = vec![0.0_f32; 2_000];
+    recording[1_010] = 1.0;
+    let estimate = ClockDriftEstimate {
+        ppm: 1_000.0,
+        start_lag_samples: 10,
+        end_lag_samples: 11,
+        confidence: 1.0,
+    };
+    let corrected = super::measurement::correct_clock_drift(&recording, &estimate).unwrap();
+    assert!(corrected[1_009] > 0.9, "peak was not moved earlier");
+    assert!(corrected[1_010] < 0.2, "uncorrected peak remains dominant");
+}
+
+#[test]
+fn clock_drift_estimator_reports_zero_for_a_stable_clock() {
+    let reference: Vec<f32> = (0..256)
+        .map(|index| ((index as f32 * 0.17).sin() + (index as f32 * 0.043).cos()) * 0.4)
+        .collect();
+    let delay = 23;
+    let mut recording = vec![0.0_f32; delay + reference.len() + 32];
+    recording[delay..delay + reference.len()].copy_from_slice(&reference);
+
+    let estimate = super::measurement::estimate_clock_drift(&reference, &recording, 48_000)
+        .expect("a stable delayed capture should produce a drift estimate");
+    assert!(estimate.ppm.abs() < 1.0, "{estimate:?}");
+    assert!(estimate.confidence > 0.05, "{estimate:?}");
+}
+
+#[test]
+fn group_delay_recovers_a_linear_phase_delay() {
+    let frequencies = [100.0_f32, 200.0, 300.0, 400.0];
+    let delay_ms = 2.5_f32;
+    let phase: Vec<f32> = frequencies
+        .iter()
+        .map(|frequency| -360.0 * *frequency * delay_ms / 1_000.0)
+        .collect();
+    let group_delay = super::compute::compute_group_delay(&frequencies, &phase);
+    assert!(
+        group_delay
+            .iter()
+            .all(|value| (*value - delay_ms).abs() < 1e-4)
+    );
+}
+
+#[test]
+fn mls_deconvolution_recovers_a_short_circular_ir() {
+    let mls = crate::signals::gen_mls(8, 0.5);
+    let ir = [0.4_f32, -0.15, 0.08];
+    let mut recording = vec![0.0_f32; mls.len()];
+    for (index, output) in recording.iter_mut().enumerate() {
+        for (tap, &coefficient) in ir.iter().enumerate() {
+            *output += coefficient * mls[(index + mls.len() - tap) % mls.len()];
+        }
+    }
+    let recovered = super::measurement::deconvolve_mls(&recording, &mls).unwrap();
+    for (index, &expected) in ir.iter().enumerate() {
+        assert!(
+            (recovered[index] - expected).abs() < 2e-3,
+            "tap {index}: {} != {expected}",
+            recovered[index]
+        );
+    }
 }
 
 #[test]

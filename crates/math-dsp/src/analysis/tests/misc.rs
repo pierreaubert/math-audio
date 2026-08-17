@@ -96,6 +96,44 @@ fn test_analyze_recording_normal_channel() {
 }
 
 #[test]
+fn test_analyze_recording_sweep_range_uses_canonical_ess_path() {
+    let sample_rate = 48_000;
+    let reference = generate_test_sweep(100.0, 8_000.0, 0.08, sample_rate, 0.5);
+    let delay = 41;
+    let mut recorded = vec![0.0_f32; delay + reference.len() + 128];
+    for (index, &sample) in reference.iter().enumerate() {
+        recorded[delay + index] = sample * 0.5;
+    }
+
+    let dir = std::env::temp_dir().join(format!("sotf_test_canonical_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let wav_path = dir.join("canonical.wav");
+    write_test_wav(&wav_path, &recorded, sample_rate);
+
+    let result =
+        analyze_recording(&wav_path, &reference, sample_rate, Some((100.0, 8_000.0))).unwrap();
+    std::fs::remove_dir_all(&dir).ok();
+
+    assert_eq!(result.frequencies.len(), 2_000);
+    assert_eq!(result.spl_db.len(), result.frequencies.len());
+    assert_eq!(result.excess_group_delay_ms.len(), result.frequencies.len());
+    assert!(
+        result
+            .excess_group_delay_ms
+            .iter()
+            .all(|value| value.is_finite())
+    );
+    assert!((result.estimated_lag_samples - delay as isize).abs() <= 1);
+    assert!(
+        result
+            .spl_db
+            .iter()
+            .filter(|value| value.is_finite())
+            .any(|value| *value < -3.0 && *value > -12.0)
+    );
+}
+
+#[test]
 fn test_analyze_recording_silent_channel() {
     // Simulate a disconnected speaker: reference sweep played but recording
     // is just low-level noise (no speaker output)

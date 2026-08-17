@@ -87,6 +87,10 @@ pub fn gen_two_tone(
 /// Sweeps from `f_start` to `f_end` Hz over the specified duration.
 /// Useful for frequency response measurements.
 ///
+/// This is the raw sweep generator and intentionally has no fade. Use
+/// [`crate::signals::prepare_signal_for_playback`] when a measurement playback
+/// needs pre-roll, post-roll, and edge fades.
+///
 /// # Arguments
 /// * `f_start` - Starting frequency in Hz
 /// * `f_end` - Ending frequency in Hz
@@ -100,6 +104,35 @@ pub fn gen_log_sweep(
     sample_rate: u32,
     duration: f32,
 ) -> Vec<f32> {
+    try_gen_log_sweep(f_start, f_end, amp, sample_rate, duration).unwrap_or_default()
+}
+
+/// Fallible logarithmic sweep generator with explicit parameter validation.
+pub fn try_gen_log_sweep(
+    f_start: f32,
+    f_end: f32,
+    amp: f32,
+    sample_rate: u32,
+    duration: f32,
+) -> Result<Vec<f32>, String> {
+    if !f_start.is_finite()
+        || !f_end.is_finite()
+        || f_start <= 0.0
+        || f_end <= 0.0
+        || (f_end - f_start).abs() <= f32::EPSILON
+    {
+        return Err(
+            "gen_log_sweep: frequencies must be finite, positive, and distinct".to_string(),
+        );
+    }
+    if sample_rate == 0 || !duration.is_finite() || duration <= 0.0 {
+        return Err(
+            "gen_log_sweep: sample_rate and duration must be greater than zero".to_string(),
+        );
+    }
+    if !amp.is_finite() {
+        return Err("gen_log_sweep: amplitude must be finite".to_string());
+    }
     let n_frames = frames_for(duration, sample_rate);
     let mut signal = Vec::with_capacity(n_frames);
 
@@ -115,7 +148,7 @@ pub fn gen_log_sweep(
         signal.push(clip(amp * phase.sin() as f32));
     }
 
-    signal
+    Ok(signal)
 }
 
 /// Generate an octave-scaled logarithmic frequency sweep.
@@ -274,12 +307,20 @@ pub fn gen_log_sweep_octave_scaled(
 /// * `sample_rate` - Sample rate in Hz
 /// * `duration` - Duration in seconds
 pub fn gen_white_noise(amp: f32, sample_rate: u32, duration: f32) -> Vec<f32> {
+    gen_white_noise_seeded(amp, sample_rate, duration, 1234567890)
+}
+
+/// Generate white noise with a caller-controlled deterministic seed.
+pub fn gen_white_noise_seeded(
+    amp: f32,
+    sample_rate: u32,
+    duration: f32,
+    mut seed: u64,
+) -> Vec<f32> {
     let n_frames = frames_for(duration, sample_rate);
     let mut signal = Vec::with_capacity(n_frames);
 
     // Simple LCG random number generator for deterministic output
-    let mut seed: u64 = 1234567890;
-
     for _ in 0..n_frames {
         // LCG constants from Numerical Recipes
         seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
@@ -303,12 +344,16 @@ pub fn gen_white_noise(amp: f32, sample_rate: u32, duration: f32) -> Vec<f32> {
 /// * `sample_rate` - Sample rate in Hz
 /// * `duration` - Duration in seconds
 pub fn gen_pink_noise(amp: f32, sample_rate: u32, duration: f32) -> Vec<f32> {
+    gen_pink_noise_seeded(amp, sample_rate, duration, 9876543210)
+}
+
+/// Generate pink noise with a caller-controlled deterministic seed.
+pub fn gen_pink_noise_seeded(amp: f32, sample_rate: u32, duration: f32, mut seed: u64) -> Vec<f32> {
     let n_frames = frames_for(duration, sample_rate);
     let mut signal = Vec::with_capacity(n_frames);
 
     // Voss-McCartney algorithm (Paul Kellett's implementation)
     // Uses multiple white noise generators at different rates
-    let mut seed: u64 = 9876543210;
     let mut b0 = 0.0f32;
     let mut b1 = 0.0f32;
     let mut b2 = 0.0f32;
@@ -439,11 +484,15 @@ pub fn gen_step(amp: f32, sample_rate: u32, duration: f32) -> Vec<f32> {
 /// * `sample_rate` - Sample rate in Hz
 /// * `duration` - Duration in seconds
 pub fn gen_m_noise(amp: f32, sample_rate: u32, duration: f32) -> Vec<f32> {
+    gen_m_noise_seeded(amp, sample_rate, duration, 1122334455)
+}
+
+/// Generate ITU-R 468-weighted noise with a caller-controlled seed.
+pub fn gen_m_noise_seeded(amp: f32, sample_rate: u32, duration: f32, mut seed: u64) -> Vec<f32> {
     let n_frames = frames_for(duration, sample_rate);
     let srate = sample_rate as f64;
 
     // Generate white noise
-    let mut seed: u64 = 1122334455;
     let mut noise_buffer = Vec::with_capacity(n_frames);
     for _ in 0..n_frames {
         seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);

@@ -54,13 +54,21 @@ pub mod true_peak;
 
 // Re-export commonly used types
 pub use analysis::{
-    AnalysisResult, CrossCorrelationEnvelopeResult, MicrophoneCompensation, WavAnalysisConfig,
-    WavAnalysisOutput, WindowedFrequencyResponse, analyze_recording, analyze_wav_buffer,
-    analyze_wav_file, compute_average_response, compute_clarity_broadband,
-    compute_clarity_spectrum, compute_group_delay, compute_impulse_response_from_fr,
-    compute_rt60_broadband, compute_rt60_spectrum, compute_spectrogram, compute_windowed_fr,
-    cross_correlate_envelope, find_db_point, read_analysis_csv, smooth_response_f32,
-    smooth_response_f64, write_analysis_csv, write_wav_analysis_csv,
+    AnalysisResult, AveragedEssResponse, AveragedResponse, ClockDriftEstimate,
+    CompensationOutOfRange, CrossCorrelationEnvelopeResult, EssAnalysisResult, LagEstimate,
+    MeasurementQualityConfig, MeasurementQualityReport, MicrophoneCompensation, WavAnalysisConfig,
+    WavAnalysisOutput, WindowedFrequencyResponse, analyze_ess_recording,
+    analyze_log_sweep_recording, analyze_recording, analyze_wav_buffer, analyze_wav_file,
+    assess_measurement_quality, assess_measurement_quality_from_silence, average_complex_responses,
+    average_deconvolved_sweeps, average_ess_recordings, compute_average_response,
+    compute_clarity_spectrum, compute_group_delay, compute_h1_transfer_response,
+    compute_impulse_response_from_fr, compute_rt60_broadband, compute_rt60_spectrum,
+    compute_spectrogram, compute_windowed_fr, correct_clock_drift, cross_correlate_envelope,
+    deconvolve_mls, deconvolve_mls_to_ir, deconvolve_sweep, detect_clipping,
+    effective_sweep_duration_seconds, estimate_clock_drift, estimate_lag_with_confidence,
+    extract_log_sweep_harmonic_impulse_responses, find_db_point, fit_linear_phase_delay_seconds,
+    read_analysis_csv, smooth_response_f32, smooth_response_f64, write_analysis_csv,
+    write_wav_analysis_csv,
 };
 
 pub use fdw::{FdwAnalysis, FdwConfig, analyze_impulse_response_fdw};
@@ -80,9 +88,10 @@ pub use binaural_matrix::{
 
 pub use signals::{
     add_silence_padding, apply_fade_in, apply_fade_out, clip, frames_for, gen_allpass_probe,
-    gen_dirac, gen_log_sweep, gen_m_noise, gen_mls, gen_narrowband_probe, gen_pink_noise, gen_tone,
-    gen_two_tone, gen_white_noise, interleave_per_channel, mono_to_stereo,
-    prepare_signal_for_playback, prepare_signal_for_playback_channels, replicate_mono,
+    gen_dirac, gen_log_sweep, gen_m_noise, gen_m_noise_seeded, gen_mls, gen_narrowband_probe,
+    gen_pink_noise, gen_pink_noise_seeded, gen_tone, gen_two_tone, gen_white_noise,
+    gen_white_noise_seeded, interleave_per_channel, mono_to_stereo, prepare_signal_for_playback,
+    prepare_signal_for_playback_channels, replicate_mono, try_gen_log_sweep,
 };
 
 pub use replaygain::{ReplayGainAnalyzer, ReplayGainInfo, ReplayGainTrackData, compute_album_gain};

@@ -246,7 +246,16 @@ pub(super) fn compute_welch_spectrum_into(
 
         let re = phase_real_sum[i] / processed_windows as f32;
         let im = phase_imag_sum[i] / processed_windows as f32;
-        phases_deg_out[i] = im.atan2(re) * 180.0 / PI;
+        // A phase angle is only meaningful when the windows agree. Compare
+        // the mean phasor magnitude with the RMS magnitude; cancellation from
+        // an unaligned/non-stationary signal otherwise produces an arbitrary
+        // angle that looks deceptively precise.
+        let phase_coherence = (re * re + im * im).sqrt() / mag.max(1e-10);
+        phases_deg_out[i] = if phase_coherence >= 0.1 {
+            im.atan2(re) * 180.0 / PI
+        } else {
+            0.0
+        };
 
         freqs_out[i] = i as f32 * sample_rate as f32 / fft_size as f32;
     }
@@ -390,6 +399,22 @@ pub(super) fn compute_thd_from_ir(
         return (vec![0.0; frequencies.len()], Vec::new());
     }
 
+    if !sample_rate.is_finite()
+        || sample_rate <= 0.0
+        || !start_freq.is_finite()
+        || !end_freq.is_finite()
+        || start_freq <= 0.0
+        || end_freq <= start_freq
+        || !duration.is_finite()
+        || duration <= 0.0
+        || fundamental_db.len() != frequencies.len()
+    {
+        return (
+            vec![0.0; frequencies.len()],
+            vec![vec![-120.0; frequencies.len()]; 4],
+        );
+    }
+
     let num_harmonics = 4; // Compute 2nd, 3rd, 4th, 5th
     // Initialize to -120 dB (very low but not absurdly so)
     let mut harmonics_db = vec![vec![-120.0; frequencies.len()]; num_harmonics];
@@ -398,7 +423,7 @@ pub(super) fn compute_thd_from_ir(
     let peak_idx = impulse
         .iter()
         .enumerate()
-        .max_by(|(_, a), (_, b)| a.abs().partial_cmp(&b.abs()).unwrap())
+        .max_by(|(_, a), (_, b)| a.abs().total_cmp(&b.abs()))
         .map(|(i, _)| i)
         .unwrap_or(0);
 
@@ -701,7 +726,14 @@ pub(super) fn compute_fft_padded(
 /// Phase is unwrapped before differentiation to avoid spurious spikes
 /// at ±180° wrap boundaries.
 pub fn compute_group_delay(frequencies: &[f32], phase_deg: &[f32]) -> Vec<f32> {
-    if frequencies.len() < 2 {
+    if frequencies.len() < 2
+        || frequencies.len() != phase_deg.len()
+        || frequencies
+            .iter()
+            .chain(phase_deg)
+            .any(|value| !value.is_finite())
+        || frequencies.windows(2).any(|window| window[1] <= window[0])
+    {
         return vec![0.0; frequencies.len()];
     }
 
