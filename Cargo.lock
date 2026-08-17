@@ -1789,7 +1789,7 @@ dependencies = [
 
 [[package]]
 name = "math-dsp"
-version = "0.5.22"
+version = "0.5.23"
 dependencies = [
  "approx",
  "clap",
@@ -1848,7 +1848,7 @@ dependencies = [
 
 [[package]]
 name = "math-rir"
-version = "0.5.6"
+version = "0.5.7"
 dependencies = [
  "criterion",
  "math-iir-fir",
