@@ -274,6 +274,13 @@ qa-iir-fir: (_qa "math-iir-fir" qa_cov_iir_fir) examples-iir
 	cargo bench -p math-iir-fir --bench response_bench -- --quick
 	cargo bench -p math-iir-fir --bench fir_design_bench -- --quick
 
+qa-optimisation: (_qa "math-optimisation" qa_cov_optimisation) examples-optimisation
+	cargo build --release --bin run-de -p math-optimisation
+	cargo build --release --bin benchmark-convergence -p math-optimisation
+	cargo build --release --bin plot-de -p math-optimisation --features plotly
+	cargo bench -p math-optimisation --bench de_bench -- --quick
+	cargo bench -p math-optimisation --bench cmaes_bench -- --quick
+
 # ----------------------------------------------------------------------
 # POST
 # ----------------------------------------------------------------------
