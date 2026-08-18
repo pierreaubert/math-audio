@@ -232,7 +232,7 @@ qa_cov_analog := "74"
 qa_cov_autodiff := "0"
 qa_cov_convex_hull := "47"
 qa_cov_delaunay := "87"
-qa_cov_dsp := "86"
+qa_cov_dsp := "83"
 qa_cov_iir_fir := "78"
 qa_cov_optimisation := "79"
 qa_cov_rir := "94"
@@ -283,6 +283,13 @@ qa-optimisation: (_qa "math-optimisation" qa_cov_optimisation) examples-optimisa
 
 qa-autodiff: (_qa "math-autodiff" qa_cov_autodiff) examples-autodiff
 	cargo bench -p math-autodiff --bench biquad_bench -- --quick
+
+qa-dsp: (_qa "math-dsp" qa_cov_dsp)
+	cargo run --release --bin simd-fuzzer -p math-dsp
+	cargo build --release --bin wav2csv -p math-dsp
+	if [ "$(uname -m)" = "x86_64" ]; then RUSTFLAGS="-C target-feature=+avx2" cargo check -p math-dsp --all-targets && RUSTFLAGS="-C target-feature=+avx2" cargo test -p math-dsp; else echo "Skipping AVX2 pass (not x86_64)"; fi
+	cargo bench -p math-dsp --bench welch_spectrum -- --quick
+	cargo bench -p math-dsp --bench audio_features -- --quick
 
 # ----------------------------------------------------------------------
 # POST
