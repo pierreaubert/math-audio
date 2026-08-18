@@ -27,8 +27,11 @@ cargo test -p math-iir-fir test_name -- --nocapture
 cargo test -p math-autodiff test_name
 
 # QA suites
-just qa               # Run math QA suite
-just qa-math          # math-dsp fuzzer
+just qa               # Full workspace QA: per-crate ladder (fmt, clippy, tests,
+                      # coverage ratchet) + crate extras + workspace CI gates
+just qa-{crate}       # QA for one crate, e.g. just qa-dsp, just qa-analog,
+                      # qa-autodiff, qa-convex-hull, qa-delaunay, qa-iir-fir,
+                      # qa-optimisation, qa-rir, qa-test-functions
 
 # Format and lint
 just fmt              # Format all code
