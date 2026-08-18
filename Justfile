@@ -224,10 +224,34 @@ publish-math:
 # QA
 # ----------------------------------------------------------------------
 
-qa: qa-math
+# Per-crate coverage ratchet thresholds (lines %, measured 2026-08-18).
+# Raise these when coverage improves; never lower them.
+# Note: math-autodiff tests live in tests/ (integration), so --lib
+# instrumentation covers almost nothing; its ratchet is 0 until fixed.
+qa_cov_analog := "74"
+qa_cov_autodiff := "0"
+qa_cov_convex_hull := "47"
+qa_cov_delaunay := "87"
+qa_cov_dsp := "86"
+qa_cov_iir_fir := "78"
+qa_cov_optimisation := "79"
+qa_cov_rir := "94"
+qa_cov_test_functions := "90"
 
-qa-math:
-	cargo run --release --bin simd-fuzzer -p math-dsp
+[private]
+_qa crate threshold:
+	echo "==================== QA: {{crate}} ===================="
+	cargo fmt -p {{crate}} -- --check
+	cargo clippy -p {{crate}} --all-targets -- -D warnings
+	cargo test -p {{crate}} --lib --release
+	cargo test -p {{crate}} --tests --release
+	cargo test -p {{crate}} --doc
+	cargo bench -p {{crate}} --no-run
+	cargo llvm-cov -p {{crate}} --lib --summary-only --release --fail-under-lines {{threshold}}
+
+qa-convex-hull: (_qa "math-convex-hull" qa_cov_convex_hull)
+
+qa-delaunay: (_qa "math-delaunay" qa_cov_delaunay)
 
 # ----------------------------------------------------------------------
 # POST
