@@ -1,6 +1,6 @@
 [package]
 name = "math-analog"
-version = "0.5.0"
+version = "0.5.1"
 edition = { workspace = true }
 authors = { workspace = true }
 description = "Host-independent analog-style coloration models for audio DSP"
