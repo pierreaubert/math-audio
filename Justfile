@@ -268,6 +268,12 @@ qa-test-functions: (_qa "math-test-functions" qa_cov_test_functions) examples-te
 	cargo build --release --bin plot-functions -p math-test-functions --features plotly
 	cargo bench -p math-test-functions --bench eval -- --quick
 
+qa-iir-fir: (_qa "math-iir-fir" qa_cov_iir_fir) examples-iir
+	cargo build --release --bin filter_bench -p math-iir-fir
+	cargo bench -p math-iir-fir --bench biquad_bench -- --quick
+	cargo bench -p math-iir-fir --bench response_bench -- --quick
+	cargo bench -p math-iir-fir --bench fir_design_bench -- --quick
+
 # ----------------------------------------------------------------------
 # POST
 # ----------------------------------------------------------------------
