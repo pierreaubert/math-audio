@@ -284,9 +284,8 @@ fn time_frequency_energy(
 ) -> (f32, f32, f32) {
     let hop_fraction = config.hop_fraction.clamp(0.05, 1.0);
     let hop = ((window_samples as f32 * hop_fraction).round() as usize).max(1);
-    let direct_radius = ((kernel.half_support as f32)
-        * config.direct_gate_width_windows.max(0.0))
-    .round() as usize;
+    let direct_radius =
+        ((kernel.half_support as f32) * config.direct_gate_width_windows.max(0.0)).round() as usize;
 
     // Gate centers: multiples of hop below len, plus direct_sample and len-1,
     // in ascending order with duplicates removed (same set and order as the
@@ -416,9 +415,8 @@ mod tests {
             let half_support = (sigma_samples * 3.0).ceil() as usize;
             let hop_fraction = config.hop_fraction.clamp(0.05, 1.0);
             let hop = ((window_samples as f32 * hop_fraction).round() as usize).max(1);
-            let direct_radius = ((half_support as f32)
-                * config.direct_gate_width_windows.max(0.0))
-            .round() as usize;
+            let direct_radius = ((half_support as f32) * config.direct_gate_width_windows.max(0.0))
+                .round() as usize;
 
             let mut centers = Vec::with_capacity(ir.len() / hop + 3);
             let mut center = 0usize;

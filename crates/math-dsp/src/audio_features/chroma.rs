@@ -166,7 +166,12 @@ impl ChromaFeatureExtractor {
 
         let spectrum = self.compute_stft(samples);
         let tuning = estimate_tuning(sample_rate, &spectrum, self.window_size, 0.01, n_chroma)?;
-        let cache_key = (sample_rate, self.window_size, n_chroma, quantize_tuning(tuning));
+        let cache_key = (
+            sample_rate,
+            self.window_size,
+            n_chroma,
+            quantize_tuning(tuning),
+        );
 
         let filter = match self.filter_cache.get(&cache_key) {
             Some(f) => f,
@@ -910,9 +915,11 @@ mod tests {
     fn test_chroma_exactly_half_window_returns_err() {
         let signal = vec![0.5f32; WINDOW_SIZE / 2];
         assert!(compute_chroma_features(&signal, 22050).is_err());
-        assert!(ChromaFeatureExtractor::new()
-            .compute(&signal, 22050)
-            .is_err());
+        assert!(
+            ChromaFeatureExtractor::new()
+                .compute(&signal, 22050)
+                .is_err()
+        );
     }
 
     #[test]

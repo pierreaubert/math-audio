@@ -1146,7 +1146,10 @@ fn white_noise_statistical_sanity() {
         .sum::<f64>()
         / n;
     assert!(mean.abs() < 0.01, "mean {mean} too far from 0");
-    assert!((var - 1.0 / 3.0).abs() < 0.01, "variance {var} too far from 1/3");
+    assert!(
+        (var - 1.0 / 3.0).abs() < 0.01,
+        "variance {var} too far from 1/3"
+    );
     let lag1: f64 = signal
         .windows(2)
         .map(|w| (w[0] as f64 - mean) * (w[1] as f64 - mean))
@@ -1166,12 +1169,8 @@ fn pink_noise_rms_matches_amplitude() {
     // slowly (1/f correlation), so the seed is fixed: with seed 1 the
     // realized RMS sits 0.23% from the exact value, inside the 0.5% gate.
     let signal = gen_pink_noise_seeded(0.1, 48_000, 60.0, 1);
-    let rms = (signal
-        .iter()
-        .map(|&x| (x as f64) * (x as f64))
-        .sum::<f64>()
-        / signal.len() as f64)
-        .sqrt();
+    let rms =
+        (signal.iter().map(|&x| (x as f64) * (x as f64)).sum::<f64>() / signal.len() as f64).sqrt();
     assert!(
         (rms - 0.1).abs() < 0.0005,
         "pink noise RMS {rms} deviates from amp=0.1 by more than 0.5%"

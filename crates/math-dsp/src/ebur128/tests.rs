@@ -404,11 +404,14 @@ fn pooled_album_gating_applies_single_relative_gate() {
     let blocks_a = a.gating_blocks_above_absolute_gate();
     let blocks_b = b.gating_blocks_above_absolute_gate();
     assert_eq!(blocks_a.len(), 10);
-    assert_eq!(blocks_b.len(), 10, "the 1e-9 block is below the absolute gate");
+    assert_eq!(
+        blocks_b.len(),
+        10,
+        "the 1e-9 block is below the absolute gate"
+    );
 
     let tracks = vec![(0.9, blocks_a), (0.5, blocks_b)];
-    let (gain, peak) =
-        crate::replaygain::compute_album_gain_pooled(&tracks).expect("pooled gain");
+    let (gain, peak) = crate::replaygain::compute_album_gain_pooled(&tracks).expect("pooled gain");
 
     // Reference: pool = 10×1.0 + 8×0.5 + 2×0.058, mean = 0.7058,
     // relative gate = 0.07058 -> the two 0.058 blocks drop out.
@@ -476,12 +479,8 @@ fn true_peak_detector_matches_shift_register_reference() {
     meter.add_frames_f32(&flat).unwrap();
 
     let tp = meter.true_peak_detector.as_ref().unwrap();
-    for (ch, ((&peak, &prev), &refp)) in tp
-        .peak
-        .iter()
-        .zip(&tp.prev_peak)
-        .zip(&ref_peak)
-        .enumerate()
+    for (ch, ((&peak, &prev), &refp)) in
+        tp.peak.iter().zip(&tp.prev_peak).zip(&ref_peak).enumerate()
     {
         assert_eq!(
             peak, refp,

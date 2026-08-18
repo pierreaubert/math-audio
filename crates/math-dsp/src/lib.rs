@@ -94,6 +94,9 @@ pub use signals::{
     prepare_signal_for_playback_channels, replicate_mono, try_gen_log_sweep,
 };
 
-pub use replaygain::{ReplayGainAnalyzer, ReplayGainInfo, ReplayGainTrackData, compute_album_gain, compute_album_gain_pooled};
+pub use replaygain::{
+    ReplayGainAnalyzer, ReplayGainInfo, ReplayGainTrackData, compute_album_gain,
+    compute_album_gain_pooled,
+};
 pub use response::{biquad_complex_response, fir_complex_response, lr4_crossover_response};
 pub use waveform::{WAVEFORM_SAMPLES, compute_waveform};

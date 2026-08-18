@@ -1067,8 +1067,7 @@ fn welch_dc_bin_matches_single_fft_dc_bin() {
     // interior bins. A constant 0.5 signal must read ~-6.02 dB in both paths.
     let fft_size = 1024;
     let signal = vec![0.5_f32; fft_size * 4];
-    let (_, welch_db, _) =
-        compute_welch_spectrum_internal(&signal, 48_000, fft_size, 0.5).unwrap();
+    let (_, welch_db, _) = compute_welch_spectrum_internal(&signal, 48_000, fft_size, 0.5).unwrap();
     let (_, single_db, _) =
         compute_single_fft_spectrum_internal(&signal, 48_000, fft_size, false).unwrap();
     let expected = 20.0 * 0.5_f32.log10();
@@ -1125,10 +1124,7 @@ fn test_windowed_fr_tiny_windows_do_not_panic() {
     assert!(result.early_reflections_spl.iter().all(|v| v.is_finite()));
     // A one-sample window [1.0] has a flat |H(f)| = 1 -> 0 dB everywhere.
     assert!(
-        result
-            .direct_sound_spl
-            .iter()
-            .all(|&v| v.abs() < 0.1),
+        result.direct_sound_spl.iter().all(|&v| v.abs() < 0.1),
         "one-sample direct window should be flat 0 dB, got {:?}",
         result.direct_sound_spl
     );
@@ -1166,8 +1162,15 @@ fn test_thd_spread_harmonic_ir_compensates_window_coherent_gain() {
         ir[idx] = amp * (2.0 * PI * freq * k as f32 / sample_rate).sin();
     }
 
-    let (_thd, harmonics) =
-        compute_thd_from_ir(&ir, sample_rate, &[freq], &[0.0], start_freq, end_freq, duration);
+    let (_thd, harmonics) = compute_thd_from_ir(
+        &ir,
+        sample_rate,
+        &[freq],
+        &[0.0],
+        start_freq,
+        end_freq,
+        duration,
+    );
     let expected = 20.0 * (amp * win_len as f32 / 2.0).log10();
     assert!(
         (harmonics[0][0] - expected).abs() < 1.5,
@@ -1234,7 +1237,11 @@ fn read_analysis_csv_rejects_malformed_rows() {
 
     // Non-numeric field must error, not silently parse as 0.0.
     let bad_value = dir.join("bad_value.csv");
-    std::fs::write(&bad_value, "frequency_hz,spl_db,phase_deg\n100.0,bogus,0.0\n").unwrap();
+    std::fs::write(
+        &bad_value,
+        "frequency_hz,spl_db,phase_deg\n100.0,bogus,0.0\n",
+    )
+    .unwrap();
     assert!(
         super::types::read_analysis_csv(&bad_value).is_err(),
         "non-numeric field must return Err"

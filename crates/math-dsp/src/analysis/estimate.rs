@@ -254,7 +254,11 @@ pub fn estimate_noise_floor_db_from_silence(silence: &[f32], _sample_rate: u32) 
         .enumerate()
         .map(|(bin, c)| {
             let one_sided = bin == 0 || (fft_size.is_multiple_of(2) && bin == fft_size / 2);
-            let norm = if one_sided { 2.0 / n as f32 } else { 4.0 / n as f32 };
+            let norm = if one_sided {
+                2.0 / n as f32
+            } else {
+                4.0 / n as f32
+            };
             let mag = c.norm() * norm;
             if mag > 1e-20 {
                 20.0 * mag.log10()

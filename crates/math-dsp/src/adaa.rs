@@ -397,8 +397,10 @@ mod tests {
         // anti-aliased tanh this band only contains aliased harmonic energy.
         let fft = FftPlanner::new().plan_fft_forward(n);
         let alias_band_energy = |signal: &[f32]| -> f64 {
-            let mut buf: Vec<Complex<f64>> =
-                signal.iter().map(|&s| Complex::new(s as f64, 0.0)).collect();
+            let mut buf: Vec<Complex<f64>> = signal
+                .iter()
+                .map(|&s| Complex::new(s as f64, 0.0))
+                .collect();
             fft.process(&mut buf);
             let fundamental_bin = 1280; // 15000 Hz
             buf[1..fundamental_bin].iter().map(|c| c.norm_sqr()).sum()

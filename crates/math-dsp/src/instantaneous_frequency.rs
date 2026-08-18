@@ -208,8 +208,7 @@ pub fn subband_instantaneous_frequency(
     let band_contributions: Vec<(Vec<f32>, Vec<f32>)> = (0..bands)
         .into_par_iter()
         .filter_map(|b| {
-            let f_low =
-                ((log_min + (log_max - log_min) * b as f32 / bands as f32).exp()).max(20.0);
+            let f_low = ((log_min + (log_max - log_min) * b as f32 / bands as f32).exp()).max(20.0);
             let f_high = ((log_min + (log_max - log_min) * (b + 1) as f32 / bands as f32).exp())
                 .min(nyquist * 0.95);
 

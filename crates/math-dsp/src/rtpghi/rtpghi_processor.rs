@@ -149,15 +149,12 @@ impl RtpghiProcessor {
         for k in 0..spectrum_size {
             let omega_k = two_pi * k as f64 / m;
             let expected_advance = omega_k * a;
-            let time_grad = if k > 0
-                && k + 1 < spectrum_size
-                && log_mag[k - 1] > tol
-                && log_mag[k + 1] > tol
-            {
-                am_over_gamma * (log_mag[k + 1] - log_mag[k - 1]) / 2.0
-            } else {
-                0.0
-            };
+            let time_grad =
+                if k > 0 && k + 1 < spectrum_size && log_mag[k - 1] > tol && log_mag[k + 1] > tol {
+                    am_over_gamma * (log_mag[k + 1] - log_mag[k - 1]) / 2.0
+                } else {
+                    0.0
+                };
             d_phase_time[k] = expected_advance + time_grad;
         }
 
@@ -250,8 +247,7 @@ impl RtpghiProcessor {
             // Wrap to (-pi, pi]: keeps prev_phase bounded so the f64 -> f32
             // output conversion does not accumulate quantization error on
             // long-running streams.
-            phases[k] =
-                (phase + std::f64::consts::PI).rem_euclid(two_pi) - std::f64::consts::PI;
+            phases[k] = (phase + std::f64::consts::PI).rem_euclid(two_pi) - std::f64::consts::PI;
             integrated[k] = true;
         }
 
@@ -642,9 +638,9 @@ mod tests {
         let mut processor = RtpghiProcessor::new(fft_size, hop_size);
         let mut prev: Option<Vec<f32>> = None;
         // True per-frame phase advance (mod 2*pi): 2*pi*tone_bin*hop/M
-        let true_advance =
-            (2.0 * std::f64::consts::PI * tone_bin * hop_size as f64 / fft_size as f64)
-                .rem_euclid(2.0 * std::f64::consts::PI);
+        let true_advance = (2.0 * std::f64::consts::PI * tone_bin * hop_size as f64
+            / fft_size as f64)
+            .rem_euclid(2.0 * std::f64::consts::PI);
         let two_pi = 2.0 * std::f64::consts::PI;
 
         for frame in &mags {
@@ -792,9 +788,9 @@ mod tests {
         let phases = processor.process_frame(&mags[1]);
 
         let two_pi = 2.0 * std::f64::consts::PI;
-        let true_advance =
-            (2.0 * std::f64::consts::PI * tone_bin * hop_size as f64 / fft_size as f64)
-                .rem_euclid(two_pi);
+        let true_advance = (2.0 * std::f64::consts::PI * tone_bin * hop_size as f64
+            / fft_size as f64)
+            .rem_euclid(two_pi);
         let expected = (1.0e9f64 + true_advance + std::f64::consts::PI).rem_euclid(two_pi)
             - std::f64::consts::PI;
         let got = phases[20] as f64;

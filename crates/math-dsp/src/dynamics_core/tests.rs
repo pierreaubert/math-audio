@@ -551,7 +551,10 @@ fn test_apply_envelope_nan_recovery() {
     assert!(after_nan.is_finite(), "NaN target produced NaN envelope");
     assert!(core.envelope_db(0).is_finite());
     let after_inf = core.apply_envelope(0, f32::INFINITY);
-    assert!(after_inf.is_finite(), "Inf target produced non-finite envelope");
+    assert!(
+        after_inf.is_finite(),
+        "Inf target produced non-finite envelope"
+    );
 
     // Subsequent finite targets must still be tracked normally
     let mut env = 0.0f32;
