@@ -352,10 +352,8 @@ impl HammersteinModel {
 
     pub fn set_pre_filter(&mut self, filter: Option<HammersteinPreFilter>) {
         self.pre_filter = filter;
-        for pre_filter in &mut self.pre_filters {
-            if let Some(pre_filter) = pre_filter {
-                pre_filter.reset();
-            }
+        for pre_filter in self.pre_filters.iter_mut().flatten() {
+            pre_filter.reset();
         }
     }
 
@@ -600,10 +598,8 @@ impl AnalogProcessor for HammersteinModel {
         for blocker in &mut self.dc_blockers {
             blocker.reset();
         }
-        for filter in &mut self.pre_filters {
-            if let Some(filter) = filter {
-                filter.reset();
-            }
+        for filter in self.pre_filters.iter_mut().flatten() {
+            filter.reset();
         }
         self.simd_bounded.fill(0.0);
         self.simd_basis.fill(0.0);

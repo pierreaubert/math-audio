@@ -442,6 +442,7 @@ struct TapeChannelState {
 }
 
 impl TapeChannelState {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         sample_rate: f32,
         envelope_time_ms: f32,

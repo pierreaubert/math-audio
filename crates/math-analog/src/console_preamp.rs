@@ -289,6 +289,7 @@ impl ConsoleChannelState {
     }
 
     #[inline]
+    #[allow(clippy::too_many_arguments)]
     fn process(
         &mut self,
         input: f32,

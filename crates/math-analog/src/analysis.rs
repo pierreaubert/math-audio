@@ -848,7 +848,7 @@ fn window_value(window: WindowKind, index: usize, length: usize) -> f32 {
         // Five-term flat-top window (Harris convention), selected for
         // amplitude accuracy rather than sidelobe rejection.
         WindowKind::FlatTop => {
-            0.215_578_95 - 0.416_631_58 * phase.cos() + 0.277_263_158 * (2.0 * phase).cos()
+            0.215_578_95 - 0.416_631_58 * phase.cos() + 0.277_263_16 * (2.0 * phase).cos()
                 - 0.083_578_947 * (3.0 * phase).cos()
                 + 0.006_947_368 * (4.0 * phase).cos()
         }

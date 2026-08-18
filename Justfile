@@ -291,6 +291,14 @@ qa-dsp: (_qa "math-dsp" qa_cov_dsp)
 	cargo bench -p math-dsp --bench welch_spectrum -- --quick
 	cargo bench -p math-dsp --bench audio_features -- --quick
 
+qa-analog: (_qa "math-analog" qa_cov_analog)
+	cargo run --release -p math-analog --example analysis_report
+	cargo run --release -p math-analog --example alias_reference_report
+	cargo run --release -p math-analog --example console_preamp_report
+	cargo run --release -p math-analog --example model_matrix_report
+	cargo run --release -p math-analog --example fitting_report --features fitting
+	cargo bench -p math-analog --bench harmonics -- --quick
+
 # ----------------------------------------------------------------------
 # POST
 # ----------------------------------------------------------------------
