@@ -11,7 +11,11 @@
 //! does not allocate or change topology.
 
 mod chain;
+mod console_preamp;
 mod curves;
+mod effects;
+#[cfg(feature = "fitting")]
+pub mod fitting;
 mod hammerstein;
 mod harmonics;
 mod level;
@@ -21,15 +25,22 @@ mod static_color;
 
 pub mod analysis;
 
+pub use console_preamp::ConsolePreampModel;
 pub use curves::{asymmetric_style, normalized_soft_clip, tape_style, tube_style};
-pub use hammerstein::{HammersteinBranch, HammersteinModel};
+pub use effects::{
+    DefectConfig, DefectState, HysteresisMode, HysteresisState, NonlinearSolveResult,
+    PowerSupplySag, SlewRateLimiter, TapeEqCurve, TapeEqPoint, solve_bounded_nonlinear,
+};
+pub use hammerstein::{
+    HammersteinBiquadBranch, HammersteinBranch, HammersteinModel, HammersteinPreFilter,
+};
 pub use harmonics::{AntiAliasing, HarmonicModel};
 pub use level::{
     DEFAULT_REFERENCE_LEVEL_DBFS, calibrated_input_gain, db_to_gain, dbfs_to_vu, gain_to_db,
     vu_to_dbfs,
 };
 pub use process::{AnalogError, AnalogProcessor, ProcessSpec};
-pub use stateful::{TapeModel, TransformerModel};
+pub use stateful::{TapeModel, TransformerMode, TransformerModel};
 pub use static_color::{StaticColorModel, StaticCurve};
 
 /// The model family selected for one prepared processor.
@@ -48,6 +59,8 @@ pub enum AnalogModel {
     Tape(TapeModel),
     /// A bounded stylized stateful transformer-flux target, not a transformer emulation.
     Transformer(TransformerModel),
+    /// A stylized Wiener–Hammerstein console/preamp structure.
+    ConsolePreamp(ConsolePreampModel),
 }
 
 impl AnalogModel {
@@ -57,6 +70,7 @@ impl AnalogModel {
     pub const HAMMERSTEIN_ID: u32 = 2;
     pub const TAPE_ID: u32 = 3;
     pub const TRANSFORMER_ID: u32 = 4;
+    pub const CONSOLE_PREAMP_ID: u32 = 5;
 
     /// Decode a serialized model identifier without mutating an existing
     /// model.  Unknown identifiers are rejected rather than guessed.
@@ -67,6 +81,7 @@ impl AnalogModel {
             Self::HAMMERSTEIN_ID => Ok(Self::Hammerstein(HammersteinModel::generic_coloration()?)),
             Self::TAPE_ID => Ok(Self::Tape(TapeModel::default())),
             Self::TRANSFORMER_ID => Ok(Self::Transformer(TransformerModel::default())),
+            Self::CONSOLE_PREAMP_ID => Ok(Self::ConsolePreamp(ConsolePreampModel::default())),
             unknown => Err(AnalogError::UnknownModelId(unknown)),
         }
     }
@@ -78,6 +93,7 @@ impl AnalogModel {
             Self::Hammerstein(_) => Self::HAMMERSTEIN_ID,
             Self::Tape(_) => Self::TAPE_ID,
             Self::Transformer(_) => Self::TRANSFORMER_ID,
+            Self::ConsolePreamp(_) => Self::CONSOLE_PREAMP_ID,
         }
     }
 }
@@ -96,6 +112,7 @@ impl AnalogProcessor for AnalogModel {
             Self::Hammerstein(model) => model.prepare(spec),
             Self::Tape(model) => model.prepare(spec),
             Self::Transformer(model) => model.prepare(spec),
+            Self::ConsolePreamp(model) => model.prepare(spec),
         }
     }
 
@@ -106,6 +123,7 @@ impl AnalogProcessor for AnalogModel {
             Self::Hammerstein(model) => model.reset(),
             Self::Tape(model) => model.reset(),
             Self::Transformer(model) => model.reset(),
+            Self::ConsolePreamp(model) => model.reset(),
         }
     }
 
@@ -120,6 +138,7 @@ impl AnalogProcessor for AnalogModel {
             Self::Hammerstein(model) => model.process_interleaved(samples, frames),
             Self::Tape(model) => model.process_interleaved(samples, frames),
             Self::Transformer(model) => model.process_interleaved(samples, frames),
+            Self::ConsolePreamp(model) => model.process_interleaved(samples, frames),
         }
     }
 
@@ -130,6 +149,7 @@ impl AnalogProcessor for AnalogModel {
             Self::Hammerstein(model) => model.latency_samples(),
             Self::Tape(model) => model.latency_samples(),
             Self::Transformer(model) => model.latency_samples(),
+            Self::ConsolePreamp(model) => model.latency_samples(),
         }
     }
 }

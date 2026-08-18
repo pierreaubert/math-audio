@@ -168,6 +168,7 @@ fn model_ids_are_append_only_and_unknown_ids_fail_closed() {
         AnalogModel::HAMMERSTEIN_ID,
         AnalogModel::TAPE_ID,
         AnalogModel::TRANSFORMER_ID,
+        AnalogModel::CONSOLE_PREAMP_ID,
     ] {
         assert_eq!(AnalogModel::from_id(id).unwrap().model_id(), id);
     }
@@ -205,7 +206,7 @@ fn reprepare_rebuilds_channel_and_sample_rate_state() {
 #[test]
 fn every_model_is_finite_streamable_and_resettable() {
     for channels in [1, 2, 6, 12] {
-        for model_id in 0..=AnalogModel::TRANSFORMER_ID {
+        for model_id in 0..=AnalogModel::CONSOLE_PREAMP_ID {
             let process_spec = ProcessSpec::new(96_000.0, channels, 128);
             let mut one_block = AnalogModel::from_id(model_id).unwrap();
             one_block.prepare(process_spec).unwrap();
@@ -272,6 +273,7 @@ fn set_drive(model: &mut AnalogModel, value: f32) {
         AnalogModel::Hammerstein(model) => model.set_drive_db(value).unwrap(),
         AnalogModel::Tape(model) => model.set_drive_db(value).unwrap(),
         AnalogModel::Transformer(model) => model.set_drive_db(value).unwrap(),
+        AnalogModel::ConsolePreamp(model) => model.set_input_gain_db(value).unwrap(),
     }
 }
 
@@ -283,7 +285,7 @@ fn randomized_callback_partitions_are_independent_for_every_model() {
         .map(|index| ((index as f32) * 0.037).sin() * 0.8)
         .collect();
 
-    for model_id in 0..=AnalogModel::TRANSFORMER_ID {
+    for model_id in 0..=AnalogModel::CONSOLE_PREAMP_ID {
         let mut reference = AnalogModel::from_id(model_id).unwrap();
         reference.prepare(process_spec).unwrap();
         let mut expected = input.clone();
@@ -317,7 +319,7 @@ fn automation_is_partition_independent_for_every_model() {
     let second = vec![0.75_f32; 96 * channels];
     let partitions = [7_usize, 13, 5, 29, 1, 41];
 
-    for model_id in 0..=AnalogModel::TRANSFORMER_ID {
+    for model_id in 0..=AnalogModel::CONSOLE_PREAMP_ID {
         let mut reference = AnalogModel::from_id(model_id).unwrap();
         set_drive(&mut reference, -12.0);
         reference.prepare(process_spec).unwrap();
@@ -368,7 +370,7 @@ fn deterministic_stimuli_remain_finite_for_every_model() {
     burst[..32].fill(0.5);
     stimuli.push(burst);
 
-    for model_id in 0..=AnalogModel::TRANSFORMER_ID {
+    for model_id in 0..=AnalogModel::CONSOLE_PREAMP_ID {
         for mut samples in stimuli.clone() {
             let mut model = AnalogModel::from_id(model_id).unwrap();
             model.prepare(process_spec).unwrap();

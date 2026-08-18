@@ -1,4 +1,4 @@
-use math_audio_dsp::adaa::{Adaa1, adaa1_tanh};
+use math_audio_dsp::adaa::{Adaa1, Adaa2, adaa1_tanh, adaa2_tanh};
 
 use crate::chain::DcBlocker;
 use crate::level::{calibrated_input_gain, db_to_gain};
@@ -22,6 +22,10 @@ pub enum AntiAliasing {
     Off,
     /// Reuse math-dsp's first-order antiderivative processor.
     Adaa1,
+    /// Reuse the second-order antiderivative processor where the curve has a
+    /// closed-form second antiderivative.  It has a short startup history but
+    /// no block latency in this processor contract.
+    Adaa2,
 }
 
 /// A cheap, explainable second/third-harmonic coloration baseline.
@@ -260,8 +264,11 @@ impl AnalogProcessor for HarmonicModel {
 
 struct HarmonicChannelState {
     base: Adaa1,
+    base_second: Adaa2,
     second: Adaa1,
+    second_second: Adaa2,
     third: Adaa1,
+    third_second: Adaa2,
     dc_blocker: DcBlocker,
 }
 
@@ -287,8 +294,11 @@ impl HarmonicChannelState {
     fn new(sample_rate: f32) -> Self {
         Self {
             base: adaa1_tanh(),
+            base_second: adaa2_tanh(),
             second: Adaa1::new(second_harmonic, second_harmonic_ad1),
+            second_second: Adaa2::new(second_harmonic, second_harmonic_ad1, second_harmonic_ad2),
             third: Adaa1::new(third_harmonic, third_harmonic_ad1),
+            third_second: Adaa2::new(third_harmonic, third_harmonic_ad1, third_harmonic_ad2),
             dc_blocker: DcBlocker::new(sample_rate),
         }
     }
@@ -310,6 +320,11 @@ impl HarmonicChannelState {
                 self.second.process(driven),
                 self.third.process(driven),
             ),
+            AntiAliasing::Adaa2 => (
+                self.base_second.process(driven),
+                self.second_second.process(driven),
+                self.third_second.process(driven),
+            ),
         };
         let shaped = base + controls.h2 * second + controls.h3 * third;
         let shaped = self.dc_blocker.process(shaped) * controls.output_gain;
@@ -318,8 +333,11 @@ impl HarmonicChannelState {
 
     fn reset(&mut self) {
         self.base.reset();
+        self.base_second.reset();
         self.second.reset();
+        self.second_second.reset();
         self.third.reset();
+        self.third_second.reset();
         self.dc_blocker.reset();
     }
 }
@@ -347,6 +365,51 @@ fn third_harmonic_ad1(x: f64) -> f64 {
     let abs_x = x.abs();
     let tanh_ad1 = abs_x + (-2.0 * abs_x).exp().ln_1p() - std::f64::consts::LN_2;
     tanh_ad1 - 2.0 * bounded * bounded
+}
+
+#[inline]
+fn tanh_ad2_stable(x: f64) -> f64 {
+    let sign = x.signum();
+    let magnitude = x.abs();
+    let z = (-2.0 * magnitude).exp();
+    sign * (0.5 * (magnitude * magnitude + dilog_neg(z)) - std::f64::consts::LN_2 * magnitude
+        + std::f64::consts::PI * std::f64::consts::PI / 24.0)
+}
+
+#[inline]
+fn dilog_neg(z: f64) -> f64 {
+    if z < 1e-15 {
+        return 0.0;
+    }
+    if (1.0 - z).abs() < 1e-12 {
+        return -std::f64::consts::PI.powi(2) / 12.0;
+    }
+    if z <= 1.0 {
+        let mut result = 0.0;
+        let mut power = 1.0;
+        for k in 1..=200 {
+            power *= z;
+            let term = power / (k * k) as f64;
+            result += if k % 2 == 0 { term } else { -term };
+            if term.abs() < 1e-15 {
+                break;
+            }
+        }
+        result
+    } else {
+        let log_z = z.ln();
+        -dilog_neg(1.0 / z) - std::f64::consts::PI.powi(2) / 6.0 - 0.5 * log_z * log_z
+    }
+}
+
+#[inline]
+fn second_harmonic_ad2(x: f64) -> f64 {
+    0.5 * x * x - 2.0 * (x.abs() + (-2.0 * x.abs()).exp().ln_1p() - std::f64::consts::LN_2)
+}
+
+#[inline]
+fn third_harmonic_ad2(x: f64) -> f64 {
+    tanh_ad2_stable(x) - 2.0 * (x - x.tanh())
 }
 
 #[cfg(test)]

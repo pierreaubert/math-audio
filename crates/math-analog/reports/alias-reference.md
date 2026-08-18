@@ -18,7 +18,7 @@ cutoff `0.45 / factor` before decimation. The comparison is sample-aligned;
 the helper zero-extends record boundaries, so the captured values below are
 best interpreted with the documented guard-interval caveat.
 
-Captured output on 2026-08-13:
+Captured output on 2026-08-18:
 
 ```text
 sample_rate_hz=48000

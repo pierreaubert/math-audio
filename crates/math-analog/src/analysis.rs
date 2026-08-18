@@ -1,6 +1,7 @@
-use std::f32::consts::TAU;
-
+use math_audio_dsp::analysis::{deconvolve_sweep, plan_fft_inverse};
 use math_audio_dsp::ebur128::{EbuR128, Mode};
+use math_audio_dsp::signals::try_gen_log_sweep;
+use rustfft::num_complex::Complex;
 use thiserror::Error;
 
 const MAX_HARMONIC_ORDER: usize = 128;
@@ -54,6 +55,10 @@ pub enum SpectralError {
     InvalidPeakCeiling(f32),
     #[error("reference peak {peak} exceeds peak ceiling {ceiling}")]
     ReferencePeakExceedsCeiling { peak: f32, ceiling: f32 },
+    #[error("invalid log-chirp parameter: {0}")]
+    InvalidChirpParameter(&'static str),
+    #[error("log-chirp deconvolution failed: {0}")]
+    ChirpDeconvolution(String),
 }
 
 /// The normalization metadata attached to a deterministic harmonic report.
@@ -78,6 +83,9 @@ pub enum FftNormalization {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WindowKind {
     Rectangular,
+    Hann,
+    Blackman,
+    FlatTop,
 }
 
 /// One measured harmonic component.
@@ -360,6 +368,26 @@ pub fn measure_two_tone_imd(
     tone_b_hz: f32,
     max_order: usize,
 ) -> Result<IntermodulationReport, SpectralError> {
+    measure_two_tone_imd_windowed(
+        samples,
+        sample_rate,
+        tone_a_hz,
+        tone_b_hz,
+        max_order,
+        WindowKind::Rectangular,
+    )
+}
+
+/// Measure two-tone fundamentals and intermodulation products with an
+/// explicitly declared analysis window.
+pub fn measure_two_tone_imd_windowed(
+    samples: &[f32],
+    sample_rate: f32,
+    tone_a_hz: f32,
+    tone_b_hz: f32,
+    max_order: usize,
+    window: WindowKind,
+) -> Result<IntermodulationReport, SpectralError> {
     if samples.is_empty() {
         return Err(SpectralError::EmptyRecord);
     }
@@ -404,18 +432,17 @@ pub fn measure_two_tone_imd(
         bin_spacing_hz: sample_rate / record_length as f32,
         one_sided: true,
         fft_normalization: FftNormalization::OneSidedAmplitude,
-        window: WindowKind::Rectangular,
-        coherent_gain: 1.0,
+        window,
+        coherent_gain: coherent_gain(window),
     };
     let nyquist_bin = record_length / 2;
-    let tone_a_amplitude = dft_amplitude(
-        samples,
-        ((tone_a_hz / sample_rate) * record_length as f32).round() as usize,
-    );
-    let tone_b_amplitude = dft_amplitude(
-        samples,
-        ((tone_b_hz / sample_rate) * record_length as f32).round() as usize,
-    );
+    let amplitudes = fft_amplitudes(samples, window);
+    let tone_a_bin =
+        (((tone_a_hz / sample_rate) * record_length as f32).round() as usize).min(nyquist_bin);
+    let tone_b_bin =
+        (((tone_b_hz / sample_rate) * record_length as f32).round() as usize).min(nyquist_bin);
+    let tone_a_amplitude = amplitudes[tone_a_bin];
+    let tone_b_amplitude = amplitudes[tone_b_bin];
     let mut components = Vec::with_capacity(max_order * max_order);
     let max_order = max_order as i32;
     for coefficient_a in -max_order..=max_order {
@@ -436,7 +463,7 @@ pub fn measure_two_tone_imd(
             let bin = (((folded_frequency_hz / sample_rate) * record_length as f32).round()
                 as usize)
                 .min(nyquist_bin);
-            let amplitude = dft_amplitude(samples, bin);
+            let amplitude = amplitudes[bin];
             let level_db = if amplitude > 0.0 {
                 20.0 * amplitude.log10()
             } else {
@@ -689,6 +716,26 @@ pub fn measure_harmonics(
     fundamental_hz: f32,
     max_order: usize,
 ) -> Result<HarmonicReport, SpectralError> {
+    measure_harmonics_windowed(
+        samples,
+        sample_rate,
+        fundamental_hz,
+        max_order,
+        WindowKind::Rectangular,
+    )
+}
+
+/// Measure harmonics using a declared analysis window and coherent-gain
+/// correction.  The returned amplitudes retain the same one-sided convention
+/// as [`measure_harmonics`]: interior bins are doubled while DC and Nyquist
+/// are not.
+pub fn measure_harmonics_windowed(
+    samples: &[f32],
+    sample_rate: f32,
+    fundamental_hz: f32,
+    max_order: usize,
+    window: WindowKind,
+) -> Result<HarmonicReport, SpectralError> {
     if samples.is_empty() {
         return Err(SpectralError::EmptyRecord);
     }
@@ -725,13 +772,14 @@ pub fn measure_harmonics(
         bin_spacing_hz: sample_rate / record_length as f32,
         one_sided: true,
         fft_normalization: FftNormalization::OneSidedAmplitude,
-        window: WindowKind::Rectangular,
-        coherent_gain: 1.0,
+        window,
+        coherent_gain: coherent_gain(window),
     };
-    let dc_amplitude = dft_amplitude(samples, 0);
+    let amplitudes = fft_amplitudes(samples, window);
+    let dc_amplitude = amplitudes[0];
     let nyquist_bin = record_length / 2;
     let nyquist_amplitude = if record_length.is_multiple_of(2) {
-        dft_amplitude(samples, nyquist_bin)
+        amplitudes[nyquist_bin]
     } else {
         0.0
     };
@@ -742,7 +790,7 @@ pub fn measure_harmonics(
         let folded_frequency_hz = fold_frequency(frequency_hz, sample_rate);
         let bin = ((folded_frequency_hz / sample_rate) * record_length as f32).round() as usize;
         let bin = bin.min(nyquist_bin);
-        let amplitude = dft_amplitude(samples, bin);
+        let amplitude = amplitudes[bin];
         let level_db = if amplitude > 0.0 {
             20.0 * amplitude.log10()
         } else {
@@ -778,26 +826,150 @@ fn fold_frequency(frequency_hz: f32, sample_rate: f32) -> f32 {
     }
 }
 
-fn dft_amplitude(samples: &[f32], bin: usize) -> f32 {
-    let n = samples.len();
-    let mut real = 0.0_f64;
-    let mut imaginary = 0.0_f64;
-    for (index, &sample) in samples.iter().enumerate() {
-        let phase = TAU as f64 * bin as f64 * index as f64 / n as f64;
-        real += sample as f64 * phase.cos();
-        imaginary -= sample as f64 * phase.sin();
+fn coherent_gain(window: WindowKind) -> f32 {
+    match window {
+        WindowKind::Rectangular => 1.0,
+        WindowKind::Hann => 0.5,
+        WindowKind::Blackman => 0.42,
+        WindowKind::FlatTop => 0.215_578_95,
     }
-    let scale = if bin == 0 || (n.is_multiple_of(2) && bin == n / 2) {
-        1.0 / n as f64
-    } else {
-        2.0 / n as f64
-    };
-    (scale * real.hypot(imaginary)) as f32
+}
+
+#[inline]
+fn window_value(window: WindowKind, index: usize, length: usize) -> f32 {
+    if matches!(window, WindowKind::Rectangular) || length <= 1 {
+        return 1.0;
+    }
+    let phase = std::f32::consts::TAU * index as f32 / length as f32;
+    match window {
+        WindowKind::Rectangular => 1.0,
+        WindowKind::Hann => 0.5 - 0.5 * phase.cos(),
+        WindowKind::Blackman => 0.42 - 0.5 * phase.cos() + 0.08 * (2.0 * phase).cos(),
+        // Five-term flat-top window (Harris convention), selected for
+        // amplitude accuracy rather than sidelobe rejection.
+        WindowKind::FlatTop => {
+            0.215_578_95 - 0.416_631_58 * phase.cos() + 0.277_263_158 * (2.0 * phase).cos()
+                - 0.083_578_947 * (3.0 * phase).cos()
+                + 0.006_947_368 * (4.0 * phase).cos()
+        }
+    }
+}
+
+/// Calculate all one-sided amplitudes in one FFT pass.  Keeping the FFT work
+/// here, instead of recalculating one DFT per requested bin, makes long-record
+/// harmonic and IMD reports FFT-bound.
+fn fft_amplitudes(samples: &[f32], window: WindowKind) -> Vec<f32> {
+    let length = samples.len();
+    let mut spectrum = samples
+        .iter()
+        .enumerate()
+        .map(|(index, &sample)| Complex::new(sample * window_value(window, index, length), 0.0))
+        .collect::<Vec<_>>();
+    let fft = math_audio_dsp::analysis::plan_fft_forward(length);
+    fft.process(&mut spectrum);
+    let gain = coherent_gain(window) * length as f32;
+    spectrum[..=length / 2]
+        .iter()
+        .enumerate()
+        .map(|(bin, value)| {
+            let one_sided = if bin == 0 || (length.is_multiple_of(2) && bin == length / 2) {
+                1.0
+            } else {
+                2.0
+            };
+            one_sided * value.norm() / gain
+        })
+        .collect()
+}
+
+/// Parameters for an offline logarithmic swept-sine capture.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LogChirpSpec {
+    pub start_hz: f32,
+    pub end_hz: f32,
+    pub amplitude: f32,
+    pub sample_rate: u32,
+    pub duration_seconds: f32,
+}
+
+/// Generate the deterministic stimulus used by the offline fitting and
+/// measurement helpers.  This delegates phase accumulation to the workspace
+/// signal generator, which uses f64 phase arithmetic and the same endpoint
+/// rules as the rest of the DSP measurement pipeline.
+pub fn generate_log_chirp(spec: LogChirpSpec) -> Result<Vec<f32>, SpectralError> {
+    if spec.sample_rate == 0 {
+        return Err(SpectralError::InvalidChirpParameter("sample rate"));
+    }
+    if !spec.duration_seconds.is_finite() || spec.duration_seconds <= 0.0 {
+        return Err(SpectralError::InvalidChirpParameter("duration"));
+    }
+    if !spec.amplitude.is_finite() {
+        return Err(SpectralError::InvalidChirpParameter("amplitude"));
+    }
+    try_gen_log_sweep(
+        spec.start_hz,
+        spec.end_hz,
+        spec.amplitude,
+        spec.sample_rate,
+        spec.duration_seconds,
+    )
+    .map_err(|_| SpectralError::InvalidChirpParameter("frequency range"))
+}
+
+/// The result of offline logarithmic-chirp deconvolution.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ChirpDeconvolution {
+    pub sample_rate: u32,
+    pub fft_size: usize,
+    pub frequency_response: Vec<Complex<f32>>,
+    pub impulse_response: Vec<f32>,
+}
+
+/// Deconvolve a captured log chirp into a one-sided frequency response and a
+/// real impulse response.  All allocations are intentionally offline; this
+/// function is not part of any realtime processor contract.
+pub fn deconvolve_log_chirp(
+    recording: &[f32],
+    stimulus: &[f32],
+    sample_rate: u32,
+) -> Result<ChirpDeconvolution, SpectralError> {
+    if recording.is_empty() || stimulus.is_empty() {
+        return Err(SpectralError::EmptyRecord);
+    }
+    if sample_rate == 0 {
+        return Err(SpectralError::InvalidSampleRate(0.0));
+    }
+    if let Some(index) = recording
+        .iter()
+        .chain(stimulus)
+        .position(|sample| !sample.is_finite())
+    {
+        return Err(SpectralError::NonFiniteSample(index));
+    }
+    let frequency_response = deconvolve_sweep(recording, stimulus, sample_rate)
+        .map_err(SpectralError::ChirpDeconvolution)?;
+    let fft_size = (frequency_response.len() - 1) * 2;
+    let mut spectrum = vec![Complex::new(0.0_f32, 0.0); fft_size];
+    spectrum[..=fft_size / 2].copy_from_slice(&frequency_response);
+    for bin in 1..fft_size / 2 {
+        spectrum[fft_size - bin] = frequency_response[bin].conj();
+    }
+    let inverse = plan_fft_inverse(fft_size);
+    inverse.process(&mut spectrum);
+    let scale = 1.0 / fft_size as f32;
+    let impulse_response = spectrum.iter().map(|value| value.re * scale).collect();
+    Ok(ChirpDeconvolution {
+        sample_rate,
+        fft_size,
+        frequency_response,
+        impulse_response,
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::f32::consts::TAU;
 
     #[test]
     fn coherent_record_reports_one_sided_amplitudes() {

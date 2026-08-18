@@ -17,6 +17,7 @@ fn model_name(model_id: u32) -> &'static str {
         AnalogModel::HAMMERSTEIN_ID => "Hammerstein",
         AnalogModel::TAPE_ID => "Tape-style",
         AnalogModel::TRANSFORMER_ID => "Transformer-style",
+        AnalogModel::CONSOLE_PREAMP_ID => "Console/Preamp-style",
         _ => "Unknown",
     }
 }
@@ -59,6 +60,13 @@ fn configure(model: &mut AnalogModel) {
         AnalogModel::Transformer(model) => {
             model.set_character(0.5).expect("valid character");
             model.set_drive_db(12.0).expect("valid drive");
+            model.set_output_gain_db(0.0).expect("valid output gain");
+            model.set_amount(1.0).expect("valid amount");
+            model.set_mix(1.0).expect("valid mix");
+        }
+        AnalogModel::ConsolePreamp(model) => {
+            model.set_asymmetry(0.5).expect("valid asymmetry");
+            model.set_input_gain_db(12.0).expect("valid input gain");
             model.set_output_gain_db(0.0).expect("valid output gain");
             model.set_amount(1.0).expect("valid amount");
             model.set_mix(1.0).expect("valid mix");
@@ -107,7 +115,7 @@ fn main() {
         "columns=model id finite h1 h2 h3 thd thd_plus_n imd_2f1_minus_f2 imd_2f2_minus_f1 transient_peak transient_rms dc"
     );
 
-    for model_id in 0..=AnalogModel::TRANSFORMER_ID {
+    for model_id in 0..=AnalogModel::CONSOLE_PREAMP_ID {
         let harmonic_samples = render_tone(model_id, 1_000.0);
         let harmonic =
             measure_harmonics(&harmonic_samples, SAMPLE_RATE, 1_000.0, 3).expect("harmonic");

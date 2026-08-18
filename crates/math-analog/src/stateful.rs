@@ -1,4 +1,10 @@
-use crate::chain::DcBlocker;
+use math_audio_dsp::adaa::{Adaa1, Adaa2, adaa1_tanh, adaa2_tanh};
+
+use crate::chain::{DcBlocker, OnePoleLowpass};
+use crate::effects::{
+    DefectConfig, DefectState, HysteresisMode, HysteresisState, TapeEqCurve, TapeEqState,
+};
+use crate::harmonics::AntiAliasing;
 use crate::level::{calibrated_input_gain, db_to_gain};
 use crate::process::{
     AnalogError, AnalogProcessor, ControlSmoother, ProcessSpec, checked_block_len, finite_output,
@@ -10,6 +16,16 @@ const MIN_DRIVE_DB: f32 = -60.0;
 const MAX_DRIVE_DB: f32 = 36.0;
 const MIN_OUTPUT_GAIN_DB: f32 = -60.0;
 const MAX_OUTPUT_GAIN_DB: f32 = 24.0;
+const MAX_DEFECT_DELAY_SAMPLES: usize = 64;
+
+/// Transformer state equation choice. `Stylized` preserves the original
+/// preset meaning; `Flux` enables the bounded voltage-integrated state used by
+/// new fitted-capable models.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TransformerMode {
+    Stylized,
+    Flux,
+}
 
 #[derive(Debug)]
 struct StatefulControls {
@@ -140,12 +156,23 @@ impl StatefulControls {
 /// v[n] = tanh(u[n] + 0.25 * character * e[n] * m[n])
 /// ```
 ///
-/// `e` and `m` are independent per-channel states with fixed 8 ms and 80 ms
-/// time constants.  The equations are intentionally stylized; no hysteresis
-/// loop area, tape EQ, bias, or measured-device claim is implied.
+/// `e` and `m` are independent per-channel states with 8 ms and 80 ms default
+/// time constants.  Both are configurable for a prepared capture.  The
+/// equations are intentionally stylized; optional hysteresis/EQ/defect modules
+/// do not imply a measured-device claim.
 #[derive(Debug)]
 pub struct TapeModel {
     controls: StatefulControls,
+    anti_aliasing: AntiAliasing,
+    hysteresis_mode: HysteresisMode,
+    hysteresis_amount: f32,
+    head_bump_amount: f32,
+    head_bump_hz: f32,
+    hf_loss_amount: f32,
+    envelope_time_ms: f32,
+    memory_time_ms: f32,
+    tape_eq: Option<TapeEqCurve>,
+    defects: DefectConfig,
     spec: Option<ProcessSpec>,
     channels: Vec<TapeChannelState>,
 }
@@ -160,6 +187,16 @@ impl TapeModel {
     pub fn new() -> Self {
         Self {
             controls: StatefulControls::new(48_000.0),
+            anti_aliasing: AntiAliasing::Adaa1,
+            hysteresis_mode: HysteresisMode::Off,
+            hysteresis_amount: 0.0,
+            head_bump_amount: 0.0,
+            head_bump_hz: 80.0,
+            hf_loss_amount: 0.0,
+            envelope_time_ms: 8.0,
+            memory_time_ms: 80.0,
+            tape_eq: None,
+            defects: DefectConfig::default(),
             spec: None,
             channels: Vec::new(),
         }
@@ -185,6 +222,113 @@ impl TapeModel {
         self.controls.character()
     }
 
+    pub fn anti_aliasing(&self) -> AntiAliasing {
+        self.anti_aliasing
+    }
+
+    pub fn envelope_time_ms(&self) -> f32 {
+        self.envelope_time_ms
+    }
+
+    pub fn memory_time_ms(&self) -> f32 {
+        self.memory_time_ms
+    }
+
+    pub fn hysteresis_mode(&self) -> HysteresisMode {
+        self.hysteresis_mode
+    }
+    pub fn hysteresis_amount(&self) -> f32 {
+        self.hysteresis_amount
+    }
+    pub fn head_bump_amount(&self) -> f32 {
+        self.head_bump_amount
+    }
+    pub fn head_bump_hz(&self) -> f32 {
+        self.head_bump_hz
+    }
+    pub fn hf_loss_amount(&self) -> f32 {
+        self.hf_loss_amount
+    }
+
+    pub fn tape_eq_curve(&self) -> Option<&TapeEqCurve> {
+        self.tape_eq.as_ref()
+    }
+
+    pub fn defects(&self) -> DefectConfig {
+        self.defects
+    }
+
+    pub fn set_anti_aliasing(&mut self, mode: AntiAliasing) {
+        if self.anti_aliasing != mode {
+            for channel in &mut self.channels {
+                channel.reset();
+            }
+        }
+        self.anti_aliasing = mode;
+    }
+
+    pub fn set_envelope_time_ms(&mut self, value: f32) -> Result<(), AnalogError> {
+        validate_finite_range("envelope_time_ms", value, 0.1, 2_000.0)?;
+        self.envelope_time_ms = value;
+        Ok(())
+    }
+
+    pub fn set_memory_time_ms(&mut self, value: f32) -> Result<(), AnalogError> {
+        validate_finite_range("memory_time_ms", value, 0.1, 5_000.0)?;
+        self.memory_time_ms = value;
+        Ok(())
+    }
+
+    pub fn set_hysteresis(&mut self, mode: HysteresisMode, amount: f32) -> Result<(), AnalogError> {
+        validate_finite_range("hysteresis_amount", amount, 0.0, 1.0)?;
+        self.hysteresis_mode = mode;
+        self.hysteresis_amount = amount;
+        Ok(())
+    }
+
+    pub fn set_head_bump(&mut self, amount: f32, frequency_hz: f32) -> Result<(), AnalogError> {
+        validate_finite_range("head_bump_amount", amount, 0.0, 1.0)?;
+        validate_finite_range("head_bump_hz", frequency_hz, 5.0, 1_000.0)?;
+        self.head_bump_amount = amount;
+        self.head_bump_hz = frequency_hz;
+        Ok(())
+    }
+
+    pub fn set_hf_loss_amount(&mut self, amount: f32) -> Result<(), AnalogError> {
+        validate_finite_range("hf_loss_amount", amount, 0.0, 1.0)?;
+        self.hf_loss_amount = amount;
+        Ok(())
+    }
+
+    /// Install an optional record/replay EQ curve.  It is reduced to bounded
+    /// shelves when the model is next prepared.
+    pub fn set_tape_eq_curve(&mut self, curve: Option<TapeEqCurve>) -> Result<(), AnalogError> {
+        self.tape_eq = curve;
+        if let Some(spec) = self.spec {
+            self.prepare(spec)?;
+        } else {
+            for channel in &mut self.channels {
+                channel.reset();
+            }
+        }
+        Ok(())
+    }
+
+    pub fn set_defects(&mut self, defects: DefectConfig) -> Result<(), AnalogError> {
+        defects
+            .validate(MAX_DEFECT_DELAY_SAMPLES)
+            .map_err(|message| AnalogError::InvalidDefectConfig(message.to_string()))?;
+        self.defects = defects;
+        if let Some(spec) = self.spec {
+            self.prepare(spec)?;
+        } else {
+            for channel in &mut self.channels {
+                channel.reset();
+            }
+        }
+        Ok(())
+    }
+
     pub fn set_drive_db(&mut self, value: f32) -> Result<(), AnalogError> {
         self.controls.set_drive_db(value)
     }
@@ -205,11 +349,22 @@ impl TapeModel {
         self.controls.set_character(value)
     }
 
-    fn process_frame(&mut self, frame: &mut [f32], channels: usize) {
+    fn process_frame(&mut self, frame: &mut [f32], channels: usize, anti_aliasing: AntiAliasing) {
         let controls = self.controls.advance();
+        let input_sum = frame
+            .iter()
+            .take(channels)
+            .map(|sample| sanitize_sample(*sample))
+            .sum::<f32>();
         for (channel, sample) in frame.iter_mut().enumerate().take(channels) {
             let dry = sanitize_sample(*sample);
-            let shaped = self.channels[channel].process(dry, controls);
+            let crosstalk_input = if channels > 1 {
+                (input_sum - dry) / (channels - 1) as f32
+            } else {
+                0.0
+            };
+            let shaped =
+                self.channels[channel].process(dry, controls, anti_aliasing, crosstalk_input);
             let effected = dry + controls.amount * (shaped - dry);
             *sample = finite_output(dry + controls.mix * (effected - dry));
         }
@@ -220,7 +375,20 @@ impl AnalogProcessor for TapeModel {
     fn prepare(&mut self, spec: ProcessSpec) -> Result<(), AnalogError> {
         spec.validate()?;
         let channels = (0..spec.channels)
-            .map(|_| TapeChannelState::new(spec.sample_rate))
+            .map(|_| {
+                TapeChannelState::new(
+                    spec.sample_rate,
+                    self.envelope_time_ms,
+                    self.memory_time_ms,
+                    self.hysteresis_mode,
+                    self.hysteresis_amount,
+                    self.head_bump_amount,
+                    self.head_bump_hz,
+                    self.hf_loss_amount,
+                    self.tape_eq.as_ref(),
+                    self.defects,
+                )
+            })
             .collect();
         self.controls.reconfigure(spec.sample_rate);
         self.channels = channels;
@@ -243,8 +411,9 @@ impl AnalogProcessor for TapeModel {
     ) -> Result<(), AnalogError> {
         let spec = self.spec.ok_or(AnalogError::NotPrepared)?;
         checked_block_len(spec, frames, samples.len())?;
+        let anti_aliasing = self.anti_aliasing;
         for frame in samples.chunks_exact_mut(spec.channels).take(frames) {
-            self.process_frame(frame, spec.channels);
+            self.process_frame(frame, spec.channels, anti_aliasing);
         }
         Ok(())
     }
@@ -254,49 +423,106 @@ impl AnalogProcessor for TapeModel {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug)]
 struct TapeChannelState {
     envelope: f32,
     memory: f32,
     envelope_coefficient: f32,
     memory_coefficient: f32,
+    static_tanh: Adaa1,
+    static_tanh_second: Adaa2,
+    hysteresis: HysteresisState,
+    head_bump: OnePoleLowpass,
+    hf_loss: OnePoleLowpass,
+    head_bump_amount: f32,
+    hf_loss_amount: f32,
+    eq: TapeEqState,
+    defects: DefectState,
     dc_blocker: DcBlocker,
 }
 
 impl TapeChannelState {
-    fn new(sample_rate: f32) -> Self {
+    fn new(
+        sample_rate: f32,
+        envelope_time_ms: f32,
+        memory_time_ms: f32,
+        hysteresis_mode: HysteresisMode,
+        hysteresis_amount: f32,
+        head_bump_amount: f32,
+        head_bump_hz: f32,
+        hf_loss_amount: f32,
+        tape_eq: Option<&TapeEqCurve>,
+        defects: DefectConfig,
+    ) -> Self {
         Self {
             envelope: 0.0,
             memory: 0.0,
-            envelope_coefficient: time_coefficient(8.0, sample_rate),
-            memory_coefficient: time_coefficient(80.0, sample_rate),
+            envelope_coefficient: time_coefficient(envelope_time_ms, sample_rate),
+            memory_coefficient: time_coefficient(memory_time_ms, sample_rate),
+            static_tanh: adaa1_tanh(),
+            static_tanh_second: adaa2_tanh(),
+            hysteresis: HysteresisState::new(hysteresis_mode, 0.12, hysteresis_amount),
+            head_bump: OnePoleLowpass::new(head_bump_hz, sample_rate),
+            hf_loss: OnePoleLowpass::new((sample_rate * 0.2).min(12_000.0), sample_rate),
+            head_bump_amount,
+            hf_loss_amount,
+            eq: TapeEqState::new(tape_eq, sample_rate),
+            defects: DefectState::new(defects, sample_rate, MAX_DEFECT_DELAY_SAMPLES),
             dc_blocker: DcBlocker::new(sample_rate),
         }
     }
 
     #[inline]
-    fn process(&mut self, input: f32, controls: ControlFrame) -> f32 {
-        let u = (input * controls.drive).tanh();
+    fn process(
+        &mut self,
+        input: f32,
+        controls: ControlFrame,
+        anti_aliasing: AntiAliasing,
+        crosstalk_input: f32,
+    ) -> f32 {
+        let driven = input * controls.drive;
+        let mut u = match anti_aliasing {
+            AntiAliasing::Off => driven.tanh(),
+            AntiAliasing::Adaa1 => self.static_tanh.process(driven),
+            AntiAliasing::Adaa2 => self.static_tanh_second.process(driven),
+        };
+        u = self.hysteresis.process(u);
         self.envelope =
             self.envelope_coefficient * self.envelope + (1.0 - self.envelope_coefficient) * u.abs();
         self.memory = self.memory_coefficient * self.memory + (1.0 - self.memory_coefficient) * u;
         self.envelope = flush_denormal(self.envelope);
         self.memory = flush_denormal(self.memory);
         let operating_point = 0.25 * controls.character * self.envelope * self.memory;
-        let output = (u + operating_point).tanh();
+        let mut output = (u + operating_point).tanh();
+        let bump = self.head_bump.process(output);
+        output += self.head_bump_amount * self.envelope * 0.25 * bump;
+        let high_frequency_component = output - self.hf_loss.process(output);
+        let level_dependent_hf_loss = self.hf_loss_amount * self.envelope.clamp(0.0, 1.0);
+        output -= level_dependent_hf_loss * high_frequency_component;
+        output = self.eq.process(output);
+        output = self.defects.process(output, crosstalk_input);
         finite_output(self.dc_blocker.process(output) * controls.output_gain)
     }
 
     fn reset(&mut self) {
         self.envelope = 0.0;
         self.memory = 0.0;
+        self.static_tanh.reset();
+        self.static_tanh_second.reset();
+        self.hysteresis.reset();
+        self.head_bump.reset();
+        self.hf_loss.reset();
+        self.eq.reset();
+        self.defects.reset();
         self.dc_blocker.reset();
     }
 }
 
 /// A bounded stylized transformer-flux model, not a transformer emulation.
 ///
-/// The target uses a leaky flux state and a saturating magnetization branch:
+/// The stylized target uses a leaky flux state and a saturating magnetization
+/// branch.  `Flux` mode replaces the old direct clamped state update with a
+/// bounded integrated flux followed by a smooth finite fallback:
 ///
 /// ```text
 /// f[n] = clamp(a_f f[n-1] + (1-a_f)u[n], -4, 4)
@@ -309,6 +535,9 @@ impl TapeChannelState {
 #[derive(Debug)]
 pub struct TransformerModel {
     controls: StatefulControls,
+    anti_aliasing: AntiAliasing,
+    mode: TransformerMode,
+    defects: DefectConfig,
     spec: Option<ProcessSpec>,
     channels: Vec<TransformerChannelState>,
 }
@@ -323,6 +552,9 @@ impl TransformerModel {
     pub fn new() -> Self {
         Self {
             controls: StatefulControls::new(48_000.0),
+            anti_aliasing: AntiAliasing::Adaa1,
+            mode: TransformerMode::Stylized,
+            defects: DefectConfig::default(),
             spec: None,
             channels: Vec::new(),
         }
@@ -348,6 +580,51 @@ impl TransformerModel {
         self.controls.character()
     }
 
+    pub fn anti_aliasing(&self) -> AntiAliasing {
+        self.anti_aliasing
+    }
+
+    pub fn mode(&self) -> TransformerMode {
+        self.mode
+    }
+
+    pub fn set_mode(&mut self, mode: TransformerMode) {
+        if self.mode != mode {
+            for channel in &mut self.channels {
+                channel.reset();
+            }
+        }
+        self.mode = mode;
+    }
+
+    pub fn set_anti_aliasing(&mut self, mode: AntiAliasing) {
+        if self.anti_aliasing != mode {
+            for channel in &mut self.channels {
+                channel.reset();
+            }
+        }
+        self.anti_aliasing = mode;
+    }
+
+    pub fn defects(&self) -> DefectConfig {
+        self.defects
+    }
+
+    pub fn set_defects(&mut self, defects: DefectConfig) -> Result<(), AnalogError> {
+        defects
+            .validate(MAX_DEFECT_DELAY_SAMPLES)
+            .map_err(|message| AnalogError::InvalidDefectConfig(message.to_string()))?;
+        self.defects = defects;
+        if let Some(spec) = self.spec {
+            self.prepare(spec)?;
+        } else {
+            for channel in &mut self.channels {
+                channel.reset();
+            }
+        }
+        Ok(())
+    }
+
     pub fn set_drive_db(&mut self, value: f32) -> Result<(), AnalogError> {
         self.controls.set_drive_db(value)
     }
@@ -368,11 +645,28 @@ impl TransformerModel {
         self.controls.set_character(value)
     }
 
-    fn process_frame(&mut self, frame: &mut [f32], channels: usize) {
+    fn process_frame(
+        &mut self,
+        frame: &mut [f32],
+        channels: usize,
+        anti_aliasing: AntiAliasing,
+        mode: TransformerMode,
+    ) {
         let controls = self.controls.advance();
+        let input_sum = frame
+            .iter()
+            .take(channels)
+            .map(|sample| sanitize_sample(*sample))
+            .sum::<f32>();
         for (channel, sample) in frame.iter_mut().enumerate().take(channels) {
             let dry = sanitize_sample(*sample);
-            let shaped = self.channels[channel].process(dry, controls);
+            let crosstalk_input = if channels > 1 {
+                (input_sum - dry) / (channels - 1) as f32
+            } else {
+                0.0
+            };
+            let shaped =
+                self.channels[channel].process(dry, controls, anti_aliasing, mode, crosstalk_input);
             let effected = dry + controls.amount * (shaped - dry);
             *sample = finite_output(dry + controls.mix * (effected - dry));
         }
@@ -383,7 +677,7 @@ impl AnalogProcessor for TransformerModel {
     fn prepare(&mut self, spec: ProcessSpec) -> Result<(), AnalogError> {
         spec.validate()?;
         let channels = (0..spec.channels)
-            .map(|_| TransformerChannelState::new(spec.sample_rate))
+            .map(|_| TransformerChannelState::new(spec.sample_rate, self.defects))
             .collect();
         self.controls.reconfigure(spec.sample_rate);
         self.channels = channels;
@@ -406,8 +700,10 @@ impl AnalogProcessor for TransformerModel {
     ) -> Result<(), AnalogError> {
         let spec = self.spec.ok_or(AnalogError::NotPrepared)?;
         checked_block_len(spec, frames, samples.len())?;
+        let anti_aliasing = self.anti_aliasing;
+        let mode = self.mode;
         for frame in samples.chunks_exact_mut(spec.channels).take(frames) {
-            self.process_frame(frame, spec.channels);
+            self.process_frame(frame, spec.channels, anti_aliasing, mode);
         }
         Ok(())
     }
@@ -417,35 +713,72 @@ impl AnalogProcessor for TransformerModel {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug)]
 struct TransformerChannelState {
     flux: f32,
     flux_coefficient: f32,
+    static_tanh: Adaa1,
+    static_tanh_second: Adaa2,
+    defects: DefectState,
     dc_blocker: DcBlocker,
 }
 
 impl TransformerChannelState {
-    fn new(sample_rate: f32) -> Self {
+    fn new(sample_rate: f32, defects: DefectConfig) -> Self {
         Self {
             flux: 0.0,
             flux_coefficient: time_coefficient(120.0, sample_rate),
+            static_tanh: adaa1_tanh(),
+            static_tanh_second: adaa2_tanh(),
+            defects: DefectState::new(defects, sample_rate, MAX_DEFECT_DELAY_SAMPLES),
             dc_blocker: DcBlocker::new(sample_rate),
         }
     }
 
     #[inline]
-    fn process(&mut self, input: f32, controls: ControlFrame) -> f32 {
-        let u = (input * controls.drive).tanh();
-        self.flux = self.flux_coefficient * self.flux + (1.0 - self.flux_coefficient) * u;
+    fn process(
+        &mut self,
+        input: f32,
+        controls: ControlFrame,
+        anti_aliasing: AntiAliasing,
+        mode: TransformerMode,
+        crosstalk_input: f32,
+    ) -> f32 {
+        let driven = input * controls.drive;
+        let u = match anti_aliasing {
+            AntiAliasing::Off => driven.tanh(),
+            AntiAliasing::Adaa1 => self.static_tanh.process(driven),
+            AntiAliasing::Adaa2 => self.static_tanh_second.process(driven),
+        };
+        self.flux = match mode {
+            TransformerMode::Stylized => {
+                self.flux_coefficient * self.flux + (1.0 - self.flux_coefficient) * u
+            }
+            TransformerMode::Flux => {
+                // Voltage-integrated flux.  The smooth tanh saturation keeps
+                // the state bounded without making the hard clamp part of the
+                // nominal equation; non-finite input is a zero-state fallback.
+                let integrated = self.flux + (1.0 - self.flux_coefficient) * u;
+                if integrated.is_finite() {
+                    4.0 * (integrated / 4.0).tanh()
+                } else {
+                    0.0
+                }
+            }
+        };
         self.flux = flush_denormal(self.flux.clamp(-4.0, 4.0));
         let magnetization = ((1.0 + 2.0 * controls.character) * self.flux).tanh();
         let output =
             (0.7 * u + 0.3 * magnetization + 0.15 * controls.character * (u - self.flux)).tanh();
+        let output = self.defects.process(output, crosstalk_input);
         finite_output(self.dc_blocker.process(output) * controls.output_gain)
     }
 
     fn reset(&mut self) {
         self.flux = 0.0;
+        self.static_tanh.reset();
+        self.static_tanh_second.reset();
+        self.defects.reset();
         self.dc_blocker.reset();
     }
 }
@@ -532,6 +865,47 @@ mod tests {
             fresh.process_interleaved(&mut expected, 1).unwrap();
             assert_eq!(after_reset, expected);
         }
+    }
+
+    #[test]
+    fn tape_eq_and_optional_defects_are_prepared_and_default_off() {
+        let curve = TapeEqCurve::new(&[
+            crate::effects::TapeEqPoint {
+                frequency_hz: 20.0,
+                gain_db: 3.0,
+            },
+            crate::effects::TapeEqPoint {
+                frequency_hz: 12_000.0,
+                gain_db: -3.0,
+            },
+        ])
+        .unwrap();
+        let mut tape = TapeModel::new();
+        assert!(tape.tape_eq_curve().is_none());
+        tape.set_tape_eq_curve(Some(curve)).unwrap();
+        tape.set_head_bump(0.5, 80.0).unwrap();
+        tape.prepare(spec()).unwrap();
+        let mut samples = vec![0.25_f32; 2 * 128];
+        tape.process_interleaved(&mut samples, 128).unwrap();
+        assert!(samples.iter().all(|sample| sample.is_finite()));
+
+        let mut transformer = TransformerModel::new();
+        transformer
+            .set_defects(DefectConfig {
+                crosstalk: 0.25,
+                noise_floor: 0.001,
+                ..DefectConfig::default()
+            })
+            .unwrap();
+        transformer.prepare(spec()).unwrap();
+        let mut stereo = vec![0.0_f32; 2 * 128];
+        for frame in stereo.chunks_exact_mut(2) {
+            frame[0] = 0.25;
+            frame[1] = -0.25;
+        }
+        transformer.process_interleaved(&mut stereo, 128).unwrap();
+        assert!(stereo.iter().all(|sample| sample.is_finite()));
+        assert_ne!(transformer.defects().crosstalk, 0.0);
     }
 
     #[derive(Debug)]

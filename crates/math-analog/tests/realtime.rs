@@ -10,7 +10,7 @@ static GLOBAL: &stats_alloc::StatsAlloc<std::alloc::System> = &INSTRUMENTED_SYST
 fn representative_processing_does_not_allocate_after_prepare() {
     let mut cases = Vec::new();
     for channels in [1, 2, 6, 12] {
-        for model_id in 0..=AnalogModel::TRANSFORMER_ID {
+        for model_id in 0..=AnalogModel::CONSOLE_PREAMP_ID {
             let spec = ProcessSpec::new(48_000.0, channels, 512);
             let mut model = AnalogModel::from_id(model_id).expect("stable model id");
             model.prepare(spec).expect("valid process spec");

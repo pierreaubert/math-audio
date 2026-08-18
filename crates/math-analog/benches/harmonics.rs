@@ -31,7 +31,7 @@ fn harmonics_block(c: &mut Criterion) {
 fn model_channel_matrix(c: &mut Criterion) {
     let mut group = c.benchmark_group("analog_model_channel_matrix");
     for channels in [1, 2, 6, 12] {
-        for model_id in 0..=AnalogModel::TRANSFORMER_ID {
+        for model_id in 0..=AnalogModel::CONSOLE_PREAMP_ID {
             let spec = ProcessSpec::new(48_000.0, channels, 512);
             let mut model = AnalogModel::from_id(model_id).expect("stable model id");
             model.prepare(spec).expect("valid process spec");

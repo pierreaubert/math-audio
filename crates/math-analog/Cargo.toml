@@ -1,6 +1,6 @@
 [package]
 name = "math-analog"
-version = "0.5.1"
+version = "0.5.2"
 edition = { workspace = true }
 authors = { workspace = true }
 description = "Host-independent analog-style coloration models for audio DSP"
@@ -16,7 +16,16 @@ path = "src/lib.rs"
 
 [dependencies]
 math-dsp = { workspace = true }
+math-iir-fir = { workspace = true }
+math-optimisation = { workspace = true, optional = true }
+ndarray = { workspace = true, optional = true }
+rustfft = { workspace = true }
+serde = { workspace = true, optional = true }
 thiserror = { workspace = true }
+
+[features]
+default = []
+fitting = ["dep:math-optimisation", "dep:ndarray", "dep:serde"]
 
 [dev-dependencies]
 approx = { workspace = true }

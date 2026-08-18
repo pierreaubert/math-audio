@@ -1,5 +1,5 @@
 use math_audio_analog::analysis::measure_harmonics;
-use math_audio_analog::{AnalogProcessor, AntiAliasing, HarmonicModel, ProcessSpec};
+use math_audio_analog::{AnalogModel, AnalogProcessor, AntiAliasing, HarmonicModel, ProcessSpec};
 use std::f32::consts::TAU;
 
 const SAMPLE_RATES: [f32; 4] = [44_100.0, 48_000.0, 96_000.0, 192_000.0];
@@ -84,4 +84,61 @@ fn direct_and_adaa_modes_produce_reproducible_alias_reports() {
     assert!(off_report.component(3).unwrap().aliases);
     assert!(adaa_report.component(3).unwrap().aliases);
     assert_ne!(off.alias_rms.to_bits(), adaa.alias_rms.to_bits());
+}
+
+#[test]
+fn every_model_family_exposes_an_in_crate_alias_reduction_path() {
+    let sample_rate = 48_000.0;
+    let frequency = 10_000.0;
+    let record_length = 4_800;
+    let render = |model_id: u32, mode: AntiAliasing| {
+        let mut model = AnalogModel::from_id(model_id).unwrap();
+        match &mut model {
+            AnalogModel::Harmonics(model) => model.set_anti_aliasing(mode),
+            AnalogModel::Static(model) => model.set_anti_aliasing(mode),
+            AnalogModel::Hammerstein(model) => model.set_anti_aliasing(mode),
+            AnalogModel::Tape(model) => model.set_anti_aliasing(mode),
+            AnalogModel::Transformer(model) => model.set_anti_aliasing(mode),
+            AnalogModel::ConsolePreamp(model) => model.set_anti_aliasing(mode),
+        }
+        match &mut model {
+            AnalogModel::Harmonics(model) => {
+                model.set_drive_db(24.0).unwrap();
+                model.set_h2_db(0.0).unwrap();
+                model.set_h3_db(-6.0).unwrap();
+            }
+            AnalogModel::Static(model) => model.set_drive_db(24.0).unwrap(),
+            AnalogModel::Hammerstein(model) => model.set_drive_db(24.0).unwrap(),
+            AnalogModel::Tape(model) => model.set_drive_db(24.0).unwrap(),
+            AnalogModel::Transformer(model) => model.set_drive_db(24.0).unwrap(),
+            AnalogModel::ConsolePreamp(model) => model.set_input_gain_db(24.0).unwrap(),
+        }
+        model
+            .prepare(ProcessSpec::new(sample_rate, 1, record_length))
+            .unwrap();
+        let mut samples: Vec<f32> = (0..record_length)
+            .map(|index| (TAU * frequency * index as f32 / sample_rate).sin() * 0.8)
+            .collect();
+        model
+            .process_interleaved(&mut samples, record_length)
+            .unwrap();
+        measure_harmonics(&samples, sample_rate, frequency, 5)
+            .unwrap()
+            .distortion(&samples)
+            .unwrap()
+            .alias_rms
+    };
+
+    for model_id in 0..=AnalogModel::CONSOLE_PREAMP_ID {
+        let off = render(model_id, AntiAliasing::Off);
+        let adaa = render(model_id, AntiAliasing::Adaa1);
+        assert!(
+            off.is_finite() && adaa.is_finite(),
+            "model {model_id} was non-finite"
+        );
+        assert!(
+            adaa < off * 0.5,
+            "model {model_id} failed the provisional folded-energy guard: ADAA={adaa} Off={off}"
+        );
+    }
 }

@@ -1,4 +1,8 @@
-use math_audio_dsp::adaa::{Adaa1, adaa1_hardclip, adaa1_softclip, adaa1_tanh};
+use math_audio_dsp::adaa::{
+    Adaa1, Adaa2, adaa1_hardclip, adaa1_softclip, adaa1_tanh, adaa2_hardclip, adaa2_softclip,
+    adaa2_tanh,
+};
+use math_audio_dsp::simd::{hardclip_static_simd, softclip_static_simd};
 
 use crate::chain::DcBlocker;
 use crate::level::{calibrated_input_gain, db_to_gain};
@@ -169,6 +173,56 @@ impl StaticColorModel {
             *sample = finite_output(dry + mix * (effected - dry));
         }
     }
+
+    fn controls_are_settled(&self) -> bool {
+        self.drive_db.is_settled()
+            && self.output_gain_db.is_settled()
+            && self.character.is_settled()
+            && self.amount.is_settled()
+            && self.mix.is_settled()
+    }
+
+    fn process_off_batch(&mut self, samples: &mut [f32], spec: ProcessSpec, frames: usize) {
+        let drive = calibrated_input_gain(self.drive_db.advance());
+        let output_gain = db_to_gain(self.output_gain_db.advance());
+        let character_bias = (self.character.advance() - 0.5) * 0.8;
+        let amount = self.amount.advance();
+        let mix = self.mix.advance();
+        for channel in 0..spec.channels {
+            let state = &mut self.channels[channel];
+            for frame in 0..frames {
+                let index = frame * spec.channels + channel;
+                state.simd_input[frame] = sanitize_sample(samples[index]) * drive + character_bias;
+            }
+            match self.curve {
+                StaticCurve::TanhStyle => {
+                    for frame in 0..frames {
+                        state.simd_output[frame] = state.simd_input[frame].tanh();
+                    }
+                }
+                StaticCurve::SoftClipStyle => {
+                    softclip_static_simd(
+                        &state.simd_input[..frames],
+                        &mut state.simd_output[..frames],
+                    );
+                }
+                StaticCurve::HardClipStyle => {
+                    hardclip_static_simd(
+                        &state.simd_input[..frames],
+                        &mut state.simd_output[..frames],
+                    );
+                }
+            }
+            for frame in 0..frames {
+                let index = frame * spec.channels + channel;
+                let dry = sanitize_sample(samples[index]);
+                let shaped =
+                    finite_output(state.dc_blocker.process(state.simd_output[frame]) * output_gain);
+                let effected = dry + amount * (shaped - dry);
+                samples[index] = finite_output(dry + mix * (effected - dry));
+            }
+        }
+    }
 }
 
 impl AnalogProcessor for StaticColorModel {
@@ -176,7 +230,10 @@ impl AnalogProcessor for StaticColorModel {
         spec.validate()?;
         let mut channels = Vec::with_capacity(spec.channels);
         for _ in 0..spec.channels {
-            channels.push(StaticChannelState::new(spec.sample_rate));
+            channels.push(StaticChannelState::new(
+                spec.sample_rate,
+                spec.max_block_frames,
+            ));
         }
         self.drive_db.reconfigure(spec.sample_rate);
         self.output_gain_db.reconfigure(spec.sample_rate);
@@ -208,6 +265,13 @@ impl AnalogProcessor for StaticColorModel {
         let spec = self.spec.ok_or(AnalogError::NotPrepared)?;
         checked_block_len(spec, frames, samples.len())?;
         let anti_aliasing = self.anti_aliasing;
+        if frames > 0
+            && anti_aliasing == crate::harmonics::AntiAliasing::Off
+            && self.controls_are_settled()
+        {
+            self.process_off_batch(samples, spec, frames);
+            return Ok(());
+        }
         for frame in samples.chunks_exact_mut(spec.channels).take(frames) {
             self.process_frame(frame, spec.channels, anti_aliasing);
         }
@@ -223,7 +287,12 @@ struct StaticChannelState {
     tanh: Adaa1,
     softclip: Adaa1,
     hardclip: Adaa1,
+    tanh_second: Adaa2,
+    softclip_second: Adaa2,
+    hardclip_second: Adaa2,
     dc_blocker: DcBlocker,
+    simd_input: Vec<f32>,
+    simd_output: Vec<f32>,
 }
 
 impl std::fmt::Debug for StaticChannelState {
@@ -235,12 +304,17 @@ impl std::fmt::Debug for StaticChannelState {
 }
 
 impl StaticChannelState {
-    fn new(sample_rate: f32) -> Self {
+    fn new(sample_rate: f32, max_block_frames: usize) -> Self {
         Self {
             tanh: adaa1_tanh(),
             softclip: adaa1_softclip(),
             hardclip: adaa1_hardclip(),
+            tanh_second: adaa2_tanh(),
+            softclip_second: adaa2_softclip(),
+            hardclip_second: adaa2_hardclip(),
             dc_blocker: DcBlocker::new(sample_rate),
+            simd_input: vec![0.0; max_block_frames],
+            simd_output: vec![0.0; max_block_frames],
         }
     }
 
@@ -265,6 +339,15 @@ impl StaticChannelState {
             (StaticCurve::HardClipStyle, crate::harmonics::AntiAliasing::Adaa1) => {
                 self.hardclip.process(driven)
             }
+            (StaticCurve::TanhStyle, crate::harmonics::AntiAliasing::Adaa2) => {
+                self.tanh_second.process(driven)
+            }
+            (StaticCurve::SoftClipStyle, crate::harmonics::AntiAliasing::Adaa2) => {
+                self.softclip_second.process(driven)
+            }
+            (StaticCurve::HardClipStyle, crate::harmonics::AntiAliasing::Adaa2) => {
+                self.hardclip_second.process(driven)
+            }
             (StaticCurve::TanhStyle, crate::harmonics::AntiAliasing::Off) => {
                 (driven as f64).tanh() as f32
             }
@@ -283,7 +366,12 @@ impl StaticChannelState {
         self.tanh.reset();
         self.softclip.reset();
         self.hardclip.reset();
+        self.tanh_second.reset();
+        self.softclip_second.reset();
+        self.hardclip_second.reset();
         self.dc_blocker.reset();
+        self.simd_input.fill(0.0);
+        self.simd_output.fill(0.0);
     }
 }
 

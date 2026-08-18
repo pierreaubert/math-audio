@@ -57,6 +57,8 @@ pub enum AnalogError {
         min: f32,
         max: f32,
     },
+    #[error("invalid defect configuration: {0}")]
+    InvalidDefectConfig(String),
     #[error("unknown analog model id {0}")]
     UnknownModelId(u32),
 }
@@ -85,6 +87,7 @@ pub trait AnalogProcessor {
 pub(crate) struct ControlSmoother {
     target: f32,
     current: f32,
+    time_ms: f32,
     coeff: f32,
 }
 
@@ -94,6 +97,7 @@ impl fmt::Debug for ControlSmoother {
             .debug_struct("ControlSmoother")
             .field("target", &self.target)
             .field("current", &self.current)
+            .field("time_ms", &self.time_ms)
             .field("coeff", &self.coeff)
             .finish()
     }
@@ -104,6 +108,7 @@ impl ControlSmoother {
         Self {
             target: value,
             current: value,
+            time_ms,
             coeff: Self::coefficient(time_ms, sample_rate),
         }
     }
@@ -117,7 +122,7 @@ impl ControlSmoother {
     }
 
     pub(crate) fn reconfigure(&mut self, sample_rate: f32) {
-        self.coeff = Self::coefficient(10.0, sample_rate);
+        self.coeff = Self::coefficient(self.time_ms, sample_rate);
     }
 
     pub(crate) fn set_target(&mut self, value: f32) {
@@ -148,6 +153,10 @@ impl ControlSmoother {
 
     pub(crate) fn target(&self) -> f32 {
         self.target
+    }
+
+    pub(crate) fn is_settled(&self) -> bool {
+        self.coeff == 0.0 || (self.current - self.target).abs() < 1e-6
     }
 }
 
@@ -235,5 +244,17 @@ mod tests {
         assert_eq!(flush_denormal(f32::MIN_POSITIVE * 0.5), 0.0);
         assert_eq!(flush_denormal(-f32::MIN_POSITIVE * 0.5), 0.0);
         assert_eq!(flush_denormal(f32::MIN_POSITIVE), f32::MIN_POSITIVE);
+    }
+
+    #[test]
+    fn reconfigure_preserves_the_configured_time_constant() {
+        let mut smoother = ControlSmoother::new(0.0, 80.0, 48_000.0);
+        smoother.set_target(1.0);
+        smoother.reconfigure(96_000.0);
+        let one_tau_samples = (0.080_f32 * 96_000.0_f32).round() as usize;
+        for _ in 0..one_tau_samples {
+            smoother.advance();
+        }
+        assert!((smoother.current - (1.0 - (-1.0_f32).exp())).abs() < 0.01);
     }
 }
