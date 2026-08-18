@@ -238,6 +238,11 @@ qa_cov_optimisation := "79"
 qa_cov_rir := "94"
 qa_cov_test_functions := "90"
 
+# plotly's askama templates fail to compile when the cargo registry path
+# traverses a symlinked ~/.cargo; use the canonical path everywhere.
+# (export applies to the whole Justfile regardless of where it appears.)
+export CARGO_HOME := env_var_or_default("CARGO_HOME", canonicalize(home_directory() / ".cargo"))
+
 [private]
 _qa crate threshold:
 	echo "==================== QA: {{crate}} ===================="
@@ -252,6 +257,16 @@ _qa crate threshold:
 qa-convex-hull: (_qa "math-convex-hull" qa_cov_convex_hull)
 
 qa-delaunay: (_qa "math-delaunay" qa_cov_delaunay)
+
+qa-rir: (_qa "math-rir" qa_cov_rir)
+	cargo bench -p math-rir --bench iso3382 -- --quick
+
+qa-test-functions: (_qa "math-test-functions" qa_cov_test_functions) examples-testfunctions
+	cargo run --release -p math-test-functions --example test_additional_functions
+	cargo run --release -p math-test-functions --example test_gramacy_lee
+	cargo run --release -p math-test-functions --example find_hartman_4d_min
+	cargo build --release --bin plot-functions -p math-test-functions --features plotly
+	cargo bench -p math-test-functions --bench eval -- --quick
 
 # ----------------------------------------------------------------------
 # POST
