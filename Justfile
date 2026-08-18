@@ -299,6 +299,12 @@ qa-analog: (_qa "math-analog" qa_cov_analog)
 	cargo run --release -p math-analog --example fitting_report --features fitting
 	cargo bench -p math-analog --bench harmonics -- --quick
 
+alias qa-math := qa
+
+qa: qa-analog qa-autodiff qa-convex-hull qa-delaunay qa-dsp qa-iir-fir qa-optimisation qa-rir qa-test-functions
+	cargo clippy --all --features plotly -- -D warnings
+	cargo llvm-cov --lib --summary-only --release --fail-under-lines 90
+
 # ----------------------------------------------------------------------
 # POST
 # ----------------------------------------------------------------------
