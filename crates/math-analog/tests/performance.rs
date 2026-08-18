@@ -120,7 +120,11 @@ fn simd_chebyshev_criterion_covers_six_and_twelve_channels() {
             "math-analog SIMD criterion: channels={channels} scalar_ns={scalar_ns} simd_ns={simd_ns} available={}",
             analog_simd_available()
         );
-        if !cfg!(debug_assertions) && analog_simd_available() {
+        // Timing assertions are meaningless under coverage instrumentation
+        // (-C instrument-coverage), where counter writes dominate and the
+        // SIMD speedup disappears; llvm-cov sets LLVM_PROFILE_FILE there.
+        let under_coverage = std::env::var_os("LLVM_PROFILE_FILE").is_some();
+        if !cfg!(debug_assertions) && !under_coverage && analog_simd_available() {
             assert!(
                 simd_ns < scalar_ns,
                 "SIMD kernel did not beat scalar reference at {channels} channels: {simd_ns} >= {scalar_ns}"

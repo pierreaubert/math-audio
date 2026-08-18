@@ -100,7 +100,7 @@ jobs:
         run: just qa
 
   coverage-gate:
-    name: Library Unit-Test Coverage Gate (90 %)
+    name: Test Coverage Gate (90 %)
     runs-on: ubuntu-latest
     needs: check-and-test
     steps:
@@ -124,4 +124,4 @@ jobs:
           key: ${{ runner.os }}-cargo-coverage-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Run coverage gate
-        run: cargo llvm-cov --lib --summary-only --release --fail-under-lines 90
+        run: cargo llvm-cov --summary-only --release --fail-under-lines 90

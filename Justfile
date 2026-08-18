@@ -224,17 +224,17 @@ publish-math:
 # QA
 # ----------------------------------------------------------------------
 
-# Per-crate coverage ratchet thresholds (lines %, measured 2026-08-18).
-# Raise these when coverage improves; never lower them.
-# Note: math-autodiff tests live in tests/ (integration), so --lib
-# instrumentation covers almost nothing; its ratchet is 0 until fixed.
-qa_cov_analog := "74"
-qa_cov_autodiff := "0"
-qa_cov_convex_hull := "47"
-qa_cov_delaunay := "87"
-qa_cov_dsp := "83"
-qa_cov_iir_fir := "78"
-qa_cov_optimisation := "79"
+# Per-crate coverage ratchet thresholds (lines %, measured 2026-08-18,
+# integration tests included). Raise when coverage improves; never lower.
+# dsp/optimisation include their (largely untested) bin targets, hence the
+# lower values versus the old --lib-only measurement.
+qa_cov_analog := "78"
+qa_cov_autodiff := "76"
+qa_cov_convex_hull := "90"
+qa_cov_delaunay := "88"
+qa_cov_dsp := "82"
+qa_cov_iir_fir := "80"
+qa_cov_optimisation := "62"
 qa_cov_rir := "94"
 qa_cov_test_functions := "90"
 
@@ -252,7 +252,7 @@ _qa crate threshold:
 	cargo test -p {{crate}} --tests --release
 	cargo test -p {{crate}} --doc
 	cargo bench -p {{crate}} --no-run
-	cargo llvm-cov -p {{crate}} --lib --summary-only --release --fail-under-lines {{threshold}}
+	cargo llvm-cov -p {{crate}} --summary-only --release --fail-under-lines {{threshold}}
 
 qa-convex-hull: (_qa "math-convex-hull" qa_cov_convex_hull)
 
@@ -303,7 +303,7 @@ alias qa-math := qa
 
 qa: qa-analog qa-autodiff qa-convex-hull qa-delaunay qa-dsp qa-iir-fir qa-optimisation qa-rir qa-test-functions
 	cargo clippy --all --features plotly -- -D warnings
-	cargo llvm-cov --lib --summary-only --release --fail-under-lines 90
+	cargo llvm-cov --summary-only --release --fail-under-lines 90
 
 # ----------------------------------------------------------------------
 # POST
