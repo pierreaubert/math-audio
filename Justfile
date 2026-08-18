@@ -281,6 +281,9 @@ qa-optimisation: (_qa "math-optimisation" qa_cov_optimisation) examples-optimisa
 	cargo bench -p math-optimisation --bench de_bench -- --quick
 	cargo bench -p math-optimisation --bench cmaes_bench -- --quick
 
+qa-autodiff: (_qa "math-autodiff" qa_cov_autodiff) examples-autodiff
+	cargo bench -p math-autodiff --bench biquad_bench -- --quick
+
 # ----------------------------------------------------------------------
 # POST
 # ----------------------------------------------------------------------
