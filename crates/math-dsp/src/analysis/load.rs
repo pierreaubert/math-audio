@@ -1,6 +1,15 @@
 use hound::WavReader;
 use std::path::Path;
 
+/// Full-scale divisor for integer PCM of the given bit depth.
+///
+/// hound sign-extends integer samples into `i32` without left-shifting, so
+/// 16-bit audio peaks at `1 << 15` and 24-bit audio at `1 << 23` — dividing
+/// by `i32::MAX` would make 16-bit files ~96 dB too quiet.
+fn int_full_scale(bits_per_sample: u16) -> f32 {
+    (1_i64 << (bits_per_sample - 1)) as f32
+}
+
 /// Load WAV file as mono and return samples with sample rate
 pub(super) fn load_wav_mono_with_rate(path: &Path) -> Result<(Vec<f32>, u32), String> {
     let mut reader =
@@ -13,7 +22,7 @@ pub(super) fn load_wav_mono_with_rate(path: &Path) -> Result<(Vec<f32>, u32), St
     let samples: Result<Vec<f32>, _> = match spec.sample_format {
         hound::SampleFormat::Float => reader.samples::<f32>().collect(),
         hound::SampleFormat::Int => {
-            let max_val = (1_i64 << (spec.bits_per_sample - 1)) as f32;
+            let max_val = int_full_scale(spec.bits_per_sample);
             reader
                 .samples::<i32>()
                 .map(|s| s.map(|v| v as f32 / max_val))
@@ -62,10 +71,13 @@ pub(super) fn load_wav_mono_channel(
     // Read all samples and convert to f32
     let samples: Result<Vec<f32>, _> = match spec.sample_format {
         hound::SampleFormat::Float => reader.samples::<f32>().collect(),
-        hound::SampleFormat::Int => reader
-            .samples::<i32>()
-            .map(|s| s.map(|v| v as f32 / i32::MAX as f32))
-            .collect(),
+        hound::SampleFormat::Int => {
+            let max_val = int_full_scale(spec.bits_per_sample);
+            reader
+                .samples::<i32>()
+                .map(|s| s.map(|v| v as f32 / max_val))
+                .collect()
+        }
     };
 
     let samples = samples.map_err(|e| format!("Failed to read samples: {}", e))?;

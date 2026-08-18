@@ -1737,18 +1737,23 @@ checksum = "0ceec5bc11778974d1bcb055b18002eba7f4b3518b6a0081b3af5f21666da9ad"
 
 [[package]]
 name = "math-analog"
-version = "0.5.0"
+version = "0.5.2"
 dependencies = [
  "approx",
  "criterion",
  "math-dsp",
+ "math-iir-fir",
+ "math-optimisation",
+ "ndarray",
+ "rustfft",
+ "serde",
  "stats_alloc",
  "thiserror 2.0.18",
 ]
 
 [[package]]
 name = "math-autodiff"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "approx",
  "criterion",
@@ -1789,7 +1794,7 @@ dependencies = [
 
 [[package]]
 name = "math-dsp"
-version = "0.5.23"
+version = "0.5.24"
 dependencies = [
  "approx",
  "clap",
@@ -1812,7 +1817,7 @@ dependencies = [
 
 [[package]]
 name = "math-iir-fir"
-version = "0.5.17"
+version = "0.5.18"
 dependencies = [
  "base64 0.22.1",
  "byteorder",
@@ -1848,7 +1853,7 @@ dependencies = [
 
 [[package]]
 name = "math-rir"
-version = "0.5.7"
+version = "0.5.8"
 dependencies = [
  "criterion",
  "math-iir-fir",

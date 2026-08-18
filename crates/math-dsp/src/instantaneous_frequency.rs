@@ -9,7 +9,8 @@
 // transform. The instantaneous frequency is the derivative of the
 // instantaneous phase.
 
-use crate::stft::RealFftProcessor;
+use crate::analysis::{plan_fft_inverse, plan_real_fft_forward};
+use rayon::prelude::*;
 use rustfft::num_complex::Complex;
 
 /// Result of instantaneous frequency analysis.
@@ -42,14 +43,14 @@ pub fn analytic_signal(signal: &[f32]) -> Vec<Complex<f32>> {
     let fft_size = n;
     let spectrum_size = fft_size / 2 + 1;
 
-    let mut fft = RealFftProcessor::new_bidirectional(fft_size);
-
-    // Copy signal into time buffer (zero-padded)
-    fft.time_buffer[..n].copy_from_slice(signal);
-    fft.time_buffer[n..].fill(0.0);
-
-    // Forward FFT
-    fft.forward();
+    // Cached thread-local plans: no per-call planner construction, and
+    // only the forward real FFT is planned (the inverse below is the
+    // complex plan, also cached).
+    let fft = plan_real_fft_forward(fft_size);
+    let mut time_buffer = signal.to_vec();
+    let mut freq_buffer = fft.make_output_vec();
+    fft.process(&mut time_buffer, &mut freq_buffer)
+        .expect("real FFT forward failed");
 
     // Build full complex spectrum for complex IFFT
     // We need to use a complex FFT for the inverse since the result is complex
@@ -60,11 +61,11 @@ pub fn analytic_signal(signal: &[f32]) -> Vec<Complex<f32>> {
     // Positive frequencies: multiply by 2
     // Nyquist: keep as-is (multiply by 1)
     // Negative frequencies: zero
-    full_spectrum[0] = fft.freq_buffer[0];
+    full_spectrum[0] = freq_buffer[0];
 
     for (dst, &src) in full_spectrum[1..spectrum_size - 1]
         .iter_mut()
-        .zip(&fft.freq_buffer[1..spectrum_size - 1])
+        .zip(&freq_buffer[1..spectrum_size - 1])
     {
         *dst = src * 2.0;
     }
@@ -73,17 +74,16 @@ pub fn analytic_signal(signal: &[f32]) -> Vec<Complex<f32>> {
     // is a positive-frequency bin and should be doubled
     if spectrum_size > 1 {
         if fft_size.is_multiple_of(2) {
-            full_spectrum[spectrum_size - 1] = fft.freq_buffer[spectrum_size - 1];
+            full_spectrum[spectrum_size - 1] = freq_buffer[spectrum_size - 1];
         } else {
-            full_spectrum[spectrum_size - 1] = fft.freq_buffer[spectrum_size - 1] * 2.0;
+            full_spectrum[spectrum_size - 1] = freq_buffer[spectrum_size - 1] * 2.0;
         }
     }
 
     // Negative frequencies are already zero
 
-    // Inverse FFT using rustfft (complex-to-complex)
-    let mut planner = rustfft::FftPlanner::new();
-    let ifft = planner.plan_fft_inverse(fft_size);
+    // Inverse FFT using rustfft (complex-to-complex), cached plan.
+    let ifft = plan_fft_inverse(fft_size);
     ifft.process(&mut full_spectrum);
 
     // Normalize and truncate to original length
@@ -201,29 +201,46 @@ pub fn subband_instantaneous_frequency(
     let mut weighted_freq = vec![0.0f32; n];
     let mut total_weight = vec![0.0f32; n];
 
-    for b in 0..bands {
-        let f_low = ((log_min + (log_max - log_min) * b as f32 / bands as f32).exp()).max(20.0);
-        let f_high = ((log_min + (log_max - log_min) * (b + 1) as f32 / bands as f32).exp())
-            .min(nyquist * 0.95);
+    // Bands are independent: filter + IF per band run in parallel. The
+    // per-band contributions are collected in band order (rayon's collect
+    // preserves order) and summed sequentially, so the accumulation order
+    // — and therefore the output — is identical to the serial version.
+    let band_contributions: Vec<(Vec<f32>, Vec<f32>)> = (0..bands)
+        .into_par_iter()
+        .filter_map(|b| {
+            let f_low =
+                ((log_min + (log_max - log_min) * b as f32 / bands as f32).exp()).max(20.0);
+            let f_high = ((log_min + (log_max - log_min) * (b + 1) as f32 / bands as f32).exp())
+                .min(nyquist * 0.95);
 
-        if f_low >= f_high {
-            continue;
-        }
+            if f_low >= f_high {
+                return None;
+            }
 
-        let f_center = (f_low * f_high).sqrt();
-        let q = f_center / (f_high - f_low);
+            let f_center = (f_low * f_high).sqrt();
+            let q = f_center / (f_high - f_low);
 
-        // Apply bandpass filter using biquad
-        let filtered = apply_bandpass(signal, sample_rate, f_center, q);
+            // Apply bandpass filter using biquad
+            let filtered = apply_bandpass(signal, sample_rate, f_center, q);
 
-        // Compute IF for this subband
-        let if_result = instantaneous_frequency(&filtered, sample_rate);
+            // Compute IF for this subband
+            let if_result = instantaneous_frequency(&filtered, sample_rate);
 
-        // Amplitude-weighted accumulation
+            let mut w_freq = vec![0.0f32; n];
+            let mut w_total = vec![0.0f32; n];
+            for i in 0..n {
+                let w = if_result.amplitudes[i];
+                w_freq[i] = if_result.frequencies[i] * w;
+                w_total[i] = w;
+            }
+            Some((w_freq, w_total))
+        })
+        .collect();
+
+    for (w_freq, w_total) in band_contributions {
         for i in 0..n {
-            let w = if_result.amplitudes[i];
-            weighted_freq[i] += if_result.frequencies[i] * w;
-            total_weight[i] += w;
+            weighted_freq[i] += w_freq[i];
+            total_weight[i] += w_total[i];
         }
     }
 

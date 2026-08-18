@@ -3,6 +3,14 @@
 //! These functions are reusable building blocks for perceptual losses. They do
 //! not depend on any optimiser or AutoEQ-specific parameter layout.
 
+use num_complex::Complex64;
+use rustfft::FftPlanner;
+use std::cell::RefCell;
+
+thread_local! {
+    static FFT_PLANNER: RefCell<FftPlanner<f64>> = RefCell::new(FftPlanner::new());
+}
+
 /// Standard Bark band center frequencies in Hz for 24 critical bands.
 pub const BARK_CENTER_FREQUENCIES: [f64; 24] = [
     50.0, 150.0, 250.0, 350.0, 450.0, 570.0, 700.0, 840.0, 1000.0, 1170.0, 1370.0, 1600.0, 1850.0,
@@ -63,7 +71,7 @@ impl PsychoacousticFeatures {
     pub fn from_response(freqs: &[f64], spl_db: &[f64], listening_level_phon: f64) -> Self {
         let calibrated_spl = calibrate_to_listening_level(freqs, spl_db, listening_level_phon);
         let bark_levels = bark_spectrum(freqs, &calibrated_spl);
-        let specific_loudness = specific_loudness(freqs, spl_db, listening_level_phon);
+        let specific_loudness = specific_loudness_from_band_levels(bark_levels);
         let total_loudness_sone = total_loudness(&specific_loudness);
         let sharpness_acum = sharpness(&specific_loudness);
         let roughness = roughness_from_spectrum(freqs, &calibrated_spl);
@@ -159,20 +167,23 @@ fn interpolate_log_frequency(points: &[(f64, f64)], target_hz: f64) -> Option<f6
 
 /// Decompose a frequency response into 24 Bark bands by energy-averaging SPL.
 pub fn bark_spectrum(freqs: &[f64], spl_db: &[f64]) -> [f64; 24] {
+    let mut energy_sum = [0.0_f64; 24];
+    let mut count = [0u32; 24];
+    for (&f, &level) in freqs.iter().zip(spl_db.iter()) {
+        // BARK_BAND_EDGES is ascending, so each frequency belongs to exactly
+        // one band; locate it with a binary search instead of scanning all
+        // 24 bands. Frequencies outside [0, 15500) fall in no band.
+        let idx = BARK_BAND_EDGES.partition_point(|&edge| edge <= f);
+        if idx == 0 || idx > 24 {
+            continue;
+        }
+        energy_sum[idx - 1] += 10.0_f64.powf(level / 10.0);
+        count[idx - 1] += 1;
+    }
     let mut result = [-100.0_f64; 24];
     for band in 0..24 {
-        let lo = BARK_BAND_EDGES[band];
-        let hi = BARK_BAND_EDGES[band + 1];
-        let mut energy_sum = 0.0_f64;
-        let mut count = 0u32;
-        for (&f, &level) in freqs.iter().zip(spl_db.iter()) {
-            if f >= lo && f < hi {
-                energy_sum += 10.0_f64.powf(level / 10.0);
-                count += 1;
-            }
-        }
-        if count > 0 {
-            result[band] = 10.0 * (energy_sum / count as f64).log10();
+        if count[band] > 0 {
+            result[band] = 10.0 * (energy_sum[band] / count[band] as f64).log10();
         }
     }
     result
@@ -214,7 +225,15 @@ pub fn excitation_pattern(bark_levels: &[f64; 24]) -> [f64; 24] {
 /// `listening_level_phon`, then converted to excitation and specific loudness.
 pub fn specific_loudness(freqs: &[f64], spl_db: &[f64], listening_level_phon: f64) -> [f64; 24] {
     let calibrated_spl = calibrate_to_listening_level(freqs, spl_db, listening_level_phon);
-    let mut band_levels = bark_spectrum(freqs, &calibrated_spl);
+    let band_levels = bark_spectrum(freqs, &calibrated_spl);
+    specific_loudness_from_band_levels(band_levels)
+}
+
+/// Specific loudness from already-calibrated Bark band levels.
+///
+/// Skips the listening-level calibration and Bark decomposition for callers
+/// (like [`PsychoacousticFeatures::from_response`]) that have them at hand.
+fn specific_loudness_from_band_levels(mut band_levels: [f64; 24]) -> [f64; 24] {
     for i in 0..24 {
         band_levels[i] += OUTER_EAR_TF[i];
     }
@@ -371,18 +390,42 @@ fn roughness_pair(a: RoughnessPartial, b: RoughnessPartial) -> f64 {
     (a_min * a_max).powf(0.1) * level_balance * interaction
 }
 
-/// Time-domain linear convolution.
+/// Time-domain linear convolution via a single padded FFT.
+///
+/// Output length is `signal.len() + impulse.len() - 1`, matching the naive
+/// direct-sum definition to within floating-point tolerance.
 pub fn convolve_time_domain(signal: &[f64], impulse: &[f64]) -> Vec<f64> {
     if signal.is_empty() || impulse.is_empty() {
         return Vec::new();
     }
-    let mut out = vec![0.0; signal.len() + impulse.len() - 1];
-    for (i, &x) in signal.iter().enumerate() {
-        for (j, &h) in impulse.iter().enumerate() {
-            out[i + j] += x * h;
-        }
+    let out_len = signal.len() + impulse.len() - 1;
+    let fft_size = out_len.next_power_of_two();
+    let (forward, inverse) = FFT_PLANNER.with(|planner| {
+        let mut planner = planner.borrow_mut();
+        (
+            planner.plan_fft_forward(fft_size),
+            planner.plan_fft_inverse(fft_size),
+        )
+    });
+    let mut spectrum_signal = vec![Complex64::new(0.0, 0.0); fft_size];
+    let mut spectrum_impulse = vec![Complex64::new(0.0, 0.0); fft_size];
+    for (slot, &x) in spectrum_signal.iter_mut().zip(signal.iter()) {
+        *slot = Complex64::new(x, 0.0);
     }
-    out
+    for (slot, &h) in spectrum_impulse.iter_mut().zip(impulse.iter()) {
+        *slot = Complex64::new(h, 0.0);
+    }
+    forward.process(&mut spectrum_signal);
+    forward.process(&mut spectrum_impulse);
+    for (x, &h) in spectrum_signal.iter_mut().zip(spectrum_impulse.iter()) {
+        *x *= h;
+    }
+    inverse.process(&mut spectrum_signal);
+    spectrum_signal.truncate(out_len);
+    spectrum_signal
+        .into_iter()
+        .map(|value| value.re / fft_size as f64)
+        .collect()
 }
 
 /// Convolve stereo input through a 2x2 HRTF/CTC matrix.
@@ -469,6 +512,124 @@ mod tests {
     fn convolution_matches_manual_result() {
         let y = convolve_time_domain(&[1.0, 2.0, 3.0], &[0.5, 1.0]);
         assert_eq!(y, vec![0.5, 2.0, 3.5, 3.0]);
+    }
+
+    /// Characterization test: `convolve_time_domain` now uses a padded FFT
+    /// instead of the naive O(n*m) sum. Pin agreement with the naive
+    /// definition (reimplemented inline) to a tight relative tolerance.
+    #[test]
+    fn fft_convolution_matches_naive_reference() {
+        fn naive(signal: &[f64], impulse: &[f64]) -> Vec<f64> {
+            let mut out = vec![0.0; signal.len() + impulse.len() - 1];
+            for (i, &x) in signal.iter().enumerate() {
+                for (j, &h) in impulse.iter().enumerate() {
+                    out[i + j] += x * h;
+                }
+            }
+            out
+        }
+
+        // Deterministic pseudo-random signal/kernel (LCG) over a few shapes.
+        let mut state = 0x1234_5678_9abc_def0u64;
+        let mut next = move || {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            ((state >> 33) as f64 / u32::MAX as f64) * 2.0 - 1.0
+        };
+        for &(n, m) in &[(1usize, 1usize), (7, 3), (100, 1), (1, 64), (300, 129)] {
+            let signal: Vec<f64> = (0..n).map(|_| next()).collect();
+            let impulse: Vec<f64> = (0..m).map(|_| next()).collect();
+            let got = convolve_time_domain(&signal, &impulse);
+            let expected = naive(&signal, &impulse);
+            assert_eq!(got.len(), expected.len());
+            let peak = expected.iter().fold(0.0_f64, |a, &b| a.max(b.abs()));
+            for (idx, (&g, &e)) in got.iter().zip(expected.iter()).enumerate() {
+                assert!(
+                    (g - e).abs() <= 1e-5 * peak.max(1e-12),
+                    "n={n} m={m} idx={idx}: got {g}, expected {e}"
+                );
+            }
+        }
+    }
+
+    /// Characterization test: `bark_spectrum` now finds each frequency's band
+    /// with a single binary search over `BARK_BAND_EDGES` instead of 24 full
+    /// passes. Pin agreement with the old per-band scan (reimplemented
+    /// inline), including on unsorted frequency grids.
+    #[test]
+    fn bark_spectrum_matches_per_band_scan_reference() {
+        fn reference(freqs: &[f64], spl_db: &[f64]) -> [f64; 24] {
+            let mut result = [-100.0_f64; 24];
+            for band in 0..24 {
+                let lo = BARK_BAND_EDGES[band];
+                let hi = BARK_BAND_EDGES[band + 1];
+                let mut energy_sum = 0.0_f64;
+                let mut count = 0u32;
+                for (&f, &level) in freqs.iter().zip(spl_db.iter()) {
+                    if f >= lo && f < hi {
+                        energy_sum += 10.0_f64.powf(level / 10.0);
+                        count += 1;
+                    }
+                }
+                if count > 0 {
+                    result[band] = 10.0 * (energy_sum / count as f64).log10();
+                }
+            }
+            result
+        }
+
+        let sorted: Vec<f64> = (0..1000)
+            .map(|i| 20.0 + (16000.0 - 20.0) * i as f64 / 999.0)
+            .collect();
+        // Unsorted grid (bit-reversed-ish shuffle of the sorted one), plus
+        // out-of-range and exact-edge frequencies.
+        let mut unsorted: Vec<f64> = sorted.iter().step_by(7).copied().collect();
+        unsorted.extend(sorted.iter().skip(3).step_by(11));
+        unsorted.extend([0.0, 100.0, 15500.0, -5.0, 20000.0]);
+        for freqs in [&sorted, &unsorted] {
+            let spl: Vec<f64> = freqs
+                .iter()
+                .map(|&f| 60.0 + 15.0 * (f * 0.01).sin())
+                .collect();
+            let got = bark_spectrum(freqs, &spl);
+            let expected = reference(freqs, &spl);
+            for band in 0..24 {
+                assert!(
+                    (got[band] - expected[band]).abs() < 1e-12,
+                    "band {band}: got {}, expected {}",
+                    got[band],
+                    expected[band]
+                );
+            }
+        }
+    }
+
+    /// `from_response` must agree with the standalone `specific_loudness`
+    /// entry point now that it reuses its own calibrated band levels.
+    #[test]
+    fn from_response_specific_loudness_matches_standalone() {
+        let freqs: Vec<f64> = (0..1000)
+            .map(|i| 20.0 + (16000.0 - 20.0) * i as f64 / 999.0)
+            .collect();
+        let spl: Vec<f64> = freqs
+            .iter()
+            .map(|&f| 60.0 + 15.0 * (f * 0.01).sin())
+            .collect();
+        let features = PsychoacousticFeatures::from_response(&freqs, &spl, 75.0);
+        let standalone = specific_loudness(&freqs, &spl, 75.0);
+        for (band, (&from_features, &standalone_value)) in features
+            .specific_loudness
+            .iter()
+            .zip(standalone.iter())
+            .enumerate()
+        {
+            assert_eq!(
+                from_features.to_bits(),
+                standalone_value.to_bits(),
+                "band {band} should be bit-identical"
+            );
+        }
     }
 
     fn peaked_response(freqs: &[f64], peaks: &[f64]) -> Vec<f64> {

@@ -10,7 +10,7 @@ use std::{
     cell::RefCell,
     collections::HashMap,
     fmt,
-    sync::{Arc, OnceLock},
+    sync::{Arc, Mutex, OnceLock},
 };
 
 use crate::error::AutodiffError;
@@ -94,6 +94,19 @@ struct FftPlans {
     inverse: Arc<dyn ComplexToReal<f64>>,
 }
 
+static FFT_PLAN_CACHE: OnceLock<Mutex<HashMap<usize, Arc<FftPlans>>>> = OnceLock::new();
+
+fn shared_plans(nfft: usize) -> Arc<FftPlans> {
+    let cache = FFT_PLAN_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut cache = cache
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    cache
+        .entry(nfft)
+        .or_insert_with(|| Arc::new(FftPlans::new(nfft)))
+        .clone()
+}
+
 impl FftPlans {
     fn new(nfft: usize) -> Self {
         let mut planner = RealFftPlanner::<f64>::new();
@@ -113,6 +126,7 @@ impl fmt::Debug for FftPlans {
 struct FftBuffers {
     real: Vec<f64>,
     complex: Vec<Complex<f64>>,
+    scratch: Vec<Complex<f64>>,
 }
 
 impl FftBuffers {
@@ -120,6 +134,7 @@ impl FftBuffers {
         Self {
             real: vec![0.0; nfft],
             complex: vec![Complex::default(); nfft / 2 + 1],
+            scratch: Vec::new(),
         }
     }
 }
@@ -130,12 +145,20 @@ thread_local! {
 
 fn with_fft_buffers<R>(
     nfft: usize,
-    operation: impl FnOnce(&mut [f64], &mut [Complex<f64>]) -> R,
+    scratch_len: usize,
+    operation: impl FnOnce(&mut [f64], &mut [Complex<f64>], &mut [Complex<f64>]) -> R,
 ) -> R {
     FFT_BUFFER_CACHE.with(|cache| {
         let mut cache = cache.borrow_mut();
         let buffers = cache.entry(nfft).or_insert_with(|| FftBuffers::new(nfft));
-        operation(&mut buffers.real, &mut buffers.complex)
+        if buffers.scratch.len() < scratch_len {
+            buffers.scratch.resize(scratch_len, Complex::default());
+        }
+        operation(
+            &mut buffers.real,
+            &mut buffers.complex,
+            &mut buffers.scratch[..scratch_len],
+        )
     })
 }
 
@@ -225,7 +248,7 @@ unsafe fn store_real_as_complex_neon(source: &[f64], destination: &mut [Complex<
 pub struct Fft {
     pub nfft: usize,
     pub channels: usize,
-    plans: OnceLock<FftPlans>,
+    plans: OnceLock<Arc<FftPlans>>,
 }
 
 impl Fft {
@@ -256,7 +279,7 @@ impl Fft {
     }
 
     fn plans(&self) -> &FftPlans {
-        self.plans.get_or_init(|| FftPlans::new(self.nfft))
+        self.plans.get_or_init(|| shared_plans(self.nfft)).as_ref()
     }
 }
 
@@ -281,41 +304,47 @@ impl DiffModule<f64> for Fft {
 
         let input_3d = input
             .data
-            .view()
+            .as_standard_layout()
             .into_shape_with_order((batch, time, channels))
             .map_err(|e| AutodiffError::Message(format!("Fft: failed to reshape input: {e}")))?;
         let mut output = ArrayD::zeros(IxDyn(&[batch, self.n_bins(), channels]));
 
         for b in 0..batch {
             for c in 0..channels {
-                with_fft_buffers(self.nfft, |input_vec, spectrum| {
-                    if channels == 1 {
-                        let start = b * self.nfft;
-                        let source = &input_3d
-                            .as_slice()
-                            .expect("reshaped FFT input must remain contiguous")
-                            [start..start + self.nfft];
-                        copy_real_parts(source, input_vec);
-                    } else {
-                        for t in 0..self.nfft {
-                            input_vec[t] = input_3d[[b, t, c]].re;
+                with_fft_buffers(
+                    self.nfft,
+                    r2c.get_scratch_len(),
+                    |input_vec, spectrum, scratch| {
+                        if channels == 1 {
+                            let start = b * self.nfft;
+                            if let Some(source) = input_3d.as_slice() {
+                                copy_real_parts(&source[start..start + self.nfft], input_vec);
+                            } else {
+                                for t in 0..self.nfft {
+                                    input_vec[t] = input_3d[[b, t, 0]].re;
+                                }
+                            }
+                        } else {
+                            for t in 0..self.nfft {
+                                input_vec[t] = input_3d[[b, t, c]].re;
+                            }
                         }
-                    }
-                    r2c.process(input_vec, spectrum)?;
-                    if channels == 1 {
-                        let start = b * self.n_bins();
-                        output
-                            .as_slice_mut()
-                            .expect("FFT output allocation must be contiguous")
-                            [start..start + self.n_bins()]
-                            .copy_from_slice(spectrum);
-                    } else {
-                        for (bin, value) in spectrum.iter().enumerate() {
-                            output[[b, bin, c]] = *value;
+                        r2c.process_with_scratch(input_vec, spectrum, scratch)?;
+                        if channels == 1 {
+                            let start = b * self.n_bins();
+                            output
+                                .as_slice_mut()
+                                .expect("FFT output allocation must be contiguous")
+                                [start..start + self.n_bins()]
+                                .copy_from_slice(spectrum);
+                        } else {
+                            for (bin, value) in spectrum.iter().enumerate() {
+                                output[[b, bin, c]] = *value;
+                            }
                         }
-                    }
-                    Ok::<(), AutodiffError>(())
-                })?;
+                        Ok::<(), AutodiffError>(())
+                    },
+                )?;
             }
         }
 
@@ -352,38 +381,57 @@ impl DiffModule<f64> for Fft {
 
         let grad_3d = grad_output
             .data
-            .view()
+            .as_standard_layout()
             .into_shape_with_order((batch, n_bins, channels))
             .map_err(|e| AutodiffError::Message(format!("Fft: failed to reshape grad: {e}")))?;
         let mut grad_input = ArrayD::zeros(IxDyn(&[batch, self.nfft, channels]));
 
         for b in 0..batch {
             for c in 0..channels {
-                with_fft_buffers(self.nfft, |grad_time, grad_vec| {
-                    for bin in 0..self.n_bins() {
-                        let sample = grad_3d[[b, bin, c]];
-                        let weight = rfft_adjoint_weight(self.nfft, bin);
-                        grad_vec[bin] = if is_packed_endpoint(self.nfft, bin) {
-                            Complex::new(sample.re, 0.0)
+                with_fft_buffers(
+                    self.nfft,
+                    c2r.get_scratch_len(),
+                    |grad_time, grad_vec, scratch| {
+                        if channels == 1
+                            && let Some(data) = grad_3d.as_slice()
+                        {
+                            let start = b * self.n_bins();
+                            for bin in 0..self.n_bins() {
+                                let sample = data[start + bin];
+                                let weight = rfft_adjoint_weight(self.nfft, bin);
+                                grad_vec[bin] = if is_packed_endpoint(self.nfft, bin) {
+                                    Complex::new(sample.re, 0.0)
+                                } else {
+                                    sample * weight
+                                };
+                            }
                         } else {
-                            sample * weight
-                        };
-                    }
-                    c2r.process(grad_vec, grad_time)?;
-                    if channels == 1 {
-                        let start = b * self.nfft;
-                        let destination = &mut grad_input
-                            .as_slice_mut()
-                            .expect("FFT gradient allocation must be contiguous")
-                            [start..start + self.nfft];
-                        store_real_as_complex(grad_time, destination, 1.0);
-                    } else {
-                        for t in 0..self.nfft {
-                            grad_input[[b, t, c]] = Complex::new(grad_time[t], 0.0);
+                            for bin in 0..self.n_bins() {
+                                let sample = grad_3d[[b, bin, c]];
+                                let weight = rfft_adjoint_weight(self.nfft, bin);
+                                grad_vec[bin] = if is_packed_endpoint(self.nfft, bin) {
+                                    Complex::new(sample.re, 0.0)
+                                } else {
+                                    sample * weight
+                                };
+                            }
                         }
-                    }
-                    Ok::<(), AutodiffError>(())
-                })?;
+                        c2r.process_with_scratch(grad_vec, grad_time, scratch)?;
+                        if channels == 1 {
+                            let start = b * self.nfft;
+                            let destination = &mut grad_input
+                                .as_slice_mut()
+                                .expect("FFT gradient allocation must be contiguous")
+                                [start..start + self.nfft];
+                            store_real_as_complex(grad_time, destination, 1.0);
+                        } else {
+                            for t in 0..self.nfft {
+                                grad_input[[b, t, c]] = Complex::new(grad_time[t], 0.0);
+                            }
+                        }
+                        Ok::<(), AutodiffError>(())
+                    },
+                )?;
             }
         }
 
@@ -432,7 +480,7 @@ impl DiffModule<f64> for Fft {
 pub struct Ifft {
     pub nfft: usize,
     pub channels: usize,
-    plans: OnceLock<FftPlans>,
+    plans: OnceLock<Arc<FftPlans>>,
 }
 
 impl Ifft {
@@ -463,7 +511,7 @@ impl Ifft {
     }
 
     fn plans(&self) -> &FftPlans {
-        self.plans.get_or_init(|| FftPlans::new(self.nfft))
+        self.plans.get_or_init(|| shared_plans(self.nfft)).as_ref()
     }
 }
 
@@ -489,7 +537,7 @@ impl DiffModule<f64> for Ifft {
 
         let input_3d = input
             .data
-            .view()
+            .as_standard_layout()
             .into_shape_with_order((batch, n_bins, channels))
             .map_err(|e| AutodiffError::Message(format!("Ifft: failed to reshape input: {e}")))?;
         let mut output = ArrayD::zeros(IxDyn(&[batch, self.nfft, channels]));
@@ -497,35 +545,40 @@ impl DiffModule<f64> for Ifft {
 
         for b in 0..batch {
             for c in 0..channels {
-                with_fft_buffers(self.nfft, |time, input_vec| {
-                    if channels == 1 {
-                        let start = b * self.n_bins();
-                        input_vec.copy_from_slice(
-                            &input_3d
-                                .as_slice()
-                                .expect("reshaped IFFT input must remain contiguous")
-                                [start..start + self.n_bins()],
-                        );
-                    } else {
-                        for bin in 0..self.n_bins() {
-                            input_vec[bin] = input_3d[[b, bin, c]];
+                with_fft_buffers(
+                    self.nfft,
+                    c2r.get_scratch_len(),
+                    |time, input_vec, scratch| {
+                        if channels == 1 {
+                            let start = b * self.n_bins();
+                            if let Some(source) = input_3d.as_slice() {
+                                input_vec.copy_from_slice(&source[start..start + self.n_bins()]);
+                            } else {
+                                for bin in 0..self.n_bins() {
+                                    input_vec[bin] = input_3d[[b, bin, 0]];
+                                }
+                            }
+                        } else {
+                            for bin in 0..self.n_bins() {
+                                input_vec[bin] = input_3d[[b, bin, c]];
+                            }
                         }
-                    }
-                    c2r.process(input_vec, time)?;
-                    if channels == 1 {
-                        let start = b * self.nfft;
-                        let destination = &mut output
-                            .as_slice_mut()
-                            .expect("IFFT output allocation must be contiguous")
-                            [start..start + self.nfft];
-                        store_real_as_complex(time, destination, scale.recip());
-                    } else {
-                        for t in 0..self.nfft {
-                            output[[b, t, c]] = Complex::new(time[t] / scale, 0.0);
+                        c2r.process_with_scratch(input_vec, time, scratch)?;
+                        if channels == 1 {
+                            let start = b * self.nfft;
+                            let destination = &mut output
+                                .as_slice_mut()
+                                .expect("IFFT output allocation must be contiguous")
+                                [start..start + self.nfft];
+                            store_real_as_complex(time, destination, scale.recip());
+                        } else {
+                            for t in 0..self.nfft {
+                                output[[b, t, c]] = Complex::new(time[t] / scale, 0.0);
+                            }
                         }
-                    }
-                    Ok::<(), AutodiffError>(())
-                })?;
+                        Ok::<(), AutodiffError>(())
+                    },
+                )?;
             }
         }
 
@@ -561,28 +614,41 @@ impl DiffModule<f64> for Ifft {
 
         let grad_3d = grad_output
             .data
-            .view()
+            .as_standard_layout()
             .into_shape_with_order((batch, time, channels))
             .map_err(|e| AutodiffError::Message(format!("Ifft: failed to reshape grad: {e}")))?;
         let mut grad_input = ArrayD::zeros(IxDyn(&[batch, self.n_bins(), channels]));
 
         for b in 0..batch {
             for c in 0..channels {
-                with_fft_buffers(self.nfft, |grad_vec, spectrum| {
-                    for t in 0..self.nfft {
-                        grad_vec[t] = grad_3d[[b, t, c]].re;
-                    }
-                    r2c.process(grad_vec, spectrum)?;
-                    for (bin, sample) in spectrum.iter().enumerate() {
-                        let weight = irfft_adjoint_weight(self.nfft, bin);
-                        grad_input[[b, bin, c]] = if is_packed_endpoint(self.nfft, bin) {
-                            Complex::new(sample.re * weight, 0.0)
+                with_fft_buffers(
+                    self.nfft,
+                    r2c.get_scratch_len(),
+                    |grad_vec, spectrum, scratch| {
+                        if channels == 1
+                            && let Some(data) = grad_3d.as_slice()
+                        {
+                            let start = b * self.nfft;
+                            for t in 0..self.nfft {
+                                grad_vec[t] = data[start + t].re;
+                            }
                         } else {
-                            *sample * weight
-                        };
-                    }
-                    Ok::<(), AutodiffError>(())
-                })?;
+                            for t in 0..self.nfft {
+                                grad_vec[t] = grad_3d[[b, t, c]].re;
+                            }
+                        }
+                        r2c.process_with_scratch(grad_vec, spectrum, scratch)?;
+                        for (bin, sample) in spectrum.iter().enumerate() {
+                            let weight = irfft_adjoint_weight(self.nfft, bin);
+                            grad_input[[b, bin, c]] = if is_packed_endpoint(self.nfft, bin) {
+                                Complex::new(sample.re * weight, 0.0)
+                            } else {
+                                *sample * weight
+                            };
+                        }
+                        Ok::<(), AutodiffError>(())
+                    },
+                )?;
             }
         }
 
@@ -632,7 +698,7 @@ pub struct FftAntiAlias {
     pub alias_decay_db: f64,
     pub gamma: f64,
     pub envelope: Vec<f64>,
-    plans: FftPlans,
+    plans: Arc<FftPlans>,
 }
 
 impl FftAntiAlias {
@@ -671,7 +737,7 @@ impl FftAntiAlias {
             alias_decay_db,
             gamma,
             envelope,
-            plans: FftPlans::new(nfft),
+            plans: shared_plans(nfft),
         }
     }
 
@@ -701,7 +767,7 @@ impl DiffModule<f64> for FftAntiAlias {
 
         let input_3d = input
             .data
-            .view()
+            .as_standard_layout()
             .into_shape_with_order((batch, time, channels))
             .map_err(|e| {
                 AutodiffError::Message(format!("FftAntiAlias: failed to reshape input: {e}"))
@@ -710,16 +776,20 @@ impl DiffModule<f64> for FftAntiAlias {
 
         for b in 0..batch {
             for c in 0..channels {
-                with_fft_buffers(self.nfft, |input_vec, spectrum| {
-                    for t in 0..self.nfft {
-                        input_vec[t] = input_3d[[b, t, c]].re * self.envelope[t];
-                    }
-                    r2c.process(input_vec, spectrum)?;
-                    for (bin, value) in spectrum.iter().enumerate() {
-                        output[[b, bin, c]] = *value;
-                    }
-                    Ok::<(), AutodiffError>(())
-                })?;
+                with_fft_buffers(
+                    self.nfft,
+                    r2c.get_scratch_len(),
+                    |input_vec, spectrum, scratch| {
+                        for t in 0..self.nfft {
+                            input_vec[t] = input_3d[[b, t, c]].re * self.envelope[t];
+                        }
+                        r2c.process_with_scratch(input_vec, spectrum, scratch)?;
+                        for (bin, value) in spectrum.iter().enumerate() {
+                            output[[b, bin, c]] = *value;
+                        }
+                        Ok::<(), AutodiffError>(())
+                    },
+                )?;
             }
         }
 
@@ -758,7 +828,7 @@ impl DiffModule<f64> for FftAntiAlias {
 
         let grad_3d = grad_output
             .data
-            .view()
+            .as_standard_layout()
             .into_shape_with_order((batch, n_bins, channels))
             .map_err(|e| {
                 AutodiffError::Message(format!("FftAntiAlias: failed to reshape grad: {e}"))
@@ -767,22 +837,42 @@ impl DiffModule<f64> for FftAntiAlias {
 
         for b in 0..batch {
             for c in 0..channels {
-                with_fft_buffers(self.nfft, |grad_time, grad_vec| {
-                    for bin in 0..self.n_bins() {
-                        let sample = grad_3d[[b, bin, c]];
-                        let weight = rfft_adjoint_weight(self.nfft, bin);
-                        grad_vec[bin] = if is_packed_endpoint(self.nfft, bin) {
-                            Complex::new(sample.re, 0.0)
+                with_fft_buffers(
+                    self.nfft,
+                    c2r.get_scratch_len(),
+                    |grad_time, grad_vec, scratch| {
+                        if channels == 1
+                            && let Some(data) = grad_3d.as_slice()
+                        {
+                            let start = b * self.n_bins();
+                            for bin in 0..self.n_bins() {
+                                let sample = data[start + bin];
+                                let weight = rfft_adjoint_weight(self.nfft, bin);
+                                grad_vec[bin] = if is_packed_endpoint(self.nfft, bin) {
+                                    Complex::new(sample.re, 0.0)
+                                } else {
+                                    sample * weight
+                                };
+                            }
                         } else {
-                            sample * weight
-                        };
-                    }
-                    c2r.process(grad_vec, grad_time)?;
-                    for t in 0..self.nfft {
-                        grad_input[[b, t, c]] = Complex::new(grad_time[t] * self.envelope[t], 0.0);
-                    }
-                    Ok::<(), AutodiffError>(())
-                })?;
+                            for bin in 0..self.n_bins() {
+                                let sample = grad_3d[[b, bin, c]];
+                                let weight = rfft_adjoint_weight(self.nfft, bin);
+                                grad_vec[bin] = if is_packed_endpoint(self.nfft, bin) {
+                                    Complex::new(sample.re, 0.0)
+                                } else {
+                                    sample * weight
+                                };
+                            }
+                        }
+                        c2r.process_with_scratch(grad_vec, grad_time, scratch)?;
+                        for t in 0..self.nfft {
+                            grad_input[[b, t, c]] =
+                                Complex::new(grad_time[t] * self.envelope[t], 0.0);
+                        }
+                        Ok::<(), AutodiffError>(())
+                    },
+                )?;
             }
         }
 
@@ -830,7 +920,7 @@ pub struct IfftAntiAlias {
     pub alias_decay_db: f64,
     pub gamma: f64,
     pub envelope: Vec<f64>,
-    plans: FftPlans,
+    plans: Arc<FftPlans>,
 }
 
 impl IfftAntiAlias {
@@ -869,7 +959,7 @@ impl IfftAntiAlias {
             alias_decay_db,
             gamma,
             envelope,
-            plans: FftPlans::new(nfft),
+            plans: shared_plans(nfft),
         }
     }
 
@@ -900,7 +990,7 @@ impl DiffModule<f64> for IfftAntiAlias {
 
         let input_3d = input
             .data
-            .view()
+            .as_standard_layout()
             .into_shape_with_order((batch, n_bins, channels))
             .map_err(|e| {
                 AutodiffError::Message(format!("IfftAntiAlias: failed to reshape input: {e}"))
@@ -910,16 +1000,21 @@ impl DiffModule<f64> for IfftAntiAlias {
 
         for b in 0..batch {
             for c in 0..channels {
-                with_fft_buffers(self.nfft, |time, input_vec| {
-                    for bin in 0..self.n_bins() {
-                        input_vec[bin] = input_3d[[b, bin, c]];
-                    }
-                    c2r.process(input_vec, time)?;
-                    for t in 0..self.nfft {
-                        output[[b, t, c]] = Complex::new(time[t] * self.envelope[t] / scale, 0.0);
-                    }
-                    Ok::<(), AutodiffError>(())
-                })?;
+                with_fft_buffers(
+                    self.nfft,
+                    c2r.get_scratch_len(),
+                    |time, input_vec, scratch| {
+                        for bin in 0..self.n_bins() {
+                            input_vec[bin] = input_3d[[b, bin, c]];
+                        }
+                        c2r.process_with_scratch(input_vec, time, scratch)?;
+                        for t in 0..self.nfft {
+                            output[[b, t, c]] =
+                                Complex::new(time[t] * self.envelope[t] / scale, 0.0);
+                        }
+                        Ok::<(), AutodiffError>(())
+                    },
+                )?;
             }
         }
 
@@ -957,7 +1052,7 @@ impl DiffModule<f64> for IfftAntiAlias {
 
         let grad_3d = grad_output
             .data
-            .view()
+            .as_standard_layout()
             .into_shape_with_order((batch, time, channels))
             .map_err(|e| {
                 AutodiffError::Message(format!("IfftAntiAlias: failed to reshape grad: {e}"))
@@ -966,21 +1061,34 @@ impl DiffModule<f64> for IfftAntiAlias {
 
         for b in 0..batch {
             for c in 0..channels {
-                with_fft_buffers(self.nfft, |grad_vec, spectrum| {
-                    for t in 0..self.nfft {
-                        grad_vec[t] = grad_3d[[b, t, c]].re * self.envelope[t];
-                    }
-                    r2c.process(grad_vec, spectrum)?;
-                    for (bin, sample) in spectrum.iter().enumerate() {
-                        let weight = irfft_adjoint_weight(self.nfft, bin);
-                        grad_input[[b, bin, c]] = if is_packed_endpoint(self.nfft, bin) {
-                            Complex::new(sample.re * weight, 0.0)
+                with_fft_buffers(
+                    self.nfft,
+                    r2c.get_scratch_len(),
+                    |grad_vec, spectrum, scratch| {
+                        if channels == 1
+                            && let Some(data) = grad_3d.as_slice()
+                        {
+                            let start = b * self.nfft;
+                            for t in 0..self.nfft {
+                                grad_vec[t] = data[start + t].re * self.envelope[t];
+                            }
                         } else {
-                            *sample * weight
-                        };
-                    }
-                    Ok::<(), AutodiffError>(())
-                })?;
+                            for t in 0..self.nfft {
+                                grad_vec[t] = grad_3d[[b, t, c]].re * self.envelope[t];
+                            }
+                        }
+                        r2c.process_with_scratch(grad_vec, spectrum, scratch)?;
+                        for (bin, sample) in spectrum.iter().enumerate() {
+                            let weight = irfft_adjoint_weight(self.nfft, bin);
+                            grad_input[[b, bin, c]] = if is_packed_endpoint(self.nfft, bin) {
+                                Complex::new(sample.re * weight, 0.0)
+                            } else {
+                                *sample * weight
+                            };
+                        }
+                        Ok::<(), AutodiffError>(())
+                    },
+                )?;
             }
         }
 

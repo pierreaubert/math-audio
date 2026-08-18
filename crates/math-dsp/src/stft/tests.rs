@@ -128,6 +128,18 @@ fn test_fft_roundtrip() {
 }
 
 #[test]
+#[should_panic(expected = "window_size must be greater than zero")]
+fn test_ring_accumulator_rejects_zero_window_size() {
+    let _ = RingAccumulator::new(0, 4);
+}
+
+#[test]
+#[should_panic(expected = "hop_size must be greater than zero")]
+fn test_ring_accumulator_rejects_zero_hop_size() {
+    let _ = RingAccumulator::new(8, 0);
+}
+
+#[test]
 fn test_ring_accumulator_trigger_timing() {
     let window_size = 8;
     let hop_size = 4;
@@ -260,12 +272,49 @@ fn test_dual_window_stft_passthrough() {
             .sum::<f32>()
             / (check_end - check_start) as f32;
 
-        // Some error is expected from windowing; just verify it's bounded
+        // Identity passthrough is a pure delay by exactly `latency_samples()`;
+        // with correct alignment the residual should be at float-noise level.
         assert!(
-            rms_error < 1.0,
+            rms_error < 1e-4,
             "Dual-window STFT passthrough RMS error too high: {rms_error:.6}"
         );
     }
+}
+
+/// An impulse must reappear in the output delayed by exactly
+/// `latency_samples()` samples: `output[n] == input[n - latency]`.
+#[test]
+fn test_dual_window_stft_impulse_peak_at_latency() {
+    let analysis_size = 512;
+    let synthesis_size = 128;
+    let hop_size = 64;
+
+    let mut stft = DualWindowStft::new(analysis_size, synthesis_size, hop_size);
+
+    let num_samples = 4096;
+    let impulse_idx = 2048;
+    let mut signal = vec![0.0f32; num_samples];
+    signal[impulse_idx] = 1.0;
+    let mut output = vec![0.0f32; num_samples];
+
+    stft.process_block(&signal, &mut output, |_| {});
+
+    let (peak_idx, peak) = output
+        .iter()
+        .enumerate()
+        .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+        .map(|(i, &v)| (i, v))
+        .unwrap();
+    let latency = stft.latency_samples();
+    assert!(
+        (peak - 1.0).abs() < 1e-4,
+        "Identity passthrough impulse peak should be ~1.0, got {peak}"
+    );
+    assert_eq!(
+        peak_idx,
+        impulse_idx + latency,
+        "Impulse peak at {peak_idx}, expected input index {impulse_idx} + latency {latency}"
+    );
 }
 
 /// Round-trip identity test for DualWindowStft.
@@ -310,9 +359,9 @@ fn test_dual_window_stft_roundtrip_unity_gain() {
 }
 
 #[test]
-fn test_dual_window_stft_latency_reports_analysis_fill_delay() {
+fn test_dual_window_stft_latency_reports_input_output_delay() {
     let stft = DualWindowStft::new(512, 128, 64);
-    assert_eq!(stft.latency_samples(), 512);
+    assert_eq!(stft.latency_samples(), 511);
 }
 
 #[test]

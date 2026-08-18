@@ -51,10 +51,25 @@ pub fn apply_gain_simd(buffer: &mut [f32], gain: f32) {
 }
 
 /// SIMD-optimized per-channel gain application
+///
+/// Scales interleaved samples by per-channel gains: sample `i` (belonging to
+/// channel `i % channels`) is multiplied by `gains[i % channels]`.
+///
+/// The buffer length does not need to be a multiple of `channels`: trailing
+/// samples of a partial final frame are scaled with the gains of their
+/// respective channels.
+///
+/// Malformed calls are tolerated as no-ops: if `channels == 0` or
+/// `gains.len() < channels`, the buffer is left unchanged.
 #[inline]
 pub fn apply_per_channel_gain_simd(buffer: &mut [f32], channels: usize, gains: &[f32]) {
+    if channels == 0 || gains.len() < channels {
+        return;
+    }
+
     let len = buffer.len();
     let num_frames = len / channels;
+    let tail_start = num_frames * channels;
 
     // This is harder to SIMD generically for any channel count.
     // We prioritize common channel counts (1, 2, 6, 8) or use scalar for now.
@@ -81,6 +96,9 @@ pub fn apply_per_channel_gain_simd(buffer: &mut [f32], channels: usize, gains: &
                 buffer[i * 2] *= gains[0];
                 buffer[i * 2 + 1] *= gains[1];
             }
+            for i in tail_start..len {
+                buffer[i] *= gains[i - tail_start];
+            }
             return;
         }
 
@@ -104,6 +122,9 @@ pub fn apply_per_channel_gain_simd(buffer: &mut [f32], channels: usize, gains: &
                 buffer[i * 2] *= gains[0];
                 buffer[i * 2 + 1] *= gains[1];
             }
+            for i in tail_start..len {
+                buffer[i] *= gains[i - tail_start];
+            }
             return;
         }
     }
@@ -113,5 +134,9 @@ pub fn apply_per_channel_gain_simd(buffer: &mut [f32], channels: usize, gains: &
         for ch in 0..channels {
             buffer[frame * channels + ch] *= gains[ch];
         }
+    }
+    // Trailing partial frame (len % channels != 0)
+    for i in tail_start..len {
+        buffer[i] *= gains[i - tail_start];
     }
 }

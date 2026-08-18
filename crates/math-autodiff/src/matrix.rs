@@ -72,6 +72,34 @@ fn matrix_exp_skew_view(raw: &ArrayView2<f64>) -> Array2<f64> {
     dmatrix_to_ndarray2(&exp)
 }
 
+/// Pull back a matrix-exponential gradient through `M = exp(raw - rawᵀ)`.
+///
+/// The upper-right block of `exp([[Sᵀ, G], [0, Sᵀ]])` is the adjoint
+/// Fréchet derivative of the exponential at `S` applied to `G`. The final
+/// skew-symmetrization is the adjoint of `raw -> raw - rawᵀ`.
+#[allow(clippy::similar_names)]
+fn matrix_exp_skew_gradient(raw: &ArrayView2<f64>, dl_dm: &Array2<f64>) -> Array2<f64> {
+    let skew = raw.to_owned() - raw.t();
+    let n = skew.nrows();
+    let mut block = DMatrix::<f64>::zeros(2 * n, 2 * n);
+    for row in 0..n {
+        for col in 0..n {
+            let value = skew[[col, row]];
+            block[(row, col)] = value;
+            block[(n + row, n + col)] = value;
+            block[(row, n + col)] = dl_dm[[row, col]];
+        }
+    }
+    let exp_block = block.exp();
+    let mut dl_ds = Array2::zeros((n, n));
+    for row in 0..n {
+        for col in 0..n {
+            dl_ds[[row, col]] = exp_block[(row, n + col)];
+        }
+    }
+    &dl_ds - &dl_ds.t()
+}
+
 /// Compute the derivative of the scalar loss w.r.t. the real matrix `M`.
 ///
 /// This is shared by both `Dense` and `Orthogonal` parameterizations: for
@@ -88,8 +116,12 @@ fn compute_dl_dm(
         let grad_slice = grad_output.data.index_axis(Axis(2), out_ch);
         for in_ch in 0..n_in {
             let input_slice = input.data.index_axis(Axis(2), in_ch);
-            let prod = &grad_slice * &input_slice.mapv(|x| x.conj());
-            dl_dm[[out_ch, in_ch]] = prod.sum().re;
+            dl_dm[[out_ch, in_ch]] = grad_slice
+                .iter()
+                .zip(input_slice.iter())
+                .map(|(gradient, sample)| *gradient * sample.conj())
+                .sum::<Complex<f64>>()
+                .re;
         }
     }
     dl_dm
@@ -191,6 +223,12 @@ impl Matrix {
             }
             MatrixType::Orthogonal => {
                 let v = view2(&self.param, "Matrix")?;
+                if v.nrows() != v.ncols() {
+                    return Err(AutodiffError::Message(format!(
+                        "Matrix::Orthogonal requires square parameter shape, got {:?}",
+                        v.dim()
+                    )));
+                }
                 let orth = matrix_exp_skew_view(&v);
                 Ok(orth.mapv(|x| Complex::new(x, 0.0)))
             }
@@ -208,7 +246,8 @@ impl DiffModule<f64> for Matrix {
             )));
         }
         let n_bins = input_shape[1];
-        let n_in = input_shape[2];
+        let m = self.build_matrix()?;
+        let (n_out, n_in) = m.dim();
         if n_bins != self.n_bins() {
             return Err(AutodiffError::Message(format!(
                 "Matrix::forward: expected {} frequency bins, got {}",
@@ -216,24 +255,25 @@ impl DiffModule<f64> for Matrix {
                 n_bins
             )));
         }
-        if n_in != self.n_in {
+        if input_shape[2] != n_in {
             return Err(AutodiffError::Message(format!(
                 "Matrix::forward: expected {} input channels, got {}",
-                self.n_in, n_in
+                n_in, input_shape[2]
             )));
         }
 
-        let m = self.build_matrix()?;
         let mut output_shape = input_shape.to_vec();
-        output_shape[2] = self.n_out;
+        output_shape[2] = n_out;
         let mut output = ArrayD::zeros(IxDyn(&output_shape));
 
-        for out_ch in 0..self.n_out {
+        for out_ch in 0..n_out {
             for in_ch in 0..n_in {
                 let h = m[[out_ch, in_ch]];
                 let input_slice = input.data.index_axis(Axis(2), in_ch);
                 let mut output_slice = output.index_axis_mut(Axis(2), out_ch);
-                output_slice += &input_slice.mapv(|x| x * h);
+                for (destination, &source) in output_slice.iter_mut().zip(input_slice.iter()) {
+                    *destination += source * h;
+                }
             }
         }
         Ok(DiffTensor::from_array(output))
@@ -247,18 +287,20 @@ impl DiffModule<f64> for Matrix {
     ) -> Result<DiffTensor<f64>, AutodiffError> {
         let input_shape = input.data.shape();
         let grad_shape = grad_output.data.shape();
-        validate_spectral_gradient_shape("Matrix::backward", input_shape, grad_shape, self.n_out)?;
+        let m = self.build_matrix()?;
+        let (n_out, n_in) = m.dim();
+        validate_spectral_gradient_shape("Matrix::backward", input_shape, grad_shape, n_out)?;
         let n_bins = input_shape[1];
-        if input_shape[2] != self.n_in {
+        if input_shape[2] != n_in {
             return Err(AutodiffError::Message(format!(
                 "Matrix::backward: expected {} input channels, got {}",
-                self.n_in, input_shape[2]
+                n_in, input_shape[2]
             )));
         }
-        if grad_shape[1] != n_bins || grad_shape[2] != self.n_out {
+        if grad_shape[1] != n_bins || grad_shape[2] != n_out {
             return Err(AutodiffError::Message(format!(
                 "Matrix::backward: grad_output shape {:?} incompatible with (..., {}, {})",
-                grad_shape, n_bins, self.n_out
+                grad_shape, n_bins, n_out
             )));
         }
         if n_bins != self.n_bins() {
@@ -268,44 +310,54 @@ impl DiffModule<f64> for Matrix {
             )));
         }
 
-        let m = self.build_matrix()?;
         let mut grad_input = ArrayD::zeros(IxDyn(input_shape));
 
         // Dense gradient is straightforward.
         match self.matrix_type {
             MatrixType::Dense => {
-                let dl_dm = compute_dl_dm(grad_output, input, self.n_out, self.n_in);
+                let dl_dm = compute_dl_dm(grad_output, input, n_out, n_in);
                 let mut pg = view2_mut(&mut self.param_grad, "Matrix")?;
+                if pg.dim() != (n_out, n_in) {
+                    return Err(AutodiffError::Message(format!(
+                        "Matrix::backward: parameter gradient shape {:?} does not match matrix shape {:?}",
+                        pg.dim(),
+                        (n_out, n_in)
+                    )));
+                }
                 pg += &dl_dm;
             }
             MatrixType::Orthogonal => {
                 // Compute dL/dM (same shape as M).
-                let dl_dm = compute_dl_dm(grad_output, input, self.n_out, self.n_in);
-                // Numerical Jacobian of M w.r.t. raw parameters.
+                let dl_dm = compute_dl_dm(grad_output, input, n_out, n_in);
                 let v = view2(&self.param, "Matrix")?;
-                for i in 0..self.n_out {
-                    for j in 0..self.n_in {
-                        let eps = f64::EPSILON.cbrt() * v[[i, j]].abs().max(1.0);
-                        let mut v_plus = v.to_owned();
-                        v_plus[[i, j]] += eps;
-                        let m_plus = matrix_exp_skew_view(&v_plus.view());
-                        let mut v_minus = v.to_owned();
-                        v_minus[[i, j]] -= eps;
-                        let m_minus = matrix_exp_skew_view(&v_minus.view());
-                        let deriv = (&m_plus - &m_minus) / (2.0 * eps);
-                        let grad = (&deriv * &dl_dm).sum();
-                        self.param_grad[[i, j]] += grad;
-                    }
+                if v.dim() != (n_out, n_in) {
+                    return Err(AutodiffError::Message(format!(
+                        "Matrix::backward: parameter shape {:?} does not match matrix shape {:?}",
+                        v.dim(),
+                        (n_out, n_in)
+                    )));
                 }
+                let grad_raw = matrix_exp_skew_gradient(&v, &dl_dm);
+                let mut pg = view2_mut(&mut self.param_grad, "Matrix")?;
+                if pg.dim() != (n_out, n_in) {
+                    return Err(AutodiffError::Message(format!(
+                        "Matrix::backward: parameter gradient shape {:?} does not match matrix shape {:?}",
+                        pg.dim(),
+                        (n_out, n_in)
+                    )));
+                }
+                pg += &grad_raw;
             }
         }
 
-        for in_ch in 0..self.n_in {
-            for out_ch in 0..self.n_out {
+        for in_ch in 0..n_in {
+            for out_ch in 0..n_out {
                 let h = m[[out_ch, in_ch]].conj();
                 let grad_slice = grad_output.data.index_axis(Axis(2), out_ch);
                 let mut input_grad_slice = grad_input.index_axis_mut(Axis(2), in_ch);
-                input_grad_slice += &grad_slice.mapv(|x| x * h);
+                for (destination, &gradient) in input_grad_slice.iter_mut().zip(grad_slice.iter()) {
+                    *destination += gradient * h;
+                }
             }
         }
 
@@ -313,10 +365,10 @@ impl DiffModule<f64> for Matrix {
     }
 
     fn input_channels(&self) -> usize {
-        self.n_in
+        self.param.shape().get(1).copied().unwrap_or(0)
     }
     fn output_channels(&self) -> usize {
-        self.n_out
+        self.param.shape().first().copied().unwrap_or(0)
     }
     fn n_bins(&self) -> usize {
         self.n_bins()

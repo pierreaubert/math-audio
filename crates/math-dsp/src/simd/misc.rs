@@ -238,6 +238,8 @@ pub fn enable_ftz_daz() -> bool {
 /// - cov_xx: sum of left channel energy
 /// - cov_yy: sum of right channel energy
 /// - cov_xy: complex cross-correlation
+///
+/// An empty range (`start == end`) returns zeros.
 pub fn compute_covariance_simd(
     left: &[Complex<f32>],
     right: &[Complex<f32>],
@@ -246,7 +248,7 @@ pub fn compute_covariance_simd(
 ) -> (f32, f32, Complex<f32>) {
     assert_eq!(left.len(), right.len());
     assert!(end <= left.len());
-    assert!(start < end);
+    assert!(start <= end);
 
     #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
     let count = end - start;
@@ -267,6 +269,10 @@ pub fn compute_covariance_simd(
             let mut sum_xx = _mm256_setzero_ps();
             let mut sum_yy = _mm256_setzero_ps();
             let mut sum_xy_re = _mm256_setzero_ps();
+
+            // Sign mask used to conjugate the right channel: flips the sign of
+            // the imaginary (odd) lanes, leaves the real (even) lanes untouched.
+            let conj_mask = _mm256_set_ps(-0.0, 0.0, -0.0, 0.0, -0.0, 0.0, -0.0, 0.0);
 
             for i in (start..simd_end).step_by(4) {
                 let left_ptr = left.as_ptr().add(i) as *const f32;
@@ -292,15 +298,20 @@ pub fn compute_covariance_simd(
                 let l_re = _mm256_moveldup_ps(l);
                 let l_im = _mm256_movehdup_ps(l);
 
-                // ac_ad = [a*c, a*d]
-                let ac_ad = _mm256_mul_ps(l_re, r);
+                // Conjugate r by flipping the sign of its imaginary (odd)
+                // lanes: r_conj = [c, -d, ...]
+                let r_conj = _mm256_xor_ps(r, conj_mask);
 
-                // r_swap = [d, c] so that im * swap gives [b*d, b*c]
-                let r_swap = _mm256_shuffle_ps(r, r, SHUFFLE_SWAP_RE_IM);
-                let bd_bc = _mm256_mul_ps(l_im, r_swap);
+                // ac_ad = [a*c, -a*d]
+                let ac_ad = _mm256_mul_ps(l_re, r_conj);
 
-                // addsub(bd_bc, ac_ad) -> [b*d + a*c, b*c - a*d] = [re, im]
-                let result = _mm256_addsub_ps(bd_bc, ac_ad);
+                // r_conj_swap = [-d, c] so that im * swap gives [-b*d, b*c]
+                let r_conj_swap = _mm256_shuffle_ps(r_conj, r_conj, SHUFFLE_SWAP_RE_IM);
+                let bd_bc = _mm256_mul_ps(l_im, r_conj_swap);
+
+                // addsub(ac_ad, bd_bc) -> [a*c - (-b*d), (-a*d) + b*c]
+                //                      = [ac + bd, bc - ad] = [re, im]
+                let result = _mm256_addsub_ps(ac_ad, bd_bc);
 
                 // Accumulate real parts (even indices) and imaginary parts (odd indices)
                 sum_xy_re = _mm256_add_ps(sum_xy_re, result);

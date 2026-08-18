@@ -2,10 +2,45 @@
 
 use ndarray::ArrayD;
 use num_complex::Complex;
+use std::{
+    cell::RefCell,
+    collections::hash_map::DefaultHasher,
+    hash::{Hash, Hasher},
+};
 
 use crate::error::AutodiffError;
 use crate::module::DiffModule;
 use crate::tensor::DiffTensor;
+
+fn tensor_fingerprint(tensor: &DiffTensor<f64>) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    tensor.data.shape().hash(&mut hasher);
+    for value in &tensor.data {
+        value.re.to_bits().hash(&mut hasher);
+        value.im.to_bits().hash(&mut hasher);
+    }
+    hasher.finish()
+}
+
+fn parameter_fingerprint(modules: &[Box<dyn DiffModule<f64>>]) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    for module in modules {
+        for parameter in module.parameters() {
+            parameter.shape().hash(&mut hasher);
+            for &value in parameter {
+                value.to_bits().hash(&mut hasher);
+            }
+        }
+    }
+    hasher.finish()
+}
+
+struct SeriesCache {
+    input_fingerprint: u64,
+    output_fingerprint: u64,
+    parameter_fingerprint: u64,
+    intermediates: Vec<DiffTensor<f64>>,
+}
 
 /// Sequential composition of differentiable modules.
 pub struct Series {
@@ -13,6 +48,7 @@ pub struct Series {
     nfft: usize,
     input_channels: usize,
     output_channels: usize,
+    forward_cache: RefCell<Option<SeriesCache>>,
 }
 
 impl std::fmt::Debug for Series {
@@ -69,6 +105,7 @@ impl Series {
             nfft,
             input_channels,
             output_channels,
+            forward_cache: RefCell::new(None),
         })
     }
 
@@ -82,25 +119,48 @@ impl Series {
 impl DiffModule<f64> for Series {
     fn forward(&self, input: &DiffTensor<f64>) -> Result<DiffTensor<f64>, AutodiffError> {
         let mut x = input.clone();
+        let mut intermediates = Vec::with_capacity(self.modules.len());
         for module in &self.modules {
             x = module.forward(&x)?;
+            intermediates.push(x.clone());
         }
+        let input_fingerprint = tensor_fingerprint(input);
+        let output_fingerprint = tensor_fingerprint(&x);
+        let parameter_fingerprint = parameter_fingerprint(&self.modules);
+        *self.forward_cache.borrow_mut() = Some(SeriesCache {
+            input_fingerprint,
+            output_fingerprint,
+            parameter_fingerprint,
+            intermediates,
+        });
         Ok(x)
     }
 
     fn backward(
         &mut self,
         input: &DiffTensor<f64>,
-        _output: &DiffTensor<f64>,
+        output: &DiffTensor<f64>,
         grad_output: &DiffTensor<f64>,
     ) -> Result<DiffTensor<f64>, AutodiffError> {
-        // Recompute forward pass to capture intermediate inputs/outputs.
-        let mut intermediates = Vec::with_capacity(self.modules.len());
-        let mut x = input.clone();
-        for module in &self.modules {
-            x = module.forward(&x)?;
-            intermediates.push(x.clone());
-        }
+        let cache = self.forward_cache.borrow_mut().take();
+        let intermediates = cache
+            .filter(|cache| {
+                cache.input_fingerprint == tensor_fingerprint(input)
+                    && cache.output_fingerprint == tensor_fingerprint(output)
+                    && cache.parameter_fingerprint == parameter_fingerprint(&self.modules)
+            })
+            .map_or_else(Vec::new, |cache| cache.intermediates);
+        let intermediates = if intermediates.is_empty() {
+            let mut recomputed = Vec::with_capacity(self.modules.len());
+            let mut x = input.clone();
+            for module in &self.modules {
+                x = module.forward(&x)?;
+                recomputed.push(x.clone());
+            }
+            recomputed
+        } else {
+            intermediates
+        };
 
         // Backpropagate in reverse order.
         let mut grad = grad_output.clone();
@@ -152,6 +212,14 @@ impl DiffModule<f64> for Series {
     }
 }
 
+struct ParallelCache {
+    input_fingerprint: u64,
+    output_fingerprint: u64,
+    parameter_fingerprint: u64,
+    output_a: DiffTensor<f64>,
+    output_b: DiffTensor<f64>,
+}
+
 /// Parallel composition of two differentiable modules.
 ///
 /// Both branches receive the same input and their outputs are summed
@@ -163,6 +231,7 @@ pub struct Parallel {
     nfft: usize,
     input_channels: usize,
     output_channels: usize,
+    forward_cache: RefCell<Option<ParallelCache>>,
 }
 
 impl std::fmt::Debug for Parallel {
@@ -213,6 +282,7 @@ impl Parallel {
             output_channels: branch_a.output_channels(),
             branch_a,
             branch_b,
+            forward_cache: RefCell::new(None),
         })
     }
 
@@ -227,17 +297,54 @@ impl DiffModule<f64> for Parallel {
     fn forward(&self, input: &DiffTensor<f64>) -> Result<DiffTensor<f64>, AutodiffError> {
         let out_a = self.branch_a.forward(input)?;
         let out_b = self.branch_b.forward(input)?;
-        Ok(DiffTensor::from_array(&out_a.data + &out_b.data))
+        let output = DiffTensor::from_array(&out_a.data + &out_b.data);
+        let mut hasher = DefaultHasher::new();
+        for branch in [&self.branch_a, &self.branch_b] {
+            for parameter in branch.parameters() {
+                parameter.shape().hash(&mut hasher);
+                for &value in parameter {
+                    value.to_bits().hash(&mut hasher);
+                }
+            }
+        }
+        *self.forward_cache.borrow_mut() = Some(ParallelCache {
+            input_fingerprint: tensor_fingerprint(input),
+            output_fingerprint: tensor_fingerprint(&output),
+            parameter_fingerprint: hasher.finish(),
+            output_a: out_a,
+            output_b: out_b,
+        });
+        Ok(output)
     }
 
     fn backward(
         &mut self,
         input: &DiffTensor<f64>,
-        _output: &DiffTensor<f64>,
+        output: &DiffTensor<f64>,
         grad_output: &DiffTensor<f64>,
     ) -> Result<DiffTensor<f64>, AutodiffError> {
-        let out_a = self.branch_a.forward(input)?;
-        let out_b = self.branch_b.forward(input)?;
+        let mut hasher = DefaultHasher::new();
+        for branch in [&self.branch_a, &self.branch_b] {
+            for parameter in branch.parameters() {
+                parameter.shape().hash(&mut hasher);
+                for &value in parameter {
+                    value.to_bits().hash(&mut hasher);
+                }
+            }
+        }
+        let parameter_fingerprint = hasher.finish();
+        let cache = self.forward_cache.borrow_mut().take();
+        let cached_outputs = cache
+            .filter(|cache| {
+                cache.input_fingerprint == tensor_fingerprint(input)
+                    && cache.output_fingerprint == tensor_fingerprint(output)
+                    && cache.parameter_fingerprint == parameter_fingerprint
+            })
+            .map(|cache| (cache.output_a, cache.output_b));
+        let (out_a, out_b) = match cached_outputs {
+            Some(outputs) => outputs,
+            None => (self.branch_a.forward(input)?, self.branch_b.forward(input)?),
+        };
         let grad_input_a = self.branch_a.backward(input, &out_a, grad_output)?;
         let grad_input_b = self.branch_b.backward(input, &out_b, grad_output)?;
         Ok(DiffTensor::from_array(

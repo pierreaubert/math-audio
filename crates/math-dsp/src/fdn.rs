@@ -22,8 +22,8 @@ pub struct Fdn {
     write_positions: Vec<usize>,
     /// Hadamard feedback matrix (flattened NxN, row-major)
     feedback_matrix: Vec<f32>,
-    /// Global feedback gain (< 1.0 for stability)
-    feedback_gain: f32,
+    /// Per-line feedback gains (< 1.0 for stability)
+    feedback_gains: Vec<f32>,
     /// Per-line 1-pole lowpass absorption: state
     absorption_state: Vec<f32>,
     /// Per-line absorption coefficient (0..1, higher = more HF damping)
@@ -65,7 +65,7 @@ impl Fdn {
             delay_lengths: base_delays,
             write_positions: vec![0; num_lines],
             feedback_matrix,
-            feedback_gain: 0.7,
+            feedback_gains: vec![0.7; num_lines],
             absorption_state: vec![0.0; num_lines],
             absorption_coeff: vec![0.3; num_lines],
             input_gains,
@@ -91,17 +91,21 @@ impl Fdn {
             }
         }
 
-        // Feedback gain from RT60: g = 10^(-3 * delay / (RT60 * SR))
-        // Use the average delay length for the global gain
-        let avg_delay = self.delay_lengths.iter().sum::<usize>() as f32 / self.num_lines as f32;
+        // Per-line feedback gain from RT60 (Jot & Chaigne): each line must
+        // decay by 60 dB over `rt60` seconds, and line `i` applies its gain
+        // once per `m_i` samples, so g_i = 10^(-3 * m_i / (RT60 * SR)).
+        // A single global gain derived from the average delay would make
+        // short lines decay too fast and long lines too slowly.
         let rt60_samples = rt60 * sample_rate as f32;
-        self.feedback_gain = if rt60_samples > 0.0 {
-            10.0_f32
-                .powf(-3.0 * avg_delay / rt60_samples)
-                .clamp(0.0, 0.999)
-        } else {
-            0.0
-        };
+        for (i, &len) in self.delay_lengths.iter().enumerate() {
+            self.feedback_gains[i] = if rt60_samples > 0.0 {
+                10.0_f32
+                    .powf(-3.0 * len as f32 / rt60_samples)
+                    .clamp(0.0, 0.999)
+            } else {
+                0.0
+            };
+        }
 
         // Absorption from damping
         let damp = damping.clamp(0.0, 1.0);
@@ -124,7 +128,7 @@ impl Fdn {
             self.scratch[i] = self.delay_lines[i][pos];
         }
 
-        // Compute feedback: new_input[i] = sum_j(matrix[i][j] * scratch[j]) * feedback_gain
+        // Compute feedback: new_input[i] = sum_j(matrix[i][j] * scratch[j]) * feedback_gains[i]
         // Plus input contribution
         for i in 0..n {
             let mut feedback_sum = 0.0;
@@ -132,7 +136,7 @@ impl Fdn {
                 feedback_sum += self.feedback_matrix[i * n + j] * self.scratch[j];
             }
             let input = mono_in * self.input_gains[i];
-            let fb = feedback_sum * self.feedback_gain;
+            let fb = feedback_sum * self.feedback_gains[i];
 
             // 1-pole absorption: lowpass the feedback
             let alpha = self.absorption_coeff[i];
@@ -293,6 +297,93 @@ mod tests {
         assert!(energy > 0.01, "FDN produced no energy: {energy}");
         // But energy should be finite (stable)
         assert!(energy.is_finite(), "FDN energy is not finite");
+    }
+
+    /// Regression test: per-line feedback gains must give each delay line
+    /// `g_i = 10^(-3*m_i/(RT60*fs))`, so the measured energy decay matches
+    /// the requested RT60. A single global gain derived from the average
+    /// delay makes short lines decay too fast and long lines too slowly,
+    /// skewing the measured RT60 of the tail.
+    #[test]
+    fn test_fdn_rt60_matches_requested() {
+        let sample_rate = 48000u32;
+        let rt60 = 1.0f32;
+        let mut fdn = Fdn::new(8, sample_rate);
+        fdn.set_room_params(rt60, 0.0, 1.0, sample_rate);
+
+        // Impulse excitation
+        fdn.process_stereo(1.0, 1.0);
+
+        // Measure output energy per 50ms block over 1.5s of decay
+        let block = (0.05 * sample_rate as f32) as usize;
+        let n_blocks = 30;
+        let mut block_db = Vec::with_capacity(n_blocks);
+        for _ in 0..n_blocks {
+            let mut energy = 0.0f64;
+            for _ in 0..block {
+                let (l, r) = fdn.process_stereo(0.0, 0.0);
+                energy += (l * l + r * r) as f64;
+            }
+            block_db.push(10.0 * energy.max(1e-15).log10());
+        }
+
+        // Least-squares slope (dB/s) over the decaying region
+        let fit_start = 2; // skip impulse transient
+        let fit_end = 20; // stay above the numerical noise floor
+        let n = (fit_end - fit_start) as f64;
+        let xs: Vec<f64> = (fit_start..fit_end)
+            .map(|b| (b as f64 + 0.5) * block as f64 / sample_rate as f64)
+            .collect();
+        let ys = &block_db[fit_start..fit_end];
+        let mean_x = xs.iter().sum::<f64>() / n;
+        let mean_y = ys.iter().sum::<f64>() / n;
+        let mut cov = 0.0;
+        let mut var = 0.0;
+        for (x, y) in xs.iter().zip(ys) {
+            cov += (x - mean_x) * (y - mean_y);
+            var += (x - mean_x) * (x - mean_x);
+        }
+        let slope_db_per_s = cov / var;
+        let t60_est = -60.0 / slope_db_per_s;
+
+        let rel_err = (t60_est - rt60 as f64).abs() / rt60 as f64;
+        assert!(
+            rel_err < 0.10,
+            "Measured T60 {t60_est:.3}s deviates from requested {rt60}s by {:.1}%",
+            rel_err * 100.0
+        );
+    }
+
+    /// Per Jot & Chaigne, each delay line needs its own feedback gain
+    /// g_i = 10^(-3*m_i/(RT60*fs)): line `i` applies its gain once per
+    /// `m_i` samples, so a single global gain can only be correct for one
+    /// delay length.
+    #[test]
+    fn test_fdn_per_line_gains_follow_rt60_formula() {
+        let sample_rate = 48000u32;
+        let rt60 = 1.5f32;
+        let mut fdn = Fdn::new(8, sample_rate);
+        fdn.set_room_params(rt60, 0.3, 1.0, sample_rate);
+
+        let rt60_samples = rt60 * sample_rate as f32;
+        let mut distinct = std::collections::HashSet::new();
+        for (i, &len) in fdn.delay_lengths.iter().enumerate() {
+            let expected = 10.0_f32.powf(-3.0 * len as f32 / rt60_samples);
+            assert!(
+                (fdn.feedback_gains[i] - expected).abs() < 1e-6,
+                "line {i} (delay {len}): gain {}, expected {expected}",
+                fdn.feedback_gains[i]
+            );
+            distinct.insert(fdn.feedback_gains[i].to_bits());
+        }
+        // With mutually-prime delay lengths spread over 20-80ms, the gains
+        // must actually differ per line (a global gain fails this).
+        assert!(
+            distinct.len() == fdn.num_lines,
+            "expected per-line gains, got {} distinct value(s) for {} lines",
+            distinct.len(),
+            fdn.num_lines
+        );
     }
 
     #[test]

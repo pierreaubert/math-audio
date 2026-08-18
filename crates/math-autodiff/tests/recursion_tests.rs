@@ -326,33 +326,29 @@ fn recursion_gradient_with_complex_transfer_matches_finite_difference() {
     for ch in 0..n {
         let mut param_plus = feedforward.param.clone();
         param_plus[[ch]] += epsilon;
-        let recursion_plus = Recursion::new(
-            Box::new(ParallelDelay {
-                nfft: feedforward.nfft,
-                n_channels: feedforward.n_channels,
-                tau_min: feedforward.tau_min,
-                param: param_plus,
-                param_grad: ArrayD::zeros(IxDyn(&[n])),
-            }),
-            Box::new(feedback.clone()),
+        let mut delay_plus = ParallelDelay::new(
+            feedforward.nfft,
+            feedforward.n_channels,
+            feedforward.tau_min,
         )
         .unwrap();
+        delay_plus.param = param_plus;
+        let recursion_plus =
+            Recursion::new(Box::new(delay_plus), Box::new(feedback.clone())).unwrap();
         let out_plus = recursion_plus.forward(&input).unwrap();
         let loss_plus = mse_loss(&out_plus, &target);
 
         let mut param_minus = feedforward.param.clone();
         param_minus[[ch]] -= epsilon;
-        let recursion_minus = Recursion::new(
-            Box::new(ParallelDelay {
-                nfft: feedforward.nfft,
-                n_channels: feedforward.n_channels,
-                tau_min: feedforward.tau_min,
-                param: param_minus,
-                param_grad: ArrayD::zeros(IxDyn(&[n])),
-            }),
-            Box::new(feedback.clone()),
+        let mut delay_minus = ParallelDelay::new(
+            feedforward.nfft,
+            feedforward.n_channels,
+            feedforward.tau_min,
         )
         .unwrap();
+        delay_minus.param = param_minus;
+        let recursion_minus =
+            Recursion::new(Box::new(delay_minus), Box::new(feedback.clone())).unwrap();
         let out_minus = recursion_minus.forward(&input).unwrap();
         let loss_minus = mse_loss(&out_minus, &target);
 

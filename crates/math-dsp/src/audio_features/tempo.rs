@@ -49,9 +49,12 @@ mod tests {
         }
 
         let tempo = compute_tempo(&signal, sr);
-        // Should detect roughly 60 BPM → normalized ~ -0.42
-        // We allow wide tolerance since our impl differs from aubio
-        assert!(tempo > -0.8 && tempo < 0.0, "tempo = {tempo}");
+        // Should detect ~60 BPM; convert the normalized value back to BPM.
+        let bpm = (tempo + 1.0) * 0.5 * 206.0;
+        assert!(
+            (55.0..=65.0).contains(&bpm),
+            "expected ~60 BPM, got {bpm:.1} BPM (normalized {tempo})"
+        );
     }
 }
 

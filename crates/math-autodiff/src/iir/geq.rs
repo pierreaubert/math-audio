@@ -197,10 +197,16 @@ impl GraphicEq {
     /// Build a fresh inner SOS filter reflecting the current parameters.
     ///
     /// Used by the immutable `forward` pass.
-    fn build_fresh_inner(&self) -> SosFilter {
-        let mut inner = self.inner.clone();
+    fn build_fresh_inner(&self) -> Result<SosFilter, AutodiffError> {
+        let mut inner = SosFilter::new(
+            self.nfft,
+            self.n_bands,
+            self.n_channels,
+            self.n_channels,
+            self.alias_decay_db,
+        )?;
         Self::fill_sos_param(&mut inner.param, &self.frequencies, &self.param, self.fs);
-        inner
+        Ok(inner)
     }
 
     /// Map the inner SOS coefficient gradients back to per-band gain gradients.
@@ -248,7 +254,7 @@ impl DiffModule<f64> for GraphicEq {
             )));
         }
 
-        let inner = self.build_fresh_inner();
+        let inner = self.build_fresh_inner()?;
         inner.forward(input)
     }
 

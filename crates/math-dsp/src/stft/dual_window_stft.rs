@@ -6,9 +6,10 @@ use rustfft::num_complex::Complex;
 /// Dual-window STFT processor.
 ///
 /// Uses a long analysis window for frequency resolution and a shorter
-/// synthesis window for low-latency output. The output latency equals
-/// the **analysis** window size: the ring buffer must fill `analysis_size`
-/// samples before the first hop fires and produces output.
+/// synthesis window for low-latency output. The steady-state output latency
+/// is `analysis_size - 1` samples: the first hop fires once the ring buffer
+/// has been filled with `analysis_size` samples (after pushing the sample at
+/// index `analysis_size - 1`), so `output[n] = input[n - (analysis_size - 1)]`.
 pub struct DualWindowStft {
     pub(super) analysis_window: Vec<f32>,
     pub(super) synthesis_window: Vec<f32>,
@@ -20,8 +21,6 @@ pub struct DualWindowStft {
     pub(super) output_read_pos: usize,
     /// FFT processor (analysis size)
     pub(super) fft: RealFftProcessor,
-    /// Window read buffer
-    pub(super) window_buf: Vec<f32>,
 }
 
 impl DualWindowStft {
@@ -45,7 +44,6 @@ impl DualWindowStft {
             output_accum: vec![0.0; analysis_size * 3],
             output_read_pos: 0,
             fft,
-            window_buf: vec![0.0; analysis_size],
         }
     }
 
@@ -58,12 +56,16 @@ impl DualWindowStft {
             return false;
         }
 
-        // Read the analysis window worth of samples
-        self.input_ring.read_window(&mut self.window_buf);
-
-        // Apply analysis window
-        for i in 0..self.analysis_size {
-            self.fft.time_buffer[i] = self.window_buf[i] * self.analysis_window[i];
+        // Read the analysis window worth of samples directly into the FFT
+        // time buffer, then apply the analysis window in place.
+        self.input_ring.read_window(&mut self.fft.time_buffer);
+        for (t, &w) in self
+            .fft
+            .time_buffer
+            .iter_mut()
+            .zip(self.analysis_window.iter())
+        {
+            *t *= w;
         }
 
         // Forward FFT
@@ -132,11 +134,12 @@ impl DualWindowStft {
 
     /// Get the output latency in samples.
     ///
-    /// Returns the analysis window size. The ring accumulator must fill
-    /// `analysis_size` samples before the first hop triggers, so valid
-    /// output first appears at sample index `analysis_size`.
+    /// Returns `analysis_size - 1`. The ring accumulator triggers its first
+    /// hop when the sample at index `analysis_size - 1` is pushed, and the
+    /// synthesized frame is written starting at the current output position,
+    /// so steady-state output satisfies `output[n] = input[n - latency]`.
     pub fn latency_samples(&self) -> usize {
-        self.analysis_size
+        self.analysis_size - 1
     }
 
     /// Reset all internal state.

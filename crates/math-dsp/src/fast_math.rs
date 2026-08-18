@@ -5,17 +5,27 @@
 //! of some precision, which is usually acceptable for audio gain/dynamics.
 //!
 //! Accuracy targets (chosen to keep roundtrip drift negligible over long sessions):
-//! - `fast_log2`: max error ~0.001, mean bias ~1e-4
+//! - `fast_log2`: max error ~0.0009 over finite normal positive inputs, mean bias ~1e-4
 //! - `fast_exp2`: max relative error ~0.08%, mean bias ~1e-4
 //! - `fast_sin`/`fast_cos`: max error ~0.001
+//! - `fast_atan2`: max error ~0.0067 rad
 
 /// Fast approximation of base-2 logarithm
 ///
 /// Uses IEEE 754 bit extraction with a cubic mantissa correction.
 /// Minimax-fitted on [0, 1] with constraint poly(0)=0, poly(1)=1.
-/// Max error ~0.001 across the full f32 positive range.
+///
+/// # Valid domain
+///
+/// Finite, normal, positive `f32`; max error ~0.0009 there.
+/// `0.0` returns `-inf`. Subnormal inputs are decoded as if they were
+/// normal (wrong by a large margin), and negative or NaN inputs produce
+/// garbage — callers must keep inputs in the valid domain.
 #[inline]
 pub fn fast_log2(x: f32) -> f32 {
+    if x == 0.0 {
+        return f32::NEG_INFINITY;
+    }
     let x_bits = x.to_bits();
     let exponent = (x_bits >> 23) as i32 - 127;
     let m = (x_bits & 0x7FFFFF) as f32 / 8388608.0;
@@ -96,7 +106,7 @@ pub fn fast_cos(x: f32) -> f32 {
 
 /// Fast approximation of atan2(y, x)
 ///
-/// Max error ~0.001 rad (0.05 degrees).
+/// Max error ~0.0067 rad (~0.38 degrees), measured over a dense angular grid.
 /// Based on a rational approximation for atan(x) on [0, 1].
 #[inline]
 pub fn fast_atan2(y: f32, x: f32) -> f32 {
@@ -122,7 +132,7 @@ pub fn fast_atan2(y: f32, x: f32) -> f32 {
 
     // Rational approximation for atan(z) where z = a/b is in [0, 1]
     // atan(z) ≈ z * (π/4 + (1-z) * (0.273 + 0.07 * z))
-    // This is very fast and has max error ~0.0015 rad.
+    // This is very fast and has max error ~0.0067 rad.
     let z = a / b;
     let mut atan = z * (std::f32::consts::FRAC_PI_4 + (1.0 - z) * (0.273 + 0.07 * z));
 
@@ -161,6 +171,13 @@ pub fn fast_exp(x: f32) -> f32 {
 /// Fast approximation of x^y
 ///
 /// Uses log2/exp2 identity: x^y = 2^(y * log2(x))
+///
+/// # Divergence from `f32::powf`
+///
+/// For any `x <= 0.0` this returns `0.0` regardless of `y`, while the
+/// standard `powf` returns `1.0` for `(0, 0)`, `4.0` for `(-2, 2)`, and
+/// `inf` for `(0, -1)`. This is deliberate: callers in audio gain paths
+/// only use positive bases and rely on the zero clamp.
 #[inline]
 pub fn fast_powf(x: f32, y: f32) -> f32 {
     if x <= 0.0 {
@@ -175,20 +192,27 @@ mod tests {
 
     #[test]
     fn test_fast_log2() {
-        for i in 1..100 {
-            let x = i as f32 * 0.1;
-            let actual = x.log2();
-            let approx = fast_log2(x);
-            let error = (actual - approx).abs();
-            assert!(
-                error < 0.002,
-                "log2 error at {}: {} vs {} (err: {})",
-                x,
-                actual,
-                approx,
-                error
-            );
+        // Valid domain: finite normal positive f32 (see docstring).
+        // Dense log-spaced grid from the smallest normal (2^-126) up to 2^126.
+        let mut max_error = 0.0_f32;
+        for i in 0..10000 {
+            let exp = -126.0 + i as f32 * (252.0 / 9999.0);
+            let x = 2.0_f32.powf(exp);
+            let error = (x.log2() - fast_log2(x)).abs();
+            max_error = max_error.max(error);
         }
+        // Measured max error over this grid is ~0.00089; the bound is set
+        // just above it so regressions are caught.
+        assert!(
+            max_error < 0.001,
+            "log2 max error over dense grid: {}",
+            max_error
+        );
+    }
+
+    #[test]
+    fn test_fast_log2_zero_is_negative_infinity() {
+        assert_eq!(fast_log2(0.0), f32::NEG_INFINITY);
     }
 
     #[test]
@@ -266,27 +290,42 @@ mod tests {
     }
 
     #[test]
+    fn test_fast_powf_edge_semantics() {
+        // Codifies the deliberate divergence from `f32::powf` documented in
+        // the docstring: any x <= 0 returns 0.0 regardless of y.
+        assert_eq!(fast_powf(0.0, 0.0), 0.0); // std powf: 1.0
+        assert_eq!(fast_powf(-2.0, 2.0), 0.0); // std powf: 4.0
+        assert_eq!(fast_powf(0.0, -1.0), 0.0); // std powf: inf
+        // Positive bases follow the log2/exp2 identity.
+        let approx = fast_powf(2.0, 10.0);
+        assert!(
+            (approx - 1024.0).abs() / 1024.0 < 0.001,
+            "powf(2, 10) = {}",
+            approx
+        );
+    }
+
+    #[test]
     fn test_fast_atan2() {
-        for yi in -10..10 {
-            for xi in -10..10 {
-                let y = yi as f32 * 0.5;
-                let x = xi as f32 * 0.5;
-                if x == 0.0 && y == 0.0 {
-                    continue;
-                }
+        // The approximation error depends only on the angle y/x, so a dense
+        // angular grid (all four quadrants, plus the axes) covers the domain.
+        let mut max_error = 0.0_f32;
+        for ai in 0..3600 {
+            let theta = (ai as f32 - 1800.0) * (std::f32::consts::PI / 1800.0);
+            for &r in &[0.5_f32, 1.0, 7.0] {
+                let y = r * theta.sin();
+                let x = r * theta.cos();
                 let actual = y.atan2(x);
                 let approx = fast_atan2(y, x);
-                let error = (actual - approx).abs();
-                assert!(
-                    error < 0.01,
-                    "atan2 error at ({}, {}): {} vs {} (err: {})",
-                    y,
-                    x,
-                    actual,
-                    approx,
-                    error
-                );
+                max_error = max_error.max((actual - approx).abs());
             }
         }
+        // Measured max error over this grid is ~0.0067 rad (~0.38 degrees);
+        // the bound is set just above it so regressions are caught.
+        assert!(
+            max_error < 0.007,
+            "atan2 max error over dense grid: {}",
+            max_error
+        );
     }
 }

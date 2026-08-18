@@ -26,6 +26,7 @@ const EPSILON: f64 = 1e-5;
 ///
 /// Wraps a memoryless nonlinearity `f(x)` and its first antiderivative `AD1(x)`.
 /// Produces significantly less aliasing than naive evaluation, at minimal CPU cost.
+#[derive(Debug, Clone, Copy)]
 pub struct Adaa1 {
     /// The nonlinearity f(x)
     f: fn(f64) -> f64,
@@ -84,6 +85,7 @@ impl Adaa1 {
 ///
 /// Uses the second antiderivative for even better alias suppression,
 /// at the cost of one additional sample of latency and slight HF rolloff.
+#[derive(Debug, Clone, Copy)]
 pub struct Adaa2 {
     /// The nonlinearity f(x)
     f: fn(f64) -> f64,
@@ -120,7 +122,9 @@ impl Adaa2 {
         }
     }
 
-    /// Process one sample. Introduces 0.5 sample latency.
+    /// Process one sample. Introduces one sample of latency (see the struct
+    /// docs: ADAA2's centered second difference reproduces x[n-1] for a
+    /// linear input).
     #[inline]
     pub fn process(&mut self, x: f32) -> f32 {
         let x = x as f64;
@@ -170,15 +174,19 @@ fn tanh_ad1(x: f64) -> f64 {
     abs_x + (-2.0 * abs_x).exp().ln_1p() - std::f64::consts::LN_2
 }
 fn tanh_ad2(x: f64) -> f64 {
-    // AD2(tanh(x)) = integral of ln(cosh(x))
-    // = (1/2)[x^2 + Li_2(-e^{-2x})] - ln(2)*x + C
-    // The linear term -(ln2)*x does NOT cancel in ADAA2 finite differences.
-    let z = (-2.0 * x).exp();
+    // AD2(tanh(x)) = integral of ln(cosh(x)).  tanh is odd, so its
+    // second antiderivative can be chosen odd as well.  Evaluating the
+    // positive branch avoids exp() overflow for the large negative inputs
+    // that a high-drive realtime model may legitimately receive.
+    let sign = x.signum();
+    let magnitude = x.abs();
+    let z = (-2.0 * magnitude).exp();
     let li2 = dilog_neg(z);
-    0.5 * (x * x + li2) - std::f64::consts::LN_2 * x
+    sign * (0.5 * (magnitude * magnitude + li2) - std::f64::consts::LN_2 * magnitude
+        + std::f64::consts::PI * std::f64::consts::PI / 24.0)
 }
 
-/// Approximate Li_2(-z) for z >= 0 using series expansion.
+/// Approximate Li_2(-z) for z >= 0 using a rapidly converging series.
 fn dilog_neg(z: f64) -> f64 {
     if z < 1e-15 {
         return 0.0;
@@ -187,23 +195,25 @@ fn dilog_neg(z: f64) -> f64 {
         return -std::f64::consts::PI * std::f64::consts::PI / 12.0;
     }
     if z <= 1.0 {
-        // Li_2(-z) = sum_{k=1}^{inf} (-z)^k / k^2
-        //          = -z + z^2/4 - z^3/9 + ...
-        let mut result = 0.0;
-        let mut z_pow = 1.0;
-        for k in 1..=200 {
-            z_pow *= z;
-            let term = z_pow / (k * k) as f64;
-            if k % 2 == 1 {
-                result -= term;
-            } else {
-                result += term;
-            }
-            if term.abs() < 1e-15 {
+        // The direct series sum_{k=1}^{inf} (-z)^k / k^2 converges only
+        // linearly (ratio z) and is useless as z -> 1. Use the Landen
+        // identity instead:
+        //   Li_2(-z) = -Li_2(w) - 0.5*ln(1+z)^2,  w = z / (1 + z)
+        // w lies in (0, 1/2], so the series in w converges geometrically
+        // with ratio <= 1/2 regardless of how close z is to 1.
+        let w = z / (1.0 + z);
+        let ln1pz = z.ln_1p();
+        let mut sum = 0.0;
+        let mut w_pow = 1.0;
+        for k in 1..=64 {
+            w_pow *= w;
+            let term = w_pow / (k * k) as f64;
+            sum += term;
+            if term < 1e-17 * w {
                 break;
             }
         }
-        result
+        -sum - 0.5 * ln1pz * ln1pz
     } else {
         // For z > 1, use identity: Li_2(-z) = -Li_2(-1/z) - pi^2/6 - 0.5*ln(z)^2
         let ln_z = z.ln();
@@ -351,11 +361,18 @@ mod tests {
 
     #[test]
     fn test_adaa1_reduces_aliasing() {
-        // Compare alias energy: naive tanh vs ADAA1 tanh on a high-frequency sine
+        // High-drive 15 kHz sine through tanh: odd harmonics (45k, 75k, 105k,
+        // ...) exceed Nyquist (24 kHz) and fold back into the audible band as
+        // alias products (3 kHz, 9 kHz, ...). ADAA1 must strongly suppress
+        // those below-fundamental alias products compared to naive evaluation.
+        use rustfft::FftPlanner;
+        use rustfft::num_complex::Complex;
+
         let sr = 48000.0;
-        let freq = 15000.0; // Near Nyquist
-        let drive = 5.0; // Heavy drive creates harmonics that alias
         let n = 4096;
+        // 15000 Hz = bin 1280 exactly, so the fundamental does not leak.
+        let freq = 15000.0;
+        let drive = 5.0; // heavy drive creates harmonics that alias
 
         // Naive
         let naive_output: Vec<f32> = (0..n)
@@ -375,16 +392,25 @@ mod tests {
             })
             .collect();
 
-        // Compute energy in alias band (above Nyquist fold-back region)
-        // Both should have fundamental at 15kHz. Aliases fold back below.
-        // Simply compare total high-frequency energy as a proxy.
-        let naive_energy: f32 = naive_output.iter().map(|x| x * x).sum();
-        let adaa_energy: f32 = adaa_output.iter().map(|x| x * x).sum();
+        // FFT both and compare energy in the alias band: everything below the
+        // fundamental (bins 1..1280, i.e. ~11.7 Hz .. 15 kHz). With a clean
+        // anti-aliased tanh this band only contains aliased harmonic energy.
+        let fft = FftPlanner::new().plan_fft_forward(n);
+        let alias_band_energy = |signal: &[f32]| -> f64 {
+            let mut buf: Vec<Complex<f64>> =
+                signal.iter().map(|&s| Complex::new(s as f64, 0.0)).collect();
+            fft.process(&mut buf);
+            let fundamental_bin = 1280; // 15000 Hz
+            buf[1..fundamental_bin].iter().map(|c| c.norm_sqr()).sum()
+        };
+        let naive_alias = alias_band_energy(&naive_output);
+        let adaa_alias = alias_band_energy(&adaa_output);
 
-        // ADAA should have similar or less energy (less alias content)
-        // This is a rough check — the key is no crash and bounded output
-        assert!(adaa_energy > 0.0, "ADAA produced silence");
-        assert!(naive_energy > 0.0, "Naive produced silence");
+        assert!(naive_alias > 0.0, "naive tanh must produce alias energy");
+        assert!(
+            adaa_alias < naive_alias * 0.2,
+            "ADAA1 should suppress alias-band energy by at least 5x: naive={naive_alias}, adaa={adaa_alias}"
+        );
     }
 
     #[test]
@@ -520,5 +546,62 @@ mod tests {
         // Use 1e-13 so it triggers the (1-z) < 1e-12 fast path.
         let val = dilog_neg(1.0 - 1e-13);
         assert!((val - expected).abs() < 1e-8);
+    }
+
+    #[test]
+    fn test_dilog_neg_approaching_one() {
+        // z just below 1 is where the truncated series loses accuracy.
+        // Reference: Li_2(-z) is continuous at z=1 with Li_2(-1) = -pi^2/12.
+        let limit = -std::f64::consts::PI * std::f64::consts::PI / 12.0;
+        for &delta in &[1e-2_f64, 1e-4, 1e-6, 1e-8] {
+            let z = 1.0 - delta;
+            let val = dilog_neg(z);
+            // |Li_2'(-z)| = |ln(1+z)/z| <= ln(2) near z=1, so the value must
+            // stay within ~ln(2)*delta of the limit.
+            let tol = 2.0 * std::f64::consts::LN_2 * delta + 1e-12;
+            assert!(
+                (val - limit).abs() < tol,
+                "Li_2(-{z}): expected ~{limit}, got {val} (tol {tol})"
+            );
+        }
+    }
+
+    #[test]
+    fn test_tanh_ad2_derivative_matches_lncosh() {
+        // d/dx AD2(tanh) = AD1(tanh) = ln(cosh(x)). The dilog series must be
+        // accurate enough that this holds even for tiny x (z = e^{-2x} -> 1).
+        for &x in &[1e-4_f64, 1e-3, 0.01, 0.05, 0.5, 2.0] {
+            let h = 1e-5_f64;
+            let numerical = (tanh_ad2(x + h) - tanh_ad2(x - h)) / (2.0 * h);
+            let expected = x.cosh().ln();
+            assert!(
+                (numerical - expected).abs() < 1e-9,
+                "tanh_ad2'({x}): expected {expected}, got {numerical}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_adaa2_tanh_quiet_sine_matches_naive() {
+        // -60 dBFS sine: tanh is nearly linear here, so ADAA2 output must
+        // closely match naive tanh evaluation (RMS ratio ~ 1).
+        let sr = 48000.0;
+        let amp = 1e-3_f64; // -60 dBFS
+        let n = 8192;
+        let mut adaa = adaa2_tanh();
+        let mut adaa_sq = 0.0_f64;
+        let mut naive_sq = 0.0_f64;
+        for i in 0..n {
+            let x = amp * (2.0 * std::f64::consts::PI * 1000.0 * i as f64 / sr).sin();
+            let y = adaa.process(x as f32) as f64;
+            let naive = x.tanh();
+            adaa_sq += y * y;
+            naive_sq += naive * naive;
+        }
+        let ratio = (adaa_sq / naive_sq).sqrt();
+        assert!(
+            (ratio - 1.0).abs() < 0.01,
+            "ADAA2/naive RMS ratio on quiet sine should be ~1.0, got {ratio}"
+        );
     }
 }

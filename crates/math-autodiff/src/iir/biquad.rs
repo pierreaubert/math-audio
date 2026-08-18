@@ -23,16 +23,15 @@
 
 use math_audio_iir_fir::BiquadFilterType;
 use ndarray::{
-    Array2, Array3, Array4, Array5, ArrayD, ArrayView3, ArrayView4, ArrayViewMut3, ArrayViewMut4,
-    Axis, IxDyn,
+    Array3, Array4, Array5, ArrayD, ArrayView3, ArrayView4, ArrayViewMut3, ArrayViewMut4, Axis,
+    IxDyn,
 };
 use num_complex::Complex;
 use std::f64::consts::{PI, SQRT_2};
 
 use crate::error::AutodiffError;
 use crate::iir::response::{
-    SosFrequencyBasis, sos_coefficient_vjp_with_basis, sos_frequency_response_jacobian_parallel,
-    sos_frequency_response_parallel,
+    SosFrequencyBasis, sos_coefficient_vjp_with_basis, sos_frequency_response_parallel,
 };
 use crate::module::{DiffModule, validate_spectral_gradient_shape};
 use crate::tensor::DiffTensor;
@@ -40,13 +39,19 @@ use crate::tensor::DiffTensor;
 /// Sigmoid activation mapping raw parameters to the `(0, 1)` interval.
 #[inline]
 fn sigmoid(x: f64) -> f64 {
-    1.0 / (1.0 + (-x).exp())
+    const EPS: f64 = 1e-6;
+    (1.0 / (1.0 + (-x).exp())).clamp(EPS, 1.0 - EPS)
 }
 
 /// Derivative of [`sigmoid`] expressed as a function of its output.
 #[inline]
 fn sigmoid_derivative_from_output(s: f64) -> f64 {
-    s * (1.0 - s)
+    const EPS: f64 = 1e-6;
+    if s <= EPS || s >= 1.0 - EPS {
+        0.0
+    } else {
+        s * (1.0 - s)
+    }
 }
 
 /// Number of tunable parameters for a given filter type.
@@ -426,6 +431,14 @@ struct BiquadCoeffCache {
     a: Array4<Complex<f64>>,
     db_dparam: Array5<f64>,
     da_dparam: Array5<f64>,
+}
+
+#[derive(Debug, Clone)]
+struct ParallelBiquadCoeffCache {
+    b: Array4<Complex<f64>>,
+    a: Array4<Complex<f64>>,
+    db_dparam: Array4<f64>,
+    da_dparam: Array4<f64>,
 }
 
 /// Fast FNV-1a hash over parameter values for cache invalidation.
@@ -855,103 +868,106 @@ impl DiffModule<f64> for Biquad {
         let nfft = self.nfft;
         let gamma = self.gamma();
 
-        // Clone the cached coefficients so the cache borrow is released and we
-        // can reuse `self` working buffers for the rest of the backward pass.
-        let (b, a, db_dparam, da_dparam) = {
-            let cache = self.ensure_coeffs_cached()?;
-            (
-                cache.b.clone(),
-                cache.a.clone(),
-                cache.db_dparam.clone(),
-                cache.da_dparam.clone(),
-            )
-        };
+        self.ensure_coeffs_cached()?;
+        let cache = self.coeff_cache.take().ok_or_else(|| {
+            AutodiffError::Message("Biquad: coefficient cache missing".to_string())
+        })?;
+        let result = (|| {
+            let b = &cache.b;
+            let a = &cache.a;
+            let db_dparam = &cache.db_dparam;
+            let da_dparam = &cache.da_dparam;
 
-        // Resize reusable working buffers when shapes change.
-        if self.work_dl_dh.dim() != (n_bins, n_out, n_in) {
-            self.work_dl_dh = Array3::zeros((n_bins, n_out, n_in));
-        }
-        if self.work_h.dim() != (n_bins, n_out, n_in) {
-            self.work_h = Array3::zeros((n_bins, n_out, n_in));
-        }
-        if self.work_b_response.dim() != (n_sections, n_bins, n_out, n_in) {
-            self.work_b_response = Array4::zeros((n_sections, n_bins, n_out, n_in));
-        }
-        if self.work_a_response.dim() != (n_sections, n_bins, n_out, n_in) {
-            self.work_a_response = Array4::zeros((n_sections, n_bins, n_out, n_in));
-        }
-        if self.work_grad_input.shape() != input_shape {
-            self.work_grad_input = ArrayD::zeros(IxDyn(input_shape));
-        }
-        self.work_grad_input.fill(Complex::default());
-
-        // Compute dLoss/dH using real parts (MVP assumption: real time-domain signals).
-        self.work_dl_dh.fill(Complex::default());
-        for out_ch in 0..n_out {
-            let grad_axis2 = grad_output.data.index_axis(Axis(2), out_ch);
-            for in_ch in 0..n_in {
-                let input_axis2 = input.data.index_axis(Axis(2), in_ch);
-                for bin in 0..n_bins {
-                    let grad_bin = grad_axis2.index_axis(Axis(1), bin);
-                    let input_bin = input_axis2.index_axis(Axis(1), bin);
-                    self.work_dl_dh[[bin, out_ch, in_ch]] = grad_bin
-                        .iter()
-                        .zip(input_bin.iter())
-                        .map(|(grad, input)| *grad * input.conj())
-                        .sum::<Complex<f64>>();
-                }
+            // Resize reusable working buffers when shapes change.
+            if self.work_dl_dh.dim() != (n_bins, n_out, n_in) {
+                self.work_dl_dh = Array3::zeros((n_bins, n_out, n_in));
             }
-        }
+            if self.work_h.dim() != (n_bins, n_out, n_in) {
+                self.work_h = Array3::zeros((n_bins, n_out, n_in));
+            }
+            if self.work_b_response.dim() != (n_sections, n_bins, n_out, n_in) {
+                self.work_b_response = Array4::zeros((n_sections, n_bins, n_out, n_in));
+            }
+            if self.work_a_response.dim() != (n_sections, n_bins, n_out, n_in) {
+                self.work_a_response = Array4::zeros((n_sections, n_bins, n_out, n_in));
+            }
+            if self.work_grad_input.shape() != input_shape {
+                self.work_grad_input = ArrayD::zeros(IxDyn(input_shape));
+            }
+            self.work_grad_input.fill(Complex::default());
 
-        let basis = SosFrequencyBasis::new(nfft, &gamma);
-        let (response_db, response_da) = sos_coefficient_vjp_with_basis(
-            &b,
-            &a,
-            &basis,
-            &self.work_dl_dh,
-            &mut self.work_h,
-            &mut self.work_b_response,
-            &mut self.work_a_response,
-        );
-
-        // Accumulate parameter gradients.
-        let mut param_grad = biquad_param_grad_view_mut(&mut self.param_grad)?;
-        for section in 0..n_sections {
+            // Compute dLoss/dH using real parts (MVP assumption: real time-domain signals).
+            self.work_dl_dh.fill(Complex::default());
             for out_ch in 0..n_out {
+                let grad_axis2 = grad_output.data.index_axis(Axis(2), out_ch);
                 for in_ch in 0..n_in {
-                    for param_idx in 0..n_params {
-                        let mut accum = 0.0;
-                        for tap in 0..3 {
-                            let db_dp = db_dparam[[section, tap, param_idx, out_ch, in_ch]];
-                            let da_dp = da_dparam[[section, tap, param_idx, out_ch, in_ch]];
-                            accum += response_db[[section, tap, out_ch, in_ch]] * db_dp
-                                + response_da[[section, tap, out_ch, in_ch]] * da_dp;
+                    let input_axis2 = input.data.index_axis(Axis(2), in_ch);
+                    for bin in 0..n_bins {
+                        let grad_bin = grad_axis2.index_axis(Axis(1), bin);
+                        let input_bin = input_axis2.index_axis(Axis(1), bin);
+                        self.work_dl_dh[[bin, out_ch, in_ch]] = grad_bin
+                            .iter()
+                            .zip(input_bin.iter())
+                            .map(|(grad, input)| *grad * input.conj())
+                            .sum::<Complex<f64>>();
+                    }
+                }
+            }
+
+            let basis = SosFrequencyBasis::new(nfft, &gamma);
+            let (response_db, response_da) = sos_coefficient_vjp_with_basis(
+                b,
+                a,
+                &basis,
+                &self.work_dl_dh,
+                &mut self.work_h,
+                &mut self.work_b_response,
+                &mut self.work_a_response,
+            )?;
+
+            // Accumulate parameter gradients.
+            {
+                let mut param_grad = biquad_param_grad_view_mut(&mut self.param_grad)?;
+                for section in 0..n_sections {
+                    for out_ch in 0..n_out {
+                        for in_ch in 0..n_in {
+                            for param_idx in 0..n_params {
+                                let mut accum = 0.0;
+                                for tap in 0..3 {
+                                    accum += response_db[[section, tap, out_ch, in_ch]]
+                                        * db_dparam[[section, tap, param_idx, out_ch, in_ch]]
+                                        + response_da[[section, tap, out_ch, in_ch]]
+                                            * da_dparam[[section, tap, param_idx, out_ch, in_ch]];
+                                }
+                                param_grad[[section, param_idx, out_ch, in_ch]] += accum;
+                            }
                         }
-                        param_grad[[section, param_idx, out_ch, in_ch]] += accum;
                     }
                 }
             }
-        }
 
-        // Compute dLoss/dInput into the reusable buffer.
-        let h = &self.work_h;
-        for in_ch in 0..n_in {
-            for out_ch in 0..n_out {
-                for bin in 0..n_bins {
-                    let h_conj = h[[bin, out_ch, in_ch]].conj();
-                    let grad_axis2 = grad_output.data.index_axis(Axis(2), out_ch);
-                    let grad_bin = grad_axis2.index_axis(Axis(1), bin);
-                    let mut input_axis2 = self.work_grad_input.index_axis_mut(Axis(2), in_ch);
-                    let mut input_bin = input_axis2.index_axis_mut(Axis(1), bin);
-                    for (destination, &gradient) in input_bin.iter_mut().zip(grad_bin.iter()) {
-                        *destination += gradient * h_conj;
+            // Compute dLoss/dInput into the reusable buffer.
+            for in_ch in 0..n_in {
+                for out_ch in 0..n_out {
+                    for bin in 0..n_bins {
+                        let h_conj = self.work_h[[bin, out_ch, in_ch]].conj();
+                        let grad_axis2 = grad_output.data.index_axis(Axis(2), out_ch);
+                        let grad_bin = grad_axis2.index_axis(Axis(1), bin);
+                        let mut input_axis2 = self.work_grad_input.index_axis_mut(Axis(2), in_ch);
+                        let mut input_bin = input_axis2.index_axis_mut(Axis(1), bin);
+                        for (destination, &gradient) in input_bin.iter_mut().zip(grad_bin.iter()) {
+                            *destination += gradient * h_conj;
+                        }
                     }
                 }
             }
-        }
-        let grad_input = std::mem::replace(&mut self.work_grad_input, ArrayD::zeros(IxDyn(&[])));
+            let grad_input =
+                std::mem::replace(&mut self.work_grad_input, ArrayD::zeros(IxDyn(&[])));
 
-        Ok(DiffTensor::from_array(grad_input))
+            Ok(DiffTensor::from_array(grad_input))
+        })();
+        self.coeff_cache = Some(cache);
+        result
     }
 
     fn input_channels(&self) -> usize {
@@ -1000,6 +1016,12 @@ pub struct ParallelBiquad {
     pub param_grad: ArrayD<f64>,
     /// Anti-aliasing decay in dB.
     pub alias_decay_db: f64,
+    coeff_cache: Option<ParallelBiquadCoeffCache>,
+    param_hash: u64,
+    work_h: ndarray::Array3<Complex<f64>>,
+    work_b_response: ndarray::Array4<Complex<f64>>,
+    work_a_response: ndarray::Array4<Complex<f64>>,
+    work_dl_dh: ndarray::Array3<Complex<f64>>,
 }
 
 impl ParallelBiquad {
@@ -1064,6 +1086,12 @@ impl ParallelBiquad {
             param,
             param_grad: ArrayD::zeros(IxDyn(&[n_sections, n_params, n_channels])),
             alias_decay_db,
+            coeff_cache: None,
+            param_hash: 0,
+            work_h: ndarray::Array3::zeros((0, 0, 0)),
+            work_b_response: ndarray::Array4::zeros((0, 0, 0, 0)),
+            work_a_response: ndarray::Array4::zeros((0, 0, 0, 0)),
+            work_dl_dh: ndarray::Array3::zeros((0, 0, 0)),
         })
     }
 
@@ -1075,6 +1103,33 @@ impl ParallelBiquad {
     fn gamma(&self) -> [f64; 3] {
         let gamma = 10.0_f64.powf(-self.alias_decay_db.abs() / (20.0 * self.nfft as f64));
         [1.0, gamma, gamma * gamma]
+    }
+
+    fn ensure_coeffs_cached(&mut self) -> Result<&ParallelBiquadCoeffCache, AutodiffError> {
+        let hash = hash_param(&self.param);
+        if self.coeff_cache.is_none() || self.param_hash != hash {
+            let (b, a, db_dparam, da_dparam) = self.build_coeffs_and_grads()?;
+            let b_dim = b.dim();
+            let a_dim = a.dim();
+            let b = b
+                .into_shape_with_order((b_dim.0, 3, b_dim.2, 1))
+                .map_err(|e| {
+                    AutodiffError::Message(format!("ParallelBiquad: failed to reshape b: {e}"))
+                })?;
+            let a = a
+                .into_shape_with_order((a_dim.0, 3, a_dim.2, 1))
+                .map_err(|e| {
+                    AutodiffError::Message(format!("ParallelBiquad: failed to reshape a: {e}"))
+                })?;
+            self.param_hash = hash;
+            self.coeff_cache = Some(ParallelBiquadCoeffCache {
+                b,
+                a,
+                db_dparam,
+                da_dparam,
+            });
+        }
+        Ok(self.coeff_cache.as_ref().expect("cache just populated"))
     }
 
     /// Map raw parameters to normalized coefficients and parameter gradients.
@@ -1228,6 +1283,7 @@ impl DiffModule<f64> for ParallelBiquad {
         Ok(DiffTensor::from_array(output))
     }
 
+    #[allow(clippy::too_many_lines)]
     fn backward(
         &mut self,
         input: &DiffTensor<f64>,
@@ -1281,64 +1337,91 @@ impl DiffModule<f64> for ParallelBiquad {
             )));
         }
 
-        let (b, a, db_dparam, da_dparam) = self.build_coeffs_and_grads()?;
-        let gamma = self.gamma();
-        let h = sos_frequency_response_parallel(&b, &a, self.nfft, Some(&gamma))?;
-        let (dh_db, dh_da) =
-            sos_frequency_response_jacobian_parallel(&b, &a, self.nfft, Some(&gamma))?;
+        self.ensure_coeffs_cached()?;
+        let cache = self.coeff_cache.take().ok_or_else(|| {
+            AutodiffError::Message("ParallelBiquad: coefficient cache missing".to_string())
+        })?;
+        let result = (|| {
+            let b = &cache.b;
+            let a = &cache.a;
+            let db_dparam = &cache.db_dparam;
+            let da_dparam = &cache.da_dparam;
+            let gamma = self.gamma();
+            let basis = SosFrequencyBasis::new(self.nfft, &gamma);
 
-        // Compute dLoss/dH using real parts.
-        let mut dl_dh = Array2::zeros((n_bins, n_channels));
-        for ch in 0..n_channels {
-            let grad_axis2 = grad_output.data.index_axis(Axis(2), ch);
-            let input_axis2 = input.data.index_axis(Axis(2), ch);
-            for bin in 0..n_bins {
-                let grad_bin = grad_axis2.index_axis(Axis(1), bin);
-                let input_bin = input_axis2.index_axis(Axis(1), bin);
-                dl_dh[[bin, ch]] = grad_bin
-                    .iter()
-                    .zip(input_bin.iter())
-                    .map(|(grad, input)| *grad * input.conj())
-                    .sum::<Complex<f64>>();
+            if self.work_dl_dh.dim() != (n_bins, n_channels, 1) {
+                self.work_dl_dh = Array3::zeros((n_bins, n_channels, 1));
             }
-        }
-
-        // Accumulate parameter gradients.
-        let mut param_grad = parallel_biquad_param_grad_view_mut(&mut self.param_grad)?;
-        for section in 0..n_sections {
+            if self.work_h.dim() != (n_bins, n_channels, 1) {
+                self.work_h = Array3::zeros((n_bins, n_channels, 1));
+            }
+            if self.work_b_response.dim() != (n_sections, n_bins, n_channels, 1) {
+                self.work_b_response = Array4::zeros((n_sections, n_bins, n_channels, 1));
+            }
+            if self.work_a_response.dim() != (n_sections, n_bins, n_channels, 1) {
+                self.work_a_response = Array4::zeros((n_sections, n_bins, n_channels, 1));
+            }
+            self.work_dl_dh.fill(Complex::default());
             for ch in 0..n_channels {
-                for param_idx in 0..n_params {
-                    let mut accum = 0.0;
-                    for tap in 0..3 {
-                        let db_dp = db_dparam[[section, tap, param_idx, ch]];
-                        let da_dp = da_dparam[[section, tap, param_idx, ch]];
-                        for bin in 0..n_bins {
-                            let term = dh_db[[bin, section, tap, ch]] * db_dp
-                                + dh_da[[bin, section, tap, ch]] * da_dp;
-                            accum += (dl_dh[[bin, ch]].conj() * term).re;
+                let grad_axis2 = grad_output.data.index_axis(Axis(2), ch);
+                let input_axis2 = input.data.index_axis(Axis(2), ch);
+                for bin in 0..n_bins {
+                    let grad_bin = grad_axis2.index_axis(Axis(1), bin);
+                    let input_bin = input_axis2.index_axis(Axis(1), bin);
+                    self.work_dl_dh[[bin, ch, 0]] = grad_bin
+                        .iter()
+                        .zip(input_bin.iter())
+                        .map(|(grad, input)| *grad * input.conj())
+                        .sum::<Complex<f64>>();
+                }
+            }
+
+            let (response_db, response_da) = sos_coefficient_vjp_with_basis(
+                b,
+                a,
+                &basis,
+                &self.work_dl_dh,
+                &mut self.work_h,
+                &mut self.work_b_response,
+                &mut self.work_a_response,
+            )?;
+
+            {
+                let mut param_grad = parallel_biquad_param_grad_view_mut(&mut self.param_grad)?;
+                for section in 0..n_sections {
+                    for ch in 0..n_channels {
+                        for param_idx in 0..n_params {
+                            let mut accum = 0.0;
+                            for tap in 0..3 {
+                                accum += response_db[[section, tap, ch, 0]]
+                                    * db_dparam[[section, tap, param_idx, ch]]
+                                    + response_da[[section, tap, ch, 0]]
+                                        * da_dparam[[section, tap, param_idx, ch]];
+                            }
+                            param_grad[[section, param_idx, ch]] += accum;
                         }
                     }
-                    param_grad[[section, param_idx, ch]] += accum;
                 }
             }
-        }
 
-        // Compute dLoss/dInput.
-        let mut grad_input = ArrayD::zeros(IxDyn(input_shape));
-        for ch in 0..n_channels {
-            for bin in 0..n_bins {
-                let h_conj = h[[bin, ch]].conj();
-                let grad_axis2 = grad_output.data.index_axis(Axis(2), ch);
-                let grad_bin = grad_axis2.index_axis(Axis(1), bin);
-                let mut input_axis2 = grad_input.index_axis_mut(Axis(2), ch);
-                let mut input_bin = input_axis2.index_axis_mut(Axis(1), bin);
-                for (destination, &gradient) in input_bin.iter_mut().zip(grad_bin.iter()) {
-                    *destination += gradient * h_conj;
+            let mut grad_input = ArrayD::zeros(IxDyn(input_shape));
+            for ch in 0..n_channels {
+                for bin in 0..n_bins {
+                    let h_conj = self.work_h[[bin, ch, 0]].conj();
+                    let grad_axis2 = grad_output.data.index_axis(Axis(2), ch);
+                    let grad_bin = grad_axis2.index_axis(Axis(1), bin);
+                    let mut input_axis2 = grad_input.index_axis_mut(Axis(2), ch);
+                    let mut input_bin = input_axis2.index_axis_mut(Axis(1), bin);
+                    for (destination, &gradient) in input_bin.iter_mut().zip(grad_bin.iter()) {
+                        *destination += gradient * h_conj;
+                    }
                 }
             }
-        }
 
-        Ok(DiffTensor::from_array(grad_input))
+            Ok(DiffTensor::from_array(grad_input))
+        })();
+        self.coeff_cache = Some(cache);
+        result
     }
 
     fn input_channels(&self) -> usize {

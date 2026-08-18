@@ -451,8 +451,12 @@ impl DiffModule<f64> for ParallelGain {
         for ch in 0..n_channels {
             let grad_slice = grad_output.data.index_axis(Axis(2), ch);
             let input_slice = input.data.index_axis(Axis(2), ch);
-            let prod = &grad_slice * &input_slice.mapv(|x| x.conj());
-            param_grad[ch] += prod.sum().re;
+            param_grad[ch] += grad_slice
+                .iter()
+                .zip(input_slice.iter())
+                .map(|(gradient, sample)| *gradient * sample.conj())
+                .sum::<Complex<f64>>()
+                .re;
         }
 
         // Compute dLoss/dInput.
@@ -461,7 +465,9 @@ impl DiffModule<f64> for ParallelGain {
             let h = param[ch];
             let grad_slice = grad_output.data.index_axis(Axis(2), ch);
             let mut input_grad_slice = grad_input.index_axis_mut(Axis(2), ch);
-            input_grad_slice += &grad_slice.mapv(|x| x * h);
+            for (destination, &gradient) in input_grad_slice.iter_mut().zip(grad_slice.iter()) {
+                *destination += gradient * h;
+            }
         }
 
         Ok(DiffTensor::from_array(grad_input))

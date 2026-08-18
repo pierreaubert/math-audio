@@ -48,12 +48,21 @@ pub(super) fn mls_taps(order: u8) -> Option<&'static [u8]> {
 ///
 /// # Returns
 /// Interleaved signal where samples are ordered: [ch0_frame0, ch1_frame0, ..., ch0_frame1, ch1_frame1, ...]
+///
+/// # Panics
+/// Panics if the channels do not all have equal length — interleaving
+/// requires the same number of frames per channel.
 pub fn interleave_per_channel(per_channel: &[Vec<f32>]) -> Vec<f32> {
     let n_channels = per_channel.len();
     if n_channels == 0 {
         return Vec::new();
     }
     let n_frames = per_channel[0].len();
+    assert!(
+        per_channel.iter().all(|ch| ch.len() == n_frames),
+        "interleave_per_channel: all channels must have equal length \
+         (channel 0 has {n_frames} frames)"
+    );
     let mut interleaved = Vec::with_capacity(n_frames * n_channels);
 
     for frame in 0..n_frames {
@@ -146,10 +155,23 @@ pub(super) fn single_bin_dft(
     //   sin(ωt) → phase = 0°
     //   cos(ωt) → phase = +90°
     //   −sin(ωt) → phase = ±180°
-    for (i, &s) in signal.iter().enumerate() {
-        let theta = omega * (i + k_offset) as f64;
-        re += s as f64 * theta.sin();
-        im += s as f64 * theta.cos();
+    //
+    // The basis is advanced by complex rotation (`z *= e^{iω}`) in f64
+    // instead of calling sin/cos per sample; drift over practical buffer
+    // lengths is ~N·2⁻⁵³, far below the phase tests' tolerances (pinned
+    // by `single_bin_dft_recurrence_matches_direct_trig`).
+    let theta0 = omega * k_offset as f64;
+    let mut sin = theta0.sin();
+    let mut cos = theta0.cos();
+    let step_sin = omega.sin();
+    let step_cos = omega.cos();
+    for &s in signal {
+        let x = s as f64;
+        re += x * sin;
+        im += x * cos;
+        let next_sin = sin * step_cos + cos * step_sin;
+        cos = cos * step_cos - sin * step_sin;
+        sin = next_sin;
     }
     (re, im)
 }

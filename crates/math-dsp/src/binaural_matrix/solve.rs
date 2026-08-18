@@ -63,14 +63,17 @@ pub fn solve_weighted_regularized_inverse_bin(
     let speakers = first.num_speakers;
     let ears = first.num_ears;
     let target_matrix = DMatrix::from_row_slice(ears, ears, target);
+    // Copy each position's transfer matrix once and reuse it for both the
+    // normal-equation accumulation and the reconstruction-error pass below.
+    let h_matrices: Vec<DMatrix<Complex64>> =
+        positions.iter().map(TransferMatrixBin::as_matrix).collect();
     let mut normal = DMatrix::<Complex64>::zeros(speakers, speakers);
     let mut rhs = DMatrix::<Complex64>::zeros(speakers, ears);
 
-    for (matrix, weight) in positions.iter().zip(weights) {
-        let h = matrix.as_matrix();
+    for (h, weight) in h_matrices.iter().zip(weights) {
         let h_h = h.adjoint();
         let w = Complex64::new(*weight, 0.0);
-        normal += (&h_h * &h) * w;
+        normal += (&h_h * h) * w;
         rhs += (h_h * &target_matrix) * w;
     }
 
@@ -79,9 +82,9 @@ pub fn solve_weighted_regularized_inverse_bin(
     }
 
     let mut inverse = normal
-        .try_inverse()
-        .ok_or_else(|| "regularized normal matrix is singular".to_string())?
-        * rhs;
+        .lu()
+        .solve(&rhs)
+        .ok_or_else(|| "regularized normal matrix is singular".to_string())?;
 
     if let Some(max_gain_db) = max_gain_db {
         let max_gain = 10.0_f64.powf(max_gain_db / 20.0);
@@ -94,8 +97,8 @@ pub fn solve_weighted_regularized_inverse_bin(
     }
 
     let mut position_errors = Vec::with_capacity(positions.len());
-    for matrix in positions {
-        let delivered = matrix.as_matrix() * &inverse;
+    for h in &h_matrices {
+        let delivered = h * &inverse;
         let mut position_error = 0.0;
         let mut count = 0usize;
         for row in 0..ears {

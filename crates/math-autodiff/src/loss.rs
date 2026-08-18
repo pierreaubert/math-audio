@@ -53,7 +53,11 @@ pub fn mse_loss_backward(
 ) -> Result<DiffTensor<f64>, AutodiffError> {
     validate_loss_inputs(pred, target)?;
     let scale = 2.0 / pred.data.len() as f64;
-    Ok(DiffTensor::from_array((&pred.data - &target.data) * scale))
+    let mut grad = ndarray::ArrayD::<Complex<f64>>::zeros(pred.data.raw_dim());
+    ndarray::azip!((g in &mut grad, &p in &pred.data, &t in &target.data) {
+        *g = (p - t) * scale;
+    });
+    Ok(DiffTensor::from_array(grad))
 }
 
 /// Mean squared error between magnitude spectra.

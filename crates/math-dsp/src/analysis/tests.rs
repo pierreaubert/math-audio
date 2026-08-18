@@ -966,13 +966,23 @@ fn test_compute_group_delay_short_input() {
 
 #[test]
 fn test_compute_clarity_broadband_dirac() {
+    // ISO 3382: a Dirac at t=0 has all energy inside the early windows,
+    // so both clarity values peg at the positive cap.
     let mut ir = vec![0.0f32; 48000];
     ir[0] = 1.0;
     let (c50, c80) = compute_clarity_broadband(&ir, 48000.0);
-    // Current production logic: c50 correctly uses early > late, c80 uses
-    // late > early (swapped). Test the actual behavior without changing it.
     assert_eq!(c50, 60.0);
-    assert_eq!(c80, -60.0);
+    assert_eq!(c80, 60.0);
+}
+
+#[test]
+fn test_compute_clarity_broadband_mid_impulse() {
+    // Impulse at 60 ms: late for the 50 ms window, early for the 80 ms one.
+    let mut ir = vec![0.0f32; 48000];
+    ir[(0.060 * 48000.0) as usize] = 1.0;
+    let (c50, c80) = compute_clarity_broadband(&ir, 48000.0);
+    assert_eq!(c50, -60.0);
+    assert_eq!(c80, 60.0);
 }
 
 #[test]
@@ -982,7 +992,7 @@ fn test_compute_clarity_broadband_late_impulse() {
     ir[5000] = 1.0;
     let (c50, c80) = compute_clarity_broadband(&ir, 48000.0);
     assert_eq!(c50, -60.0);
-    assert_eq!(c80, 60.0);
+    assert_eq!(c80, -60.0);
 }
 
 #[test]
@@ -996,6 +1006,263 @@ fn test_compute_clarity_broadband_empty() {
 #[test]
 fn test_compute_rt60_broadband_empty() {
     assert_eq!(compute_rt60_broadband(&[], 48000.0), 0.0);
+}
+
+#[test]
+fn test_compute_rt60_spectrum_returns_milliseconds() {
+    // Synthetic IR with a known T60 of 0.5 s, concentrated in the 1 kHz
+    // octave band so the band-passed Schroeder decay is clean:
+    // amplitude envelope exp(-6.908 t / 0.5) modulating a 1 kHz carrier.
+    // The result feeds AnalysisResult.rt60_ms and the rt60_ms CSV column,
+    // so the spectrum must come back in milliseconds (~500 ms here).
+    let sample_rate = 48_000.0_f32;
+    let t60 = 0.5_f32;
+    let len = (2.0 * sample_rate) as usize;
+    let ir: Vec<f32> = (0..len)
+        .map(|i| {
+            let t = i as f32 / sample_rate;
+            (-6.907_755 * t / t60).exp() * (2.0 * PI * 1000.0 * t).sin()
+        })
+        .collect();
+    let rt60 = compute_rt60_spectrum(&ir, sample_rate, &[1000.0]);
+    assert_eq!(rt60.len(), 1);
+    assert!(
+        (rt60[0] - 500.0).abs() < 50.0,
+        "rt60_ms must be in milliseconds (~500 ms), got {}",
+        rt60[0]
+    );
+}
+
+#[test]
+fn rt60_clarity_shared_pass_matches_separate_public_paths() {
+    // Characterization test for the shared RT60+clarity band-filtering pass:
+    // compute_rt60_clarity_spectra only changes buffer management (one f64
+    // conversion + reused scratch instead of per-band temporaries), so its
+    // outputs must be bit-identical to the two separate public functions.
+    let sample_rate = 48_000.0_f32;
+    // Deterministic exponentially decaying noise IR (multi-band content).
+    let n = 24_000_usize;
+    let mut state = 0x1234_5678_u32;
+    let ir: Vec<f32> = (0..n)
+        .map(|i| {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            let noise = ((state >> 8) as f32 / (1u32 << 24) as f32) * 2.0 - 1.0;
+            noise * (-3.0 * i as f32 / n as f32).exp()
+        })
+        .collect();
+    let freqs: Vec<f32> = (0..32).map(|i| 100.0 * 1.1f32.powi(i)).collect();
+
+    let rt60_ref = compute_rt60_spectrum(&ir, sample_rate, &freqs);
+    let (c50_ref, c80_ref) = compute_clarity_spectrum(&ir, sample_rate, &freqs);
+    let (rt60, c50, c80) = super::compute::compute_rt60_clarity_spectra(&ir, sample_rate, &freqs);
+
+    assert_eq!(rt60, rt60_ref, "rt60_ms must be bit-identical");
+    assert_eq!(c50, c50_ref, "c50_db must be bit-identical");
+    assert_eq!(c80, c80_ref, "c80_db must be bit-identical");
+}
+
+#[test]
+fn welch_dc_bin_matches_single_fft_dc_bin() {
+    // DC is a one-sided bin: it must not receive the 2x folding applied to
+    // interior bins. A constant 0.5 signal must read ~-6.02 dB in both paths.
+    let fft_size = 1024;
+    let signal = vec![0.5_f32; fft_size * 4];
+    let (_, welch_db, _) =
+        compute_welch_spectrum_internal(&signal, 48_000, fft_size, 0.5).unwrap();
+    let (_, single_db, _) =
+        compute_single_fft_spectrum_internal(&signal, 48_000, fft_size, false).unwrap();
+    let expected = 20.0 * 0.5_f32.log10();
+    assert!(
+        (welch_db[0] - expected).abs() < 0.1,
+        "Welch DC bin: expected {expected:.3} dBFS, got {:.3}",
+        welch_db[0]
+    );
+    assert!(
+        (welch_db[0] - single_db[0]).abs() < 0.1,
+        "Welch DC bin {:.3} must match single-FFT DC bin {:.3}",
+        welch_db[0],
+        single_db[0]
+    );
+}
+
+#[test]
+fn welch_skips_trailing_frame_with_no_new_data() {
+    // With len == fft_size and 50% overlap, the second frame re-analyzes the
+    // back half of the same data and must not enter the average: here that
+    // back half is silence, so counting it would halve the measured power.
+    let fft_size = 1024;
+    let bin = 32;
+    let mut signal = vec![0.0_f32; fft_size];
+    for (n, sample) in signal[..fft_size / 2].iter_mut().enumerate() {
+        *sample = 0.5 * (2.0 * PI * bin as f32 * n as f32 / fft_size as f32).sin();
+    }
+    let (_, reference_db, _) =
+        compute_welch_spectrum_internal(&signal, 48_000, fft_size, 0.0).unwrap();
+    let (_, overlapped_db, _) =
+        compute_welch_spectrum_internal(&signal, 48_000, fft_size, 0.5).unwrap();
+    assert!(
+        (overlapped_db[bin] - reference_db[bin]).abs() < 0.1,
+        "trailing no-new-data frame must not dilute the average: overlap=0.0 gave {:.3} dB, overlap=0.5 gave {:.3} dB",
+        reference_db[bin],
+        overlapped_db[bin]
+    );
+}
+
+#[test]
+fn test_windowed_fr_tiny_windows_do_not_panic() {
+    // 1- and 2-sample windows have no frequency resolution; the function must
+    // return a finite flat spectrum instead of panicking on bin clamping.
+    let sr = 48000;
+    let mut ir = vec![0.0f32; 64];
+    ir[0] = 1.0;
+    ir[1] = 0.5;
+    ir[2] = 0.25;
+
+    let result = compute_windowed_fr(&ir, 1, 3, sr, 32).unwrap();
+    assert_eq!(result.direct_sound_spl.len(), 32);
+    assert_eq!(result.early_reflections_spl.len(), 32);
+    assert!(result.direct_sound_spl.iter().all(|v| v.is_finite()));
+    assert!(result.early_reflections_spl.iter().all(|v| v.is_finite()));
+    // A one-sample window [1.0] has a flat |H(f)| = 1 -> 0 dB everywhere.
+    assert!(
+        result
+            .direct_sound_spl
+            .iter()
+            .all(|&v| v.abs() < 0.1),
+        "one-sample direct window should be flat 0 dB, got {:?}",
+        result.direct_sound_spl
+    );
+}
+
+#[test]
+fn test_thd_spread_harmonic_ir_compensates_window_coherent_gain() {
+    // A harmonic IR spread across the whole extraction window is attenuated
+    // by the Hann window's coherent gain (~0.5); the measured level must be
+    // compensated or THD reads ~6 dB low.
+    let sample_rate = 48_000.0_f32;
+    let start_freq = 20.0_f32;
+    let end_freq = 20_000.0_f32;
+    let duration = 1.0_f32;
+    let n = 65_536;
+    let peak_idx = 20_000;
+    let mut ir = vec![0.0_f32; n];
+    ir[peak_idx] = 1.0;
+
+    let sweep_ratio = end_freq / start_freq;
+    let h2_delay = (duration * 2.0_f32.ln() / sweep_ratio.ln() * sample_rate).round() as usize;
+    let center = peak_idx - h2_delay;
+    // Window sizing replicated from compute_thd_from_ir for the 2nd harmonic.
+    let dt_next_rel = duration * (3.0_f32.ln() - 2.0_f32.ln()) / sweep_ratio.ln();
+    let min_win_len = (3.0 * sample_rate / (2.0 * start_freq)).max(16.0);
+    let win_len = ((dt_next_rel * sample_rate * 0.8).max(min_win_len) as usize).min(n / 2);
+    let fft_size = next_power_of_two(win_len);
+
+    // Bin-centered tone filling the whole harmonic window, amplitude 0.1.
+    // Its true transfer-function magnitude is amp * win_len / 2.
+    let bin = 170;
+    let freq = bin as f32 * sample_rate / fft_size as f32;
+    let amp = 0.1_f32;
+    for (k, idx) in (center - win_len / 2..center + win_len / 2).enumerate() {
+        ir[idx] = amp * (2.0 * PI * freq * k as f32 / sample_rate).sin();
+    }
+
+    let (_thd, harmonics) =
+        compute_thd_from_ir(&ir, sample_rate, &[freq], &[0.0], start_freq, end_freq, duration);
+    let expected = 20.0 * (amp * win_len as f32 / 2.0).log10();
+    assert!(
+        (harmonics[0][0] - expected).abs() < 1.5,
+        "spread harmonic IR of true magnitude {expected:.2} dB must not be attenuated by the window coherent gain, got {:.2} dB",
+        harmonics[0][0]
+    );
+}
+
+#[test]
+fn noise_floor_single_sample_returns_empty() {
+    // A Hann window is undefined for n < 2 (division by n - 1); a single
+    // sample carries no estimable spectrum.
+    let nf = estimate_noise_floor_db_from_silence(&[0.5], 48_000);
+    assert!(
+        nf.is_empty(),
+        "single-sample silence must yield no bins, got {nf:?}"
+    );
+}
+
+#[test]
+fn noise_floor_dc_and_nyquist_are_not_folded() {
+    // DC and Nyquist are one-sided bins: they must use 2/N scaling, not the
+    // 4/N folding applied to interior bins (which would read +6 dB high).
+    let n = 1024;
+    let amplitude = 0.01_f32;
+    let expected = 20.0 * amplitude.log10();
+
+    let dc = vec![amplitude; n];
+    let nf = estimate_noise_floor_db_from_silence(&dc, 48_000);
+    assert!(
+        (nf[0] - expected).abs() < 0.1,
+        "DC bin: expected {expected:.3} dB, got {:.3}",
+        nf[0]
+    );
+
+    let nyquist: Vec<f32> = (0..n)
+        .map(|k| amplitude * if k % 2 == 0 { 1.0 } else { -1.0 })
+        .collect();
+    let nf = estimate_noise_floor_db_from_silence(&nyquist, 48_000);
+    assert!(
+        (nf[n / 2] - expected).abs() < 0.1,
+        "Nyquist bin: expected {expected:.3} dB, got {:.3}",
+        nf[n / 2]
+    );
+}
+
+#[test]
+fn test_generate_log_frequencies_single_point() {
+    // A single point degenerates to the geometric midpoint of the range.
+    let freqs = super::misc::generate_log_frequencies(1, 20.0, 20000.0);
+    assert_eq!(freqs.len(), 1);
+    let expected = (20.0_f32 * 20000.0).sqrt();
+    assert!(
+        (freqs[0] - expected).abs() < 0.5,
+        "expected geometric midpoint {expected}, got {}",
+        freqs[0]
+    );
+}
+
+#[test]
+fn read_analysis_csv_rejects_malformed_rows() {
+    let dir = std::env::temp_dir().join(format!("sotf_test_csv_parse_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+
+    // Non-numeric field must error, not silently parse as 0.0.
+    let bad_value = dir.join("bad_value.csv");
+    std::fs::write(&bad_value, "frequency_hz,spl_db,phase_deg\n100.0,bogus,0.0\n").unwrap();
+    assert!(
+        super::types::read_analysis_csv(&bad_value).is_err(),
+        "non-numeric field must return Err"
+    );
+
+    // Short row in the extended format must error, not leave the extended
+    // vectors shorter than the frequency vector.
+    let short_row = dir.join("short_row.csv");
+    std::fs::write(
+        &short_row,
+        "frequency_hz,spl_db,phase_deg,thd_percent,rt60_ms,c50_db,c80_db,group_delay_ms\n\
+         100.0,-6.0,0.0,1.0,500.0\n",
+    )
+    .unwrap();
+    assert!(
+        super::types::read_analysis_csv(&short_row).is_err(),
+        "short row in extended format must return Err"
+    );
+
+    // A valid legacy CSV still parses.
+    let good = dir.join("good.csv");
+    std::fs::write(&good, "frequency_hz,spl_db,phase_deg\n100.0,-6.0,3.0\n").unwrap();
+    let result = super::types::read_analysis_csv(&good).unwrap();
+    assert_eq!(result.frequencies, vec![100.0]);
+    assert_eq!(result.spl_db, vec![-6.0]);
+    assert_eq!(result.phase_deg, vec![3.0]);
+
+    std::fs::remove_dir_all(&dir).ok();
 }
 
 #[test]

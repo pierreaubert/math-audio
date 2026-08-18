@@ -7,12 +7,20 @@ pub(super) fn wav_next_power_of_two(n: usize) -> usize {
     p.min(1048576)
 }
 
-/// Generate logarithmically spaced frequencies
+/// Generate logarithmically spaced frequencies.
+///
+/// A single point degenerates to the geometric midpoint of the range
+/// (`sqrt(min_freq * max_freq)`), the natural "center" of a log axis;
+/// zero points yield an empty vector.
 pub(super) fn generate_log_frequencies(
     num_points: usize,
     min_freq: f32,
     max_freq: f32,
 ) -> Vec<f32> {
+    if num_points == 1 {
+        return vec![(min_freq * max_freq).sqrt()];
+    }
+
     let log_min = min_freq.ln();
     let log_max = max_freq.ln();
     let step = (log_max - log_min) / (num_points - 1) as f32;

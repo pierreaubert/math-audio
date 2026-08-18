@@ -79,5 +79,13 @@ mod tests {
         let high = lr4_crossover_response("high", 1_000.0, 1_000.0, 48_000.0).unwrap();
         assert!((low.norm() - 0.5).abs() < 0.05);
         assert!((high.norm() - 0.5).abs() < 0.05);
+        // Defining LR4 property: low + high sums to an allpass of unit
+        // magnitude (phase -180° at the crossover frequency).
+        let sum = low + high;
+        assert!(
+            (sum.norm() - 1.0).abs() < 1e-9,
+            "|low + high| at fc should be 1, got {}",
+            sum.norm()
+        );
     }
 }

@@ -7,12 +7,14 @@ use std::f32::consts::PI;
 /// Extract the phase of a single frequency bin from a time-domain
 /// signal using a direct DFT sum, plus a half-split stability metric.
 ///
-/// For `len(signal) = N`, the complex bin at `freq_hz` is:
+/// For `len(signal) = N`, the bin content at `freq_hz` is accumulated
+/// with a sin-referenced projection (see `single_bin_dft`):
 ///
 /// ```text
-/// c = Σ_{k=0..N} s[k] · exp(−j·ω·k), ω = 2π·freq_hz/sample_rate
-/// phase = atan2(Im(c), Re(c))
-/// magnitude = 2·|c| / N
+/// re = Σ_{k=0..N} s[k] · sin(ω·k), im = Σ_{k=0..N} s[k] · cos(ω·k)
+/// ω = 2π·freq_hz/sample_rate
+/// phase = atan2(im, re)   → pure sin(ω·k) reads 0°, cos(ω·k) reads +90°
+/// magnitude = 2·√(re² + im²) / N
 /// ```
 ///
 /// The stability metric runs the same extraction over the first and
@@ -27,17 +29,21 @@ pub fn extract_tone_phase(signal: &[f32], freq_hz: f32, sample_rate: u32) -> Ton
             stability_deg: 0.0,
         };
     }
-    let (re_full, im_full) = single_bin_dft(signal, freq_hz, sample_rate, 0);
-    let magnitude_raw = (re_full * re_full + im_full * im_full).sqrt();
-    let magnitude = 2.0 * magnitude_raw / signal.len() as f64;
-    let phase_rad = im_full.atan2(re_full);
-
     let mid = signal.len() / 2;
     let (re_a, im_a) = single_bin_dft(&signal[..mid], freq_hz, sample_rate, 0);
     // The second half keeps the global time reference (k_offset = mid)
     // so both halves measure phase against the same t = 0 — otherwise
     // the split induces a spurious `mid·ω` phase jump on a stable tone.
     let (re_b, im_b) = single_bin_dft(&signal[mid..], freq_hz, sample_rate, mid);
+
+    // The DFT sum is linear, so the full-signal projection equals the sum
+    // of the two half accumulations — two passes suffice, not three.
+    let re_full = re_a + re_b;
+    let im_full = im_a + im_b;
+    let magnitude_raw = (re_full * re_full + im_full * im_full).sqrt();
+    let magnitude = 2.0 * magnitude_raw / signal.len() as f64;
+    let phase_rad = im_full.atan2(re_full);
+
     let phase_a = im_a.atan2(re_a);
     let phase_b = im_b.atan2(re_b);
     // Wrap (phase_b − phase_a) to (−π, π] before taking |·|.

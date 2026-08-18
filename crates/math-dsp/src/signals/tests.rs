@@ -32,6 +32,7 @@ use super::prepare::prepare_signal_for_playback_channels;
 use super::tone_phasor_window::phasor_coherence;
 use super::tone_phasor_window::tone_phase_phasors;
 use crate::stft::RealFftProcessor;
+use rustfft::num_complex::Complex;
 use std::f32::consts::PI;
 
 mod misc;
@@ -982,4 +983,298 @@ fn tone_phase_phasors_merges_to_single() {
     let p = tone_phase_phasors(&s, freq, sr, 64);
     assert_eq!(p.len(), 1);
     assert!(p[0].len >= 48);
+}
+
+#[test]
+fn probe_spectrum_handles_degenerate_fft_sizes() {
+    // fft_size 0/1/2 have no interior bins between DC and Nyquist;
+    // slicing the interior must not panic.
+    let s0 = gen_probe_spectrum(0, 42);
+    assert_eq!(s0.len(), 1);
+    assert_eq!(s0[0], Complex::new(1.0, 0.0));
+
+    let s1 = gen_probe_spectrum(1, 42);
+    assert_eq!(s1.len(), 1);
+    assert_eq!(s1[0], Complex::new(1.0, 0.0));
+
+    let s2 = gen_probe_spectrum(2, 42);
+    assert_eq!(s2.len(), 2);
+    assert!(s2.iter().all(|c| *c == Complex::new(1.0, 0.0)));
+}
+
+#[test]
+fn narrowband_probe_tapers_compose_symmetrically() {
+    // Band narrow enough that the two edge tapers overlap: they must
+    // compose (multiply), so the magnitude envelope stays symmetric
+    // around the band centre instead of the upper taper clobbering the
+    // lower one.
+    let n = 8192;
+    let sr = 48000;
+    let lo_hz = 1000.0;
+    let hi_hz = 1100.0;
+    let probe = gen_narrowband_probe(n, sr, 0.5, 42, lo_hz, hi_hz);
+
+    let mut fft_proc = RealFftProcessor::new_forward_only(n);
+    fft_proc.time_buffer[..n].copy_from_slice(&probe);
+    fft_proc.forward();
+
+    let freq_res = sr as f32 / n as f32;
+    let lo_bin = (lo_hz / freq_res).ceil() as usize; // 171
+    let hi_bin = (hi_hz / freq_res).floor() as usize; // 187
+    assert_eq!(lo_bin, 171);
+    assert_eq!(hi_bin, 187);
+
+    let mag = |k: usize| fft_proc.freq_buffer[k].norm();
+    assert!(mag(179) > 0.0, "passband centre must carry energy");
+    for j in 0..=8 {
+        let lower = mag(lo_bin + j);
+        let upper = mag(hi_bin - j);
+        let denom = lower.max(upper).max(1e-12);
+        assert!(
+            (lower - upper).abs() / denom < 0.01,
+            "taper asymmetry at offset {j}: lower={lower} upper={upper}"
+        );
+    }
+}
+
+#[test]
+fn narrowband_probe_rejects_inverted_band() {
+    // lo_hz >= hi_hz is a caller error: return empty instead of a
+    // silent all-zeros buffer of length n_frames.
+    assert!(gen_narrowband_probe(4096, 48000, 0.5, 1, 2000.0, 800.0).is_empty());
+}
+
+#[test]
+fn steady_tone_phase_matches_f64_reference_at_tail() {
+    // At 20 kHz the phase argument reaches ~1.3e6 rad after 10 s; f32
+    // argument rounding alone costs ~0.1 rad of phase error. The
+    // generator must compute phase in f64 like gen_log_sweep does.
+    let sr = 48_000_u32;
+    let freq = 20_000.0_f64;
+    let s = gen_steady_tone(20_000.0, 10.0, 5.0, sr, 0.5);
+    let n = s.len();
+    // Compare the last second against the f64 reference, stopping clear
+    // of the 5 ms fade-out (where the envelope is < 1).
+    let mut max_err = 0.0_f64;
+    for (k, &sample) in s.iter().enumerate().take(n - 1000).skip(n - sr as usize) {
+        let reference = 0.5 * (2.0 * std::f64::consts::PI * freq * k as f64 / sr as f64).sin();
+        max_err = max_err.max((sample as f64 - reference).abs());
+    }
+    assert!(
+        max_err < 5e-4,
+        "tail deviates from f64 reference by {max_err} (~{:.4} rad phase error)",
+        max_err / 0.5
+    );
+}
+
+#[test]
+fn bass_tone_burst_phase_matches_f64_reference_at_tail() {
+    let sr = 48_000_u32;
+    let freq = 20_000.0_f64;
+    let burst = gen_bass_tone_burst(20_000.0, 40_000, sr, 0.5);
+    let n = burst.len();
+    let n_f = n as f64;
+    let mut max_err = 0.0_f64;
+    for (k, &sample) in burst.iter().enumerate().skip(n - 12_000) {
+        let w = 0.5 * (1.0 - (2.0 * std::f64::consts::PI * k as f64 / (n_f - 1.0)).cos());
+        let reference = 0.5 * w * (2.0 * std::f64::consts::PI * freq * k as f64 / sr as f64).sin();
+        max_err = max_err.max((sample as f64 - reference).abs());
+    }
+    assert!(
+        max_err < 5e-4,
+        "burst tail deviates from f64 reference by {max_err}"
+    );
+}
+
+#[test]
+fn octave_sweep_clamps_nonpositive_bass_duration() {
+    // bass_octave_duration_s <= 0 must be clamped to the documented
+    // floor (0.1 s/octave), not silently produce a degenerate sweep
+    // (zero duration) or a negative time scale (negative duration).
+    let reference = gen_log_sweep_octave_scaled(10.0, 20_000.0, 0.5, 48_000, 0.1, 5.0);
+    for &bad in &[0.0_f32, -1.0] {
+        let signal = gen_log_sweep_octave_scaled(10.0, 20_000.0, 0.5, 48_000, bad, 5.0);
+        assert_eq!(
+            signal.len(),
+            reference.len(),
+            "length mismatch for bass_octave_duration_s={bad}"
+        );
+        let max_diff = signal
+            .iter()
+            .zip(reference.iter())
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0_f32, f32::max);
+        assert_eq!(
+            max_diff, 0.0,
+            "output for bass_octave_duration_s={bad} differs from the clamped floor"
+        );
+    }
+}
+
+#[test]
+#[should_panic(expected = "equal length")]
+fn interleave_per_channel_rejects_unequal_lengths() {
+    let ch0 = vec![1.0, 2.0, 3.0];
+    let ch1 = vec![4.0, 5.0];
+    let _ = interleave_per_channel(&[ch0, ch1]);
+}
+
+#[test]
+fn white_noise_uses_high_bits_of_lcg_state() {
+    // The low bits of an LCG have period 2^(k+1) (bit 0 alternates
+    // every sample); usable randomness comes from the high bits. Pin
+    // the extraction to (state >> 33) ^ state, matching the
+    // gen_probe_spectrum RNG.
+    let signal = gen_white_noise_seeded(0.5, 48_000, 0.001, 42);
+    let mut state = 42_u64;
+    for &sample in &signal {
+        state = state.wrapping_mul(1664525).wrapping_add(1013904223);
+        let random_u32 = ((state >> 33) ^ state) as u32;
+        let expected = clip(0.5 * ((random_u32 as f32 / u32::MAX as f32) * 2.0 - 1.0));
+        assert_eq!(sample, expected);
+    }
+}
+
+#[test]
+fn white_noise_statistical_sanity() {
+    let signal = gen_white_noise_seeded(1.0, 48_000, 2.0, 1234567890);
+    let n = signal.len() as f64;
+    let mean = signal.iter().map(|&x| x as f64).sum::<f64>() / n;
+    let var = signal
+        .iter()
+        .map(|&x| (x as f64 - mean).powi(2))
+        .sum::<f64>()
+        / n;
+    assert!(mean.abs() < 0.01, "mean {mean} too far from 0");
+    assert!((var - 1.0 / 3.0).abs() < 0.01, "variance {var} too far from 1/3");
+    let lag1: f64 = signal
+        .windows(2)
+        .map(|w| (w[0] as f64 - mean) * (w[1] as f64 - mean))
+        .sum::<f64>()
+        / (n - 1.0);
+    let corr = lag1 / var;
+    assert!(corr.abs() < 0.01, "lag-1 correlation {corr} too high");
+}
+
+#[test]
+fn pink_noise_rms_matches_amplitude() {
+    // Steady-state RMS of the Voss-McCartney network driven by uniform
+    // [-1,1] noise is 1.7624 (full covariance, including the cross-terms
+    // between b6 = e*w[n-1] and the IIR states). PINK_NORM must divide
+    // by that value so that RMS(output) ≈ amp. amp=0.1 keeps peaks
+    // (~5x RMS) clear of the clip ceiling. Pink RMS estimation converges
+    // slowly (1/f correlation), so the seed is fixed: with seed 1 the
+    // realized RMS sits 0.23% from the exact value, inside the 0.5% gate.
+    let signal = gen_pink_noise_seeded(0.1, 48_000, 60.0, 1);
+    let rms = (signal
+        .iter()
+        .map(|&x| (x as f64) * (x as f64))
+        .sum::<f64>()
+        / signal.len() as f64)
+        .sqrt();
+    assert!(
+        (rms - 0.1).abs() < 0.0005,
+        "pink noise RMS {rms} deviates from amp=0.1 by more than 0.5%"
+    );
+}
+
+#[test]
+fn single_bin_dft_recurrence_matches_direct_trig() {
+    // Characterization for the perf refactor: the complex-rotation
+    // recurrence in `single_bin_dft` must reproduce the original
+    // per-sample sin/cos accumulation within f64 rounding noise,
+    // including the k_offset (sub-slice) path.
+    for &(freq, sr, n, k_offset) in &[
+        (20.0_f32, 48_000_u32, 4800_usize, 0_usize),
+        (1000.5, 48_000, 4096, 0),
+        (63.0, 44_100, 3000, 2048),
+        (7500.0, 48_000, 16_384, 1237),
+    ] {
+        let signal: Vec<f32> = (0..n + k_offset)
+            .map(|i| 0.7 * (2.0 * PI * freq * i as f32 / sr as f32).sin())
+            .collect();
+        let slice = &signal[k_offset..];
+
+        // Reference: the original per-sample trig algorithm.
+        let omega = 2.0 * std::f64::consts::PI * freq as f64 / sr as f64;
+        let mut ref_re = 0.0_f64;
+        let mut ref_im = 0.0_f64;
+        for (i, &s) in slice.iter().enumerate() {
+            let theta = omega * (i + k_offset) as f64;
+            ref_re += s as f64 * theta.sin();
+            ref_im += s as f64 * theta.cos();
+        }
+
+        let (re, im) = super::misc::single_bin_dft(slice, freq, sr, k_offset);
+        // Accumulations grow with N; drift is ~N·2⁻⁵³, so 1e-9·N is tight.
+        let tol = 1e-9 * n as f64;
+        assert!(
+            (re - ref_re).abs() <= tol,
+            "re drift: got {re}, reference {ref_re} (freq {freq}, n {n}, offset {k_offset})"
+        );
+        assert!(
+            (im - ref_im).abs() <= tol,
+            "im drift: got {im}, reference {ref_im} (freq {freq}, n {n}, offset {k_offset})"
+        );
+    }
+}
+
+#[test]
+fn extract_tone_phase_two_pass_matches_three_pass_reference() {
+    // Characterization for the perf refactor: the full-signal projection
+    // computed as the sum of the two half accumulations (2 DFT passes)
+    // must match the original separate full-signal pass (3 passes) within
+    // f64 noise — the DFT sum is linear, only the accumulation order
+    // changes.
+    fn dft_ref(signal: &[f32], freq_hz: f32, sample_rate: u32, k_offset: usize) -> (f64, f64) {
+        // Reference: the original per-sample trig algorithm.
+        let omega = 2.0 * std::f64::consts::PI * freq_hz as f64 / sample_rate as f64;
+        let mut re = 0.0_f64;
+        let mut im = 0.0_f64;
+        for (i, &s) in signal.iter().enumerate() {
+            let theta = omega * (i + k_offset) as f64;
+            re += s as f64 * theta.sin();
+            im += s as f64 * theta.cos();
+        }
+        (re, im)
+    }
+
+    let sr = 48_000_u32;
+    for &(freq, n) in &[(20.0_f32, 4800_usize), (1000.5, 8192), (330.0, 5001)] {
+        let signal: Vec<f32> = (0..n)
+            .map(|i| 0.6 * (2.0 * PI * freq * i as f32 / sr as f32 + 0.4).sin())
+            .collect();
+
+        let (re_full, im_full) = dft_ref(&signal, freq, sr, 0);
+        let mid = n / 2;
+        let (re_a, im_a) = dft_ref(&signal[..mid], freq, sr, 0);
+        let (re_b, im_b) = dft_ref(&signal[mid..], freq, sr, mid);
+        let phase_ref = im_full.atan2(re_full).to_degrees();
+        let mag_ref = 2.0 * (re_full * re_full + im_full * im_full).sqrt() / n as f64;
+        let mut diff = im_b.atan2(re_b) - im_a.atan2(re_a);
+        while diff > std::f64::consts::PI {
+            diff -= 2.0 * std::f64::consts::PI;
+        }
+        while diff <= -std::f64::consts::PI {
+            diff += 2.0 * std::f64::consts::PI;
+        }
+        let stab_ref = diff.abs().to_degrees();
+
+        let r = extract_tone_phase(&signal, freq, sr);
+        assert!(
+            (r.phase_deg - phase_ref).abs() < 1e-7,
+            "phase drift: got {}, reference {phase_ref} (freq {freq}, n {n})",
+            r.phase_deg
+        );
+        assert!(
+            (r.magnitude - mag_ref).abs() <= 1e-9 * mag_ref.max(1.0),
+            "magnitude drift: got {}, reference {mag_ref} (freq {freq}, n {n})",
+            r.magnitude
+        );
+        assert!(
+            (r.stability_deg - stab_ref).abs() < 1e-7,
+            "stability drift: got {}, reference {stab_ref} (freq {freq}, n {n})",
+            r.stability_deg
+        );
+    }
 }

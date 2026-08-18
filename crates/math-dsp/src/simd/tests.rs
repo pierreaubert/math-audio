@@ -135,6 +135,73 @@ fn test_apply_per_channel_gain_simd_stereo() {
 }
 
 #[test]
+fn test_apply_per_channel_gain_simd_zero_channels() {
+    // channels == 0 is malformed; the call must not panic (division by zero)
+    // and must leave the buffer unchanged.
+    let mut buffer = vec![1.0, 2.0, 3.0];
+    let gains = vec![0.5];
+    apply_per_channel_gain_simd(&mut buffer, 0, &gains);
+    assert_eq!(buffer, vec![1.0, 2.0, 3.0]);
+}
+
+#[test]
+fn test_apply_per_channel_gain_simd_non_multiple_length() {
+    // Buffer length is not a multiple of channels: the trailing partial frame
+    // must also be scaled (sample i uses gains[i % channels]), not skipped.
+    let mut buffer = vec![1.0, 2.0, 3.0, 4.0, 5.0]; // 2 stereo frames + tail (ch 0)
+    let gains = vec![0.5, 2.0];
+    apply_per_channel_gain_simd(&mut buffer, 2, &gains);
+    let expected = [0.5, 4.0, 1.5, 8.0, 2.5];
+    for (i, (&got, &exp)) in buffer.iter().zip(expected.iter()).enumerate() {
+        assert!(
+            (got - exp).abs() < 1e-6,
+            "non-multiple length mismatch at index {}: got {}, expected {}",
+            i,
+            got,
+            exp
+        );
+    }
+}
+
+#[test]
+fn test_apply_per_channel_gain_simd_non_multiple_length_multichannel() {
+    // Same tail contract for a non-SIMD channel count (3 channels, 7 samples:
+    // 2 full frames + tail covering channels 0 and 1).
+    let mut buffer = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0];
+    let gains = vec![2.0, 0.5, 3.0];
+    apply_per_channel_gain_simd(&mut buffer, 3, &gains);
+    let expected = [2.0, 1.0, 9.0, 8.0, 2.5, 18.0, 14.0];
+    for (i, (&got, &exp)) in buffer.iter().zip(expected.iter()).enumerate() {
+        assert!(
+            (got - exp).abs() < 1e-6,
+            "multichannel tail mismatch at index {}: got {}, expected {}",
+            i,
+            got,
+            exp
+        );
+    }
+}
+
+#[test]
+fn test_apply_per_channel_gain_simd_gains_shorter_than_channels() {
+    // gains.len() < channels is malformed; the call must not panic with an
+    // out-of-bounds index and must leave the buffer unchanged.
+    let mut buffer = vec![1.0, 2.0, 3.0, 4.0];
+    let gains = vec![0.5]; // only 1 gain for 4 channels
+    apply_per_channel_gain_simd(&mut buffer, 4, &gains);
+    assert_eq!(buffer, vec![1.0, 2.0, 3.0, 4.0]);
+}
+
+#[test]
+fn test_apply_per_channel_gain_simd_gains_shorter_stereo() {
+    // Same malformed-input contract through the stereo fast path.
+    let mut buffer = vec![1.0, 2.0, 3.0, 4.0];
+    let gains = vec![0.5]; // missing channel 1 gain
+    apply_per_channel_gain_simd(&mut buffer, 2, &gains);
+    assert_eq!(buffer, vec![1.0, 2.0, 3.0, 4.0]);
+}
+
+#[test]
 fn test_simd_complex_mul_add_correctness() {
     // Test SIMD complex multiply-accumulate against scalar reference
     use rustfft::num_complex::Complex;
@@ -679,6 +746,72 @@ fn test_covariance_basic_correctness() {
 }
 
 #[test]
+fn test_covariance_cross_term_is_conjugate_product() {
+    // Regression test for the AVX2 kernel: cov_xy must accumulate
+    // l * conj(r) = (ac + bd) + (bc - ad)i per element (matching the scalar
+    // reference and the docstring), not some other sign combination.
+    //
+    // With l = r = 1 + i the correct per-element cross term is
+    // (1 + i)(1 - i) = 2 + 0i. The buggy AVX2 sign pattern
+    // (bd - ac) + (bc + ad)i would instead give 0 + 2i per element, and the
+    // plain (non-conjugated) product (ac - bd) + (ad + bc)i would give 0 + 2i
+    // as well — so this data distinguishes all three kernels.
+    //
+    // Note: on machines without AVX2 this exercises the scalar path; the AVX2
+    // kernel itself is covered by CI builds with RUSTFLAGS=-C target-feature=+avx2.
+    use rustfft::num_complex::Complex;
+
+    let left = vec![Complex::new(1.0, 1.0); 8];
+    let right = vec![Complex::new(1.0, 1.0); 8];
+    let (cov_xx, cov_yy, cov_xy) = compute_covariance_simd(&left, &right, 0, 8);
+
+    const EPSILON: f32 = 1e-5;
+    assert!((cov_xx - 16.0).abs() < EPSILON, "cov_xx = {}", cov_xx);
+    assert!((cov_yy - 16.0).abs() < EPSILON, "cov_yy = {}", cov_yy);
+    assert!(
+        (cov_xy.re - 16.0).abs() < EPSILON,
+        "cov_xy.re = {}, expected 16.0 (sum of l * conj(r))",
+        cov_xy.re
+    );
+    assert!(
+        cov_xy.im.abs() < EPSILON,
+        "cov_xy.im = {}, expected 0.0 (sum of l * conj(r))",
+        cov_xy.im
+    );
+
+    // Mixed-sign data, checked against the scalar l * r.conj() reference.
+    let left = [
+        Complex::new(1.0, 2.0),
+        Complex::new(-3.0, 0.5),
+        Complex::new(0.25, -1.5),
+        Complex::new(2.0, 2.0),
+    ];
+    let right = [
+        Complex::new(0.5, -0.25),
+        Complex::new(1.5, 1.0),
+        Complex::new(-0.75, 2.0),
+        Complex::new(-1.0, -0.5),
+    ];
+    let mut expected_xy = Complex::new(0.0, 0.0);
+    for i in 0..left.len() {
+        expected_xy += left[i] * right[i].conj();
+    }
+    let (_, _, cov_xy) = compute_covariance_simd(&left, &right, 0, left.len());
+    assert!(
+        (cov_xy.re - expected_xy.re).abs() < EPSILON,
+        "cov_xy.re mismatch: {} vs {}",
+        cov_xy.re,
+        expected_xy.re
+    );
+    assert!(
+        (cov_xy.im - expected_xy.im).abs() < EPSILON,
+        "cov_xy.im mismatch: {} vs {}",
+        cov_xy.im,
+        expected_xy.im
+    );
+}
+
+#[test]
 fn test_covariance_with_ranges() {
     // Test covariance computation with different start/end ranges
     use rustfft::num_complex::Complex;
@@ -864,6 +997,32 @@ fn test_covariance_unaligned_ranges() {
             end,
             cov_xy.im,
             expected_xy.im
+        );
+    }
+}
+
+#[test]
+fn test_covariance_empty_range() {
+    // An empty range (start == end) must return zeros, not panic.
+    use rustfft::num_complex::Complex;
+
+    let left: Vec<Complex<f32>> = (0..8)
+        .map(|i| Complex::new(i as f32, i as f32 * -0.5))
+        .collect();
+    let right: Vec<Complex<f32>> = (0..8)
+        .map(|i| Complex::new(i as f32 * 0.25, i as f32))
+        .collect();
+
+    for (start, end) in [(0, 0), (4, 4), (8, 8)] {
+        let (cov_xx, cov_yy, cov_xy) = compute_covariance_simd(&left, &right, start, end);
+        assert_eq!(cov_xx, 0.0, "Range [{}, {}): cov_xx", start, end);
+        assert_eq!(cov_yy, 0.0, "Range [{}, {}): cov_yy", start, end);
+        assert_eq!(
+            cov_xy,
+            Complex::new(0.0, 0.0),
+            "Range [{}, {}): cov_xy",
+            start,
+            end
         );
     }
 }
@@ -1411,4 +1570,55 @@ fn test_simd_complex_mul_inplace_empty() {
     let hrtf: Vec<Complex<f32>> = vec![];
     complex_mul_inplace_simd(&mut dst, &hrtf);
     assert!(dst.is_empty());
+}
+
+#[test]
+#[should_panic(expected = "src length must match dst length")]
+fn test_complex_mul_add_simd_mismatched_src_len_panics() {
+    use rustfft::num_complex::Complex;
+    // src is shorter than dst: must panic instead of reading out of bounds
+    // through raw SIMD pointers.
+    let mut dst = vec![Complex::new(0.0, 0.0); 8];
+    let src = vec![Complex::new(1.0, 0.0); 4];
+    let hrtf = vec![Complex::new(1.0, 0.0); 8];
+    complex_mul_add_simd(&mut dst, &src, &hrtf);
+}
+
+#[test]
+#[should_panic(expected = "hrtf length must match dst length")]
+fn test_complex_mul_add_simd_mismatched_hrtf_len_panics() {
+    use rustfft::num_complex::Complex;
+    let mut dst = vec![Complex::new(0.0, 0.0); 8];
+    let src = vec![Complex::new(1.0, 0.0); 8];
+    let hrtf = vec![Complex::new(1.0, 0.0); 4];
+    complex_mul_add_simd(&mut dst, &src, &hrtf);
+}
+
+#[test]
+#[should_panic(expected = "src length must match dst length")]
+fn test_complex_mul_simd_mismatched_src_len_panics() {
+    use rustfft::num_complex::Complex;
+    let mut dst = vec![Complex::new(0.0, 0.0); 8];
+    let src = vec![Complex::new(1.0, 0.0); 4];
+    let hrtf = vec![Complex::new(1.0, 0.0); 8];
+    complex_mul_simd(&mut dst, &src, &hrtf);
+}
+
+#[test]
+#[should_panic(expected = "hrtf length must match dst length")]
+fn test_complex_mul_simd_mismatched_hrtf_len_panics() {
+    use rustfft::num_complex::Complex;
+    let mut dst = vec![Complex::new(0.0, 0.0); 8];
+    let src = vec![Complex::new(1.0, 0.0); 8];
+    let hrtf = vec![Complex::new(1.0, 0.0); 4];
+    complex_mul_simd(&mut dst, &src, &hrtf);
+}
+
+#[test]
+#[should_panic(expected = "hrtf length must match dst length")]
+fn test_complex_mul_inplace_simd_mismatched_hrtf_len_panics() {
+    use rustfft::num_complex::Complex;
+    let mut dst = vec![Complex::new(1.0, 0.0); 8];
+    let hrtf = vec![Complex::new(1.0, 0.0); 4];
+    complex_mul_inplace_simd(&mut dst, &hrtf);
 }

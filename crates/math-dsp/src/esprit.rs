@@ -86,9 +86,11 @@ pub fn estimate_model_order(
 
         let num_free_params = p as f64 * (2.0 * m as f64 - p as f64);
 
+        // Wax–Kailath: log_likelihood = -n·(m−p)·ln(geo/arith) is already ≥ 0
+        // (ratio ≤ 1); the criteria MINIMIZE log_likelihood + penalty.
         let cost = match criterion {
-            ModelOrderCriterion::Mdl => -log_likelihood + 0.5 * num_free_params * n.ln(),
-            ModelOrderCriterion::Aic => -2.0 * log_likelihood + 2.0 * num_free_params,
+            ModelOrderCriterion::Mdl => log_likelihood + 0.5 * num_free_params * n.ln(),
+            ModelOrderCriterion::Aic => 2.0 * log_likelihood + 2.0 * num_free_params,
         };
 
         if cost < best_cost {
@@ -132,8 +134,8 @@ pub fn esprit(
     // Build Hankel matrix X (num_rows x m)
     let hankel = DMatrix::from_fn(num_rows, m, |i, j| signal[i + j] as f64);
 
-    // SVD
-    let svd = hankel.svd(true, true);
+    // SVD — only V is used below, so skip computing U.
+    let svd = hankel.svd(false, true);
     let singular_values = svd.singular_values.as_slice();
 
     // Guard against near-zero signals (degenerate subspace)
@@ -192,8 +194,10 @@ pub fn esprit(
 
         // Only keep positive frequencies below Nyquist
         if freq > 0.0 && freq < sample_rate as f64 / 2.0 {
-            let amplitude = estimate_amplitude(signal, freq, sample_rate as f64);
-            let phase = estimate_phase(signal, freq, sample_rate as f64);
+            // Single DFT pass: amplitude and phase come from the same sums.
+            let (sum_cos, sum_sin) = cos_sin_sums(signal, freq, sample_rate as f64);
+            let amplitude = 2.0 * (sum_cos * sum_cos + sum_sin * sum_sin).sqrt() / n as f64;
+            let phase = sum_sin.atan2(sum_cos);
 
             estimates.push(SinusoidEstimate {
                 frequency: freq,
@@ -213,36 +217,41 @@ pub fn esprit(
     estimates
 }
 
-/// Estimate the amplitude of a sinusoid at a given frequency using least-squares.
-fn estimate_amplitude(signal: &[f32], freq: f64, sample_rate: f64) -> f64 {
-    let n = signal.len();
+/// Accumulate `Σ s·cos(ωk)` and `Σ s·sin(ωk)` over the signal in one pass.
+///
+/// The phasor `z = cos(ωk) + i·sin(ωk)` is advanced by complex rotation
+/// (`z *= e^{iω}`) in f64 instead of calling `cos`/`sin` per sample; drift
+/// over practical signal lengths is ~N·2⁻⁵³, far below any test tolerance
+/// (pinned by `test_amplitude_phase_match_direct_trig_reference`).
+fn cos_sin_sums(signal: &[f32], freq: f64, sample_rate: f64) -> (f64, f64) {
     let omega = 2.0 * std::f64::consts::PI * freq / sample_rate;
+    let step_re = omega.cos();
+    let step_im = omega.sin();
 
+    let mut z_re = 1.0_f64;
+    let mut z_im = 0.0_f64;
     let mut sum_cos = 0.0;
     let mut sum_sin = 0.0;
 
-    for (i, &s) in signal.iter().enumerate() {
-        let phase = omega * i as f64;
-        sum_cos += s as f64 * phase.cos();
-        sum_sin += s as f64 * phase.sin();
+    for &s in signal {
+        sum_cos += s as f64 * z_re;
+        sum_sin += s as f64 * z_im;
+        let next_re = z_re * step_re - z_im * step_im;
+        z_im = z_re * step_im + z_im * step_re;
+        z_re = next_re;
     }
 
-    2.0 * (sum_cos * sum_cos + sum_sin * sum_sin).sqrt() / n as f64
+    (sum_cos, sum_sin)
 }
 
 /// Estimate the phase of a sinusoid at a given frequency.
+///
+/// Phase convention: returns the cosine-reference phase
+/// `atan2(Σ s·sin(ωt), Σ s·cos(ωt))`. For `s = A·sin(ωt + φ)` this yields
+/// `π/2 − φ`; equivalently, for `s = A·cos(ωt + θ)` it yields `-θ`.
+#[cfg(test)]
 fn estimate_phase(signal: &[f32], freq: f64, sample_rate: f64) -> f64 {
-    let omega = 2.0 * std::f64::consts::PI * freq / sample_rate;
-
-    let mut sum_cos = 0.0;
-    let mut sum_sin = 0.0;
-
-    for (i, &s) in signal.iter().enumerate() {
-        let phase = omega * i as f64;
-        sum_cos += s as f64 * phase.cos();
-        sum_sin += s as f64 * phase.sin();
-    }
-
+    let (sum_cos, sum_sin) = cos_sin_sums(signal, freq, sample_rate);
     sum_sin.atan2(sum_cos)
 }
 
@@ -508,6 +517,93 @@ mod tests {
         assert!(
             (estimates[0].frequency - freq).abs() < 5.0,
             "Near-Nyquist frequency error too large"
+        );
+    }
+
+    #[test]
+    fn test_estimate_model_order_mdl_picks_signal_dims() {
+        // 2 strong + 6 equal weak singular values: Wax–Kailath MDL must
+        // select p = 2 (the strong components), not p = 0.
+        let singular_values = [10.0, 9.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0];
+        let p = estimate_model_order(&singular_values, 100, ModelOrderCriterion::Mdl);
+        assert_eq!(p, 2, "MDL should select the 2 signal dimensions");
+        let p_aic = estimate_model_order(&singular_values, 100, ModelOrderCriterion::Aic);
+        assert_eq!(p_aic, 2, "AIC should select the 2 signal dimensions");
+    }
+
+    #[test]
+    fn test_esprit_auto_two_close_tones() {
+        // Auto model order (MDL) on a 1000/1050 Hz two-tone must recover
+        // both sinusoids.
+        let sample_rate = 48000.0_f32;
+        let signal1 = gen_sinusoid(1000.0, 1.0, 0.0, sample_rate as f64, 2048);
+        let signal2 = gen_sinusoid(1050.0, 0.8, 0.5, sample_rate as f64, 2048);
+        let signal: Vec<f32> = signal1.iter().zip(&signal2).map(|(&a, &b)| a + b).collect();
+
+        let estimates = esprit(&signal, sample_rate, None, None);
+        assert!(
+            estimates.len() >= 2,
+            "auto MDL should find 2 sinusoids, found {}",
+            estimates.len()
+        );
+        let has_1000 = estimates.iter().any(|e| (e.frequency - 1000.0).abs() < 5.0);
+        let has_1050 = estimates.iter().any(|e| (e.frequency - 1050.0).abs() < 5.0);
+        assert!(has_1000, "Should find ~1000 Hz in {estimates:?}");
+        assert!(has_1050, "Should find ~1050 Hz in {estimates:?}");
+    }
+
+    #[test]
+    fn test_amplitude_phase_match_direct_trig_reference() {
+        // Characterization for the perf refactor: merging the identical
+        // amplitude/phase DFT loops into one pass with a complex-rotation
+        // recurrence must reproduce the original per-sample cos/sin
+        // accumulation to within f64 rounding noise.
+        let sample_rate = 48000.0_f64;
+        for &(freq, amp, phase, n) in &[
+            (1000.5_f64, 0.75_f64, 0.3_f64, 4096_usize),
+            (137.0, 1.0, -1.0, 2048),
+            (7999.0, 0.5, 2.0, 8192),
+        ] {
+            let signal = gen_sinusoid(freq, amp, phase, sample_rate, n);
+            // Reference: the original per-sample trig algorithm.
+            let omega = 2.0 * std::f64::consts::PI * freq / sample_rate;
+            let mut ref_cos = 0.0_f64;
+            let mut ref_sin = 0.0_f64;
+            for (i, &s) in signal.iter().enumerate() {
+                let ph = omega * i as f64;
+                ref_cos += s as f64 * ph.cos();
+                ref_sin += s as f64 * ph.sin();
+            }
+            let ref_amp = 2.0 * (ref_cos * ref_cos + ref_sin * ref_sin).sqrt() / n as f64;
+            let ref_phase = ref_sin.atan2(ref_cos);
+
+            let (sum_cos, sum_sin) = cos_sin_sums(&signal, freq, sample_rate);
+            let got_amp = 2.0 * (sum_cos * sum_cos + sum_sin * sum_sin).sqrt() / n as f64;
+            let got_phase = sum_sin.atan2(sum_cos);
+            assert!(
+                (got_amp - ref_amp).abs() <= 1e-9 * ref_amp.max(1.0),
+                "amplitude drift: got {got_amp}, reference {ref_amp} (freq {freq}, n {n})"
+            );
+            assert!(
+                (got_phase - ref_phase).abs() < 1e-9,
+                "phase drift: got {got_phase}, reference {ref_phase} (freq {freq}, n {n})"
+            );
+        }
+    }
+
+    #[test]
+    fn test_estimate_phase_cosine_reference_convention() {
+        // Documented convention: estimate_phase returns the phase of the
+        // cosine-reference projection, i.e. for s = A sin(wt + phi) it
+        // returns pi/2 - phi (equivalently -theta for s = A cos(wt + theta)).
+        let sample_rate = 48000.0_f64;
+        let phi = 0.7;
+        let signal = gen_sinusoid(1000.0, 1.0, phi, sample_rate, 4096);
+        let phase = estimate_phase(&signal, 1000.0, sample_rate);
+        let expected = std::f64::consts::FRAC_PI_2 - phi;
+        assert!(
+            (phase - expected).abs() < 1e-3,
+            "cosine-reference phase: got {phase}, expected {expected}"
         );
     }
 }

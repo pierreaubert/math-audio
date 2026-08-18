@@ -131,22 +131,12 @@ pub fn analyze_impulse_response_fdw(
             let sigma_samples = (window_samples as f32 / 6.0).max(1.0);
             let half_support = (sigma_samples * 3.0).ceil() as usize;
 
-            let direct_power = morlet_power_at(
+            let kernel = MorletKernel::new(freq, sample_rate, sigma_samples, half_support);
+            let (direct_power, direct_tf_energy, total_tf_energy) = time_frequency_energy(
                 impulse_response,
                 direct_sample,
-                freq,
-                sample_rate,
-                sigma_samples,
-                half_support,
-            );
-            let (direct_tf_energy, total_tf_energy) = time_frequency_energy(
-                impulse_response,
-                direct_sample,
-                freq,
-                sample_rate,
+                &kernel,
                 window_samples,
-                sigma_samples,
-                half_support,
                 config,
             );
 
@@ -234,79 +224,124 @@ fn fdw_window_samples(freq: f32, sample_rate: f32, config: &FdwConfig) -> usize 
     }
 }
 
-fn morlet_power_at(
-    impulse_response: &[f32],
-    center: usize,
-    freq: f32,
-    sample_rate: f32,
-    sigma_samples: f32,
+/// Per-frequency Morlet gate coefficients, indexed by `rel + half_support`
+/// where `rel = idx - center` ranges over `-half_support..=half_support`.
+/// `re[t] = window(rel) * cos(-omega * rel)`, `im[t] = window(rel) * sin(-omega * rel)`.
+/// Precomputing once per frequency turns each gate evaluation into a pure
+/// correlation instead of recomputing exp/cos/sin per sample per center.
+struct MorletKernel {
+    re: Vec<f32>,
+    im: Vec<f32>,
     half_support: usize,
-) -> f32 {
-    let start = center.saturating_sub(half_support);
-    let end = (center + half_support + 1).min(impulse_response.len());
-    let omega = 2.0 * std::f32::consts::PI * freq / sample_rate;
-    let mut re = 0.0_f32;
-    let mut im = 0.0_f32;
-
-    for (offset, &sample) in impulse_response[start..end].iter().enumerate() {
-        let idx = start + offset;
-        let rel = idx as isize - center as isize;
-        let x = rel as f32 / sigma_samples;
-        let window = (-0.5 * x * x).exp();
-        let phase = -omega * rel as f32;
-        re += sample * window * phase.cos();
-        im += sample * window * phase.sin();
-    }
-
-    re * re + im * im
 }
 
-#[allow(clippy::too_many_arguments)]
+impl MorletKernel {
+    fn new(freq: f32, sample_rate: f32, sigma_samples: f32, half_support: usize) -> Self {
+        let omega = 2.0 * std::f32::consts::PI * freq / sample_rate;
+        let mut re = Vec::with_capacity(2 * half_support + 1);
+        let mut im = Vec::with_capacity(2 * half_support + 1);
+        for rel in -(half_support as isize)..=(half_support as isize) {
+            let x = rel as f32 / sigma_samples;
+            let window = (-0.5 * x * x).exp();
+            let phase = -omega * rel as f32;
+            re.push(window * phase.cos());
+            im.push(window * phase.sin());
+        }
+        Self {
+            re,
+            im,
+            half_support,
+        }
+    }
+
+    fn power_at(&self, impulse_response: &[f32], center: usize) -> f32 {
+        let start = center.saturating_sub(self.half_support);
+        let end = (center + self.half_support + 1).min(impulse_response.len());
+        let table_base = (start as isize - center as isize + self.half_support as isize) as usize;
+        let mut re = 0.0_f32;
+        let mut im = 0.0_f32;
+
+        for (offset, &sample) in impulse_response[start..end].iter().enumerate() {
+            let t = table_base + offset;
+            re += sample * self.re[t];
+            im += sample * self.im[t];
+        }
+
+        re * re + im * im
+    }
+}
+
+/// Scan the IR with the Morlet gate and return
+/// `(direct_gate_power, direct_energy, total_energy)`:
+/// power at the direct-sound center, energy within the direct gate, and
+/// total energy over all gate centers.
 fn time_frequency_energy(
     impulse_response: &[f32],
     direct_sample: usize,
-    freq: f32,
-    sample_rate: f32,
+    kernel: &MorletKernel,
     window_samples: usize,
-    sigma_samples: f32,
-    half_support: usize,
     config: &FdwConfig,
-) -> (f32, f32) {
+) -> (f32, f32, f32) {
     let hop_fraction = config.hop_fraction.clamp(0.05, 1.0);
     let hop = ((window_samples as f32 * hop_fraction).round() as usize).max(1);
-    let direct_radius =
-        ((half_support as f32) * config.direct_gate_width_windows.max(0.0)).round() as usize;
+    let direct_radius = ((kernel.half_support as f32)
+        * config.direct_gate_width_windows.max(0.0))
+    .round() as usize;
 
-    let mut centers = Vec::with_capacity(impulse_response.len() / hop + 3);
-    let mut center = 0usize;
-    while center < impulse_response.len() {
-        centers.push(center);
-        center = center.saturating_add(hop);
-    }
-    centers.push(direct_sample);
-    centers.push(impulse_response.len() - 1);
-    centers.sort_unstable();
-    centers.dedup();
+    // Gate centers: multiples of hop below len, plus direct_sample and len-1,
+    // in ascending order with duplicates removed (same set and order as the
+    // previous sort+dedup Vec, computed here by merging two ascending streams
+    // so the per-frequency allocation is avoided). Ascending order keeps the
+    // energy accumulation order identical to the reference implementation.
+    let len = impulse_response.len();
+    let extra_lo = direct_sample.min(len - 1);
+    let extra_hi = direct_sample.max(len - 1);
+    let mut seq_center = 0usize;
+    let mut extra_idx = 0usize;
+    let mut prev_center: Option<usize> = None;
 
+    let mut direct_gate_power = 0.0_f32;
     let mut direct_energy = 0.0_f32;
     let mut total_energy = 0.0_f32;
 
-    for center in centers {
-        let power = morlet_power_at(
-            impulse_response,
-            center,
-            freq,
-            sample_rate,
-            sigma_samples,
-            half_support,
-        );
+    loop {
+        let next_extra = match extra_idx {
+            0 => Some(extra_lo),
+            1 => Some(extra_hi),
+            _ => None,
+        };
+        let center = match (seq_center < len, next_extra) {
+            (true, Some(extra)) if seq_center > extra => {
+                extra_idx += 1;
+                extra
+            }
+            (true, _) => {
+                let c = seq_center;
+                seq_center = seq_center.saturating_add(hop);
+                c
+            }
+            (false, Some(extra)) => {
+                extra_idx += 1;
+                extra
+            }
+            (false, None) => break,
+        };
+        if prev_center == Some(center) {
+            continue;
+        }
+        prev_center = Some(center);
+
+        let power = kernel.power_at(impulse_response, center);
         total_energy += power;
+        if center == direct_sample {
+            direct_gate_power = power;
+        }
         if center.abs_diff(direct_sample) <= direct_radius {
             direct_energy += power;
         }
     }
 
-    (direct_energy, total_energy)
+    (direct_gate_power, direct_energy, total_energy)
 }
 
 fn power_to_db(power: f32) -> f32 {
@@ -316,6 +351,134 @@ fn power_to_db(power: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// PERF-2b characterization reference: the original per-sample-trig Morlet
+    /// power scan, kept inline to pin the numerics of the kernel-table
+    /// implementation. The optimized version reassociates each product
+    /// (`(sample * window) * cos` → `sample * (window * cos)`) but keeps the
+    /// same ascending-center accumulation order.
+    fn reference_morlet_power_at(
+        impulse_response: &[f32],
+        center: usize,
+        freq: f32,
+        sample_rate: f32,
+        sigma_samples: f32,
+        half_support: usize,
+    ) -> f32 {
+        let start = center.saturating_sub(half_support);
+        let end = (center + half_support + 1).min(impulse_response.len());
+        let omega = 2.0 * std::f32::consts::PI * freq / sample_rate;
+        let mut re = 0.0_f32;
+        let mut im = 0.0_f32;
+
+        for (offset, &sample) in impulse_response[start..end].iter().enumerate() {
+            let idx = start + offset;
+            let rel = idx as isize - center as isize;
+            let x = rel as f32 / sigma_samples;
+            let window = (-0.5 * x * x).exp();
+            let phase = -omega * rel as f32;
+            re += sample * window * phase.cos();
+            im += sample * window * phase.sin();
+        }
+
+        re * re + im * im
+    }
+
+    #[test]
+    fn fdw_matches_per_sample_trig_reference() {
+        let sample_rate = 48_000.0;
+        let direct_sample = 512usize;
+        let mut ir = vec![0.0_f32; 4096];
+        // Decaying pseudo-random tail so every Morlet tap contributes.
+        let mut state = 0x1234_5678u32;
+        for (i, s) in ir.iter_mut().enumerate() {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            *s = ((state >> 8) as f32 / 16_777_216.0 - 0.5) * (-(i as f32) / 800.0).exp();
+        }
+        ir[direct_sample] += 1.0;
+
+        let config = FdwConfig {
+            num_points: 48,
+            min_freq_hz: 40.0,
+            max_freq_hz: 16_000.0,
+            smoothing_octaves: 0.0,
+            ..Default::default()
+        };
+        let analysis =
+            analyze_impulse_response_fdw(&ir, sample_rate, Some(direct_sample), &config).unwrap();
+
+        let frequencies =
+            log_spaced_frequencies(config.num_points, config.min_freq_hz, config.max_freq_hz);
+
+        for (i, &freq) in frequencies.iter().enumerate() {
+            let window_samples = fdw_window_samples(freq, sample_rate, &config);
+            let sigma_samples = (window_samples as f32 / 6.0).max(1.0);
+            let half_support = (sigma_samples * 3.0).ceil() as usize;
+            let hop_fraction = config.hop_fraction.clamp(0.05, 1.0);
+            let hop = ((window_samples as f32 * hop_fraction).round() as usize).max(1);
+            let direct_radius = ((half_support as f32)
+                * config.direct_gate_width_windows.max(0.0))
+            .round() as usize;
+
+            let mut centers = Vec::with_capacity(ir.len() / hop + 3);
+            let mut center = 0usize;
+            while center < ir.len() {
+                centers.push(center);
+                center = center.saturating_add(hop);
+            }
+            centers.push(direct_sample);
+            centers.push(ir.len() - 1);
+            centers.sort_unstable();
+            centers.dedup();
+
+            let mut direct_power = 0.0_f32;
+            let mut direct_energy = 0.0_f32;
+            let mut total_energy = 0.0_f32;
+            for &c in &centers {
+                let p = reference_morlet_power_at(
+                    &ir,
+                    c,
+                    freq,
+                    sample_rate,
+                    sigma_samples,
+                    half_support,
+                );
+                total_energy += p;
+                if c == direct_sample {
+                    direct_power = p;
+                }
+                if c.abs_diff(direct_sample) <= direct_radius {
+                    direct_energy += p;
+                }
+            }
+
+            let ref_mag_db = power_to_db(direct_power);
+            let ref_full_db = power_to_db(total_energy);
+            let ref_ratio = if total_energy > MIN_POWER {
+                (direct_energy / total_energy).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+
+            // Tolerance: f32 reassociation of each product term; observed
+            // deviation is < 1e-4 dB / 1e-6 ratio.
+            assert!(
+                (analysis.magnitude_db[i] - ref_mag_db).abs() < 1e-3,
+                "freq {freq:.1} Hz: magnitude_db {} vs reference {ref_mag_db}",
+                analysis.magnitude_db[i]
+            );
+            assert!(
+                (analysis.full_energy_db[i] - ref_full_db).abs() < 1e-3,
+                "freq {freq:.1} Hz: full_energy_db {} vs reference {ref_full_db}",
+                analysis.full_energy_db[i]
+            );
+            assert!(
+                (analysis.direct_energy_ratio[i] - ref_ratio).abs() < 1e-5,
+                "freq {freq:.1} Hz: direct_energy_ratio {} vs reference {ref_ratio}",
+                analysis.direct_energy_ratio[i]
+            );
+        }
+    }
 
     #[test]
     fn fdw_magnitude_is_flat_for_single_impulse() {

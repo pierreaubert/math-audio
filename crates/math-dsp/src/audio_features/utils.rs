@@ -3,7 +3,7 @@
 //! Ported from bliss-audio utils.rs — pure Rust implementations of
 //! mean, geometric mean, normalization, zero-crossing, STFT, etc.
 
-use ndarray::{Array, Array1, Array2, arr1, s};
+use ndarray::{Array, Array1, Array2, s};
 use rustfft::FftPlanner;
 use rustfft::num_complex::Complex;
 
@@ -83,36 +83,38 @@ pub fn reflect_pad(array: &[f32], pad: usize) -> Vec<f32> {
 
 /// Short-time Fourier transform with Hann window.
 pub fn stft(signal: &[f32], window_length: usize, hop_length: usize) -> Array2<f64> {
-    let mut stft = Array2::zeros((
-        (signal.len() as f32 / hop_length as f32).ceil() as usize,
-        window_length / 2 + 1,
-    ));
+    let n_frames = (signal.len() as f32 / hop_length as f32).ceil() as usize;
+    let n_bins = window_length / 2 + 1;
+    // Build directly in (n_bins, n_frames) standard layout so downstream
+    // consumers (e.g. the chroma matmul fast path) get a contiguous array
+    // instead of a permuted-axes view.
+    let mut stft = Array2::zeros((n_bins, n_frames));
     let signal = reflect_pad(signal, window_length / 2);
 
     // Periodic Hann window
-    let hann_window = Array::from_vec(generate_hann_window(window_length));
+    let hann_window = generate_hann_window(window_length);
 
     let fft = plan_fft_forward(window_length);
+    // Single reused FFT input buffer — no per-frame array allocations.
+    let mut fft_input = vec![Complex::new(0.0, 0.0); window_length];
 
     for (window, mut stft_col) in signal
         .windows(window_length)
         .step_by(hop_length)
-        .zip(stft.rows_mut())
+        .zip(stft.columns_mut())
     {
-        let mut fft_input = (arr1(window) * &hann_window).mapv(|x| Complex::new(x, 0.));
-        match fft_input.as_slice_mut() {
-            Some(s) => fft.process(s),
-            None => {
-                fft.process(&mut fft_input.to_vec());
-            }
-        };
-        stft_col.assign(
-            &fft_input
-                .slice(s![..window_length / 2 + 1])
-                .mapv(|x| (x.re * x.re + x.im * x.im).sqrt() as f64),
-        );
+        for (x, (&w, &h)) in fft_input
+            .iter_mut()
+            .zip(window.iter().zip(hann_window.iter()))
+        {
+            *x = Complex::new(w * h, 0.0);
+        }
+        fft.process(&mut fft_input);
+        for (i, &x) in fft_input[..n_bins].iter().enumerate() {
+            stft_col[i] = (x.re * x.re + x.im * x.im).sqrt() as f64;
+        }
     }
-    stft.permuted_axes((1, 0))
+    stft
 }
 
 /// Convert Hz frequencies to fractional octaves (in-place).

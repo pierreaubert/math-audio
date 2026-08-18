@@ -268,9 +268,12 @@ impl DynamicsCore {
     pub fn set_sidechain_tilt(&mut self, tilt_db: f32) {
         self.sidechain_tilt_db = tilt_db;
         if tilt_db.abs() < 0.01 {
+            // Tilt is being disabled: switch the sidechain filter off. The
+            // filter mode selects which state is applied, so this also
+            // deactivates any configured HPF (HPF and tilt are mutually
+            // exclusive); the HPF biquads are left allocated for reuse.
             self.sidechain_filter_mode = SidechainFilterMode::Off;
             self.sidechain_tilt_biquads.clear();
-            // Do NOT clear HPF state — only tilt is being disabled
             return;
         }
         self.sidechain_filter_mode = SidechainFilterMode::Tilt { tilt_db };
@@ -303,8 +306,15 @@ impl DynamicsCore {
     }
 
     /// Set detection mode: 0=peak, 1=RMS. Reinitializes level detectors.
+    ///
+    /// Out-of-range indices are clamped to the nearest valid mode (with a
+    /// debug assertion) instead of silently mapping to Peak.
     pub fn set_detection_mode(&mut self, mode_index: usize) {
-        self.detection_mode_index = mode_index;
+        debug_assert!(
+            mode_index <= 1,
+            "detection mode index {mode_index} out of range (0=peak, 1=RMS); clamping"
+        );
+        self.detection_mode_index = mode_index.min(1);
         let mode = self.detection_mode();
         for det in &mut self.level_detectors {
             det.set_mode(mode);
@@ -416,8 +426,15 @@ impl DynamicsCore {
     ///
     /// For compress mode with program_dependent_release enabled, uses DualRelease
     /// for the release coefficient. Returns the smoothed gain reduction in dB.
+    ///
+    /// Non-finite targets are ignored (the update is skipped) so a single
+    /// NaN/Inf detector level cannot permanently corrupt the envelope —
+    /// same policy as `EnvelopeFollower::process`.
     #[inline]
     pub fn apply_envelope(&mut self, ch: usize, target_gr: f32) -> f32 {
+        if !target_gr.is_finite() {
+            return self.envelope[ch];
+        }
         let coeff = if target_gr > self.envelope[ch] {
             // Attack phase: target is higher gain reduction
             self.attack_coeff
@@ -525,12 +542,14 @@ impl DynamicsCore {
         self.lookahead_buffer.process_frame(input, output);
     }
 
-    /// Returns the current lookahead delay in samples.
+    /// Returns the current lookahead delay in samples (frames).
+    ///
+    /// This reports the actual delay applied by the lookahead buffer. When
+    /// lookahead is disabled (`set_lookahead_ms(0)`), the buffer still applies
+    /// its minimum 1-frame delay, so this returns 1 — the reported latency
+    /// always matches what the audio path actually does.
     pub fn lookahead_delay_samples(&self) -> usize {
-        if self.lookahead_ms <= 0.0 {
-            return 0;
-        }
-        (self.lookahead_ms * 0.001 * self.sample_rate as f32).round() as usize
+        self.lookahead_buffer.delay()
     }
 
     /// Get a mutable reference to the lookahead frame buffer (pre-allocated).

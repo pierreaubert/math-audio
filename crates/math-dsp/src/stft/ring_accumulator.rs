@@ -11,7 +11,19 @@ pub struct RingAccumulator {
 }
 
 impl RingAccumulator {
+    /// Create a new ring accumulator.
+    ///
+    /// # Panics
+    /// Panics if `window_size` or `hop_size` is zero.
     pub fn new(window_size: usize, hop_size: usize) -> Self {
+        assert!(
+            window_size > 0,
+            "RingAccumulator: window_size must be greater than zero"
+        );
+        assert!(
+            hop_size > 0,
+            "RingAccumulator: hop_size must be greater than zero"
+        );
         Self {
             buffer: vec![0.0; window_size],
             write_pos: 0,

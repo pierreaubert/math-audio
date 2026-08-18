@@ -250,6 +250,58 @@ fn test_no_allocations_in_hot_path() {
     assert!(core.envelope_db(1).is_finite());
 }
 
+/// Measure the actual frame delay through the lookahead path by sending an
+/// impulse at frame 0 and returning the frame index where it reappears.
+fn measure_lookahead_delay(core: &mut DynamicsCore, channels: usize, frames: usize) -> usize {
+    let mut output = vec![0.0f32; channels];
+    for i in 0..frames {
+        let mut input = vec![0.0f32; channels];
+        if i == 0 {
+            input.fill(1.0);
+        }
+        core.lookahead_process_frame(&input, &mut output);
+        if output[0] != 0.0 {
+            return i;
+        }
+    }
+    panic!("impulse never reappeared within {frames} frames");
+}
+
+#[test]
+fn test_lookahead_delay_samples_matches_actual_delay_off() {
+    // Lookahead off (0 ms): the reported delay must match the actual delay
+    // of the buffer path, which still applies its minimum delay.
+    let mut core = DynamicsCore::new(DynamicsMode::Compress, 1, SR);
+    let reported = core.lookahead_delay_samples();
+    let actual = measure_lookahead_delay(&mut core, 1, 10);
+    assert_eq!(
+        reported, actual,
+        "reported lookahead latency ({reported}) must match actual delay ({actual})"
+    );
+}
+
+#[test]
+fn test_lookahead_delay_samples_matches_actual_delay_on() {
+    let mut core = DynamicsCore::new(DynamicsMode::Compress, 2, SR);
+    core.set_lookahead_ms(5.0); // 5ms = 240 samples at 48kHz
+    let reported = core.lookahead_delay_samples();
+    assert_eq!(reported, 240);
+    let actual = measure_lookahead_delay(&mut core, 2, 300);
+    assert_eq!(
+        reported, actual,
+        "reported lookahead latency ({reported}) must match actual delay ({actual})"
+    );
+
+    // Turning lookahead back off must re-sync report with actual delay.
+    core.set_lookahead_ms(0.0);
+    let reported = core.lookahead_delay_samples();
+    let actual = measure_lookahead_delay(&mut core, 2, 10);
+    assert_eq!(
+        reported, actual,
+        "reported lookahead latency ({reported}) must match actual delay ({actual})"
+    );
+}
+
 #[test]
 fn test_lookahead_process_frame() {
     let mut core = DynamicsCore::new(DynamicsMode::Compress, 2, SR);
@@ -479,6 +531,37 @@ fn test_apply_envelope_exact_equality() {
     assert!(
         (env2 - env).abs() < 0.001,
         "when target equals envelope, envelope should not change much, got {env2} vs {env}"
+    );
+}
+
+#[test]
+fn test_apply_envelope_nan_recovery() {
+    let mut core = DynamicsCore::new(DynamicsMode::Compress, 1, SR);
+    core.set_attack_release(1.0, 50.0);
+
+    // Build up a real envelope
+    for _ in 0..480 {
+        core.apply_envelope(0, 10.0);
+    }
+    let env_before = core.envelope_db(0);
+    assert!(env_before > 5.0, "setup: envelope should be built up");
+
+    // A single non-finite target must not permanently corrupt the envelope
+    let after_nan = core.apply_envelope(0, f32::NAN);
+    assert!(after_nan.is_finite(), "NaN target produced NaN envelope");
+    assert!(core.envelope_db(0).is_finite());
+    let after_inf = core.apply_envelope(0, f32::INFINITY);
+    assert!(after_inf.is_finite(), "Inf target produced non-finite envelope");
+
+    // Subsequent finite targets must still be tracked normally
+    let mut env = 0.0f32;
+    for _ in 0..24000 {
+        // 500ms, 10 release time constants
+        env = core.apply_envelope(0, 0.0);
+    }
+    assert!(
+        env < 0.1,
+        "envelope should recover and release to ~0 after NaN, got {env}"
     );
 }
 

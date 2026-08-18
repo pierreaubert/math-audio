@@ -77,6 +77,26 @@ fn delay_backward_rejects_mismatched_batch_shape() {
 }
 
 #[test]
+fn parallel_delay_backward_rejects_mismatched_channel_shape() {
+    let n_bins = NFFT / 2 + 1;
+    let mut delay = ParallelDelay::new(NFFT, 1, 0.0).unwrap();
+    let input = random_spectrum(&[1, n_bins, 2]);
+    let grad = random_spectrum(&[1, n_bins, 2]);
+    let output = DiffTensor::zeros(IxDyn(&[1, n_bins, 2]));
+    assert!(delay.backward(&input, &output, &grad).is_err());
+}
+
+#[test]
+fn delay_forward_uses_the_current_public_parameter_shape() {
+    let n_bins = NFFT / 2 + 1;
+    let mut delay = Delay::new(NFFT, 1, 1, 0.0).unwrap();
+    delay.param = ArrayD::zeros(IxDyn(&[2, 1]));
+    let input = random_spectrum(&[1, n_bins, 1]);
+    let output = delay.forward(&input).unwrap();
+    assert_eq!(output.data.shape(), &[1, n_bins, 2]);
+}
+
+#[test]
 fn parallel_delay_gradient_matches_finite_difference() {
     let n_bins = NFFT / 2 + 1;
     let mut delay = ParallelDelay::new(NFFT, 1, 0.0).unwrap();

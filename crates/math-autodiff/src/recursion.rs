@@ -595,7 +595,8 @@ impl DiffModule<f64> for Recursion {
             }
         }
 
-        Ok(DiffTensor::from_array(self.grad_input.clone()))
+        let grad_input = std::mem::replace(&mut self.grad_input, ArrayD::zeros(IxDyn(&[])));
+        Ok(DiffTensor::from_array(grad_input))
     }
 
     fn input_channels(&self) -> usize {

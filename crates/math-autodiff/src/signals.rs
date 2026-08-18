@@ -117,9 +117,8 @@ pub fn signal_gallery(
         SignalType::WhiteNoise => {
             let mut rng = rand::rng();
             for n in 0..n_samples {
-                let sample = Complex::new(rng.random::<f64>() * 2.0 - 1.0, 0.0);
                 for ch in 0..n_channels {
-                    data[[0, n, ch]] = sample;
+                    data[[0, n, ch]] = Complex::new(rng.random::<f64>() * 2.0 - 1.0, 0.0);
                 }
             }
         }

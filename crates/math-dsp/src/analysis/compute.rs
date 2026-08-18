@@ -190,6 +190,13 @@ pub(super) fn compute_welch_spectrum_into(
         let end = (start + fft_size).min(signal.len());
         let window_len = end - start;
 
+        // Skip a trailing frame whose samples were all covered by the
+        // previous frame (e.g. len == fft_size with 50% overlap): it adds
+        // no new data and would only dilute the average.
+        if window_idx > 0 && start - hop_size + fft_size >= signal.len() {
+            continue;
+        }
+
         if window_len == fft_size {
             // Fast path: window and scale the signal directly into the real FFT buffer.
             // The coherent-gain scaling is fused into the window so the per-bin
@@ -236,7 +243,15 @@ pub(super) fn compute_welch_spectrum_into(
     let processed_windows = processed_windows.max(1);
 
     for i in 0..num_bins {
-        let mag_sq = magnitude_sum[i];
+        // The 2x one-sided folding is fused into `scaled_window` (and the
+        // partial-window scale factor) for every bin, but DC has no negative
+        // frequency image to fold in — divide its accumulated power by 4
+        // (2x in amplitude) to match the single-FFT path's 1/coherent_sum.
+        let mag_sq = if i == 0 {
+            magnitude_sum[i] * 0.25
+        } else {
+            magnitude_sum[i]
+        };
         let mag = (mag_sq / processed_windows as f32).sqrt();
         mags_db_out[i] = if mag > 1e-10 {
             20.0 * mag.log10()
@@ -381,6 +396,12 @@ pub(super) fn compute_single_fft_spectrum_internal(
 /// Compute Total Harmonic Distortion (THD) from Impulse Response
 ///
 /// Uses Farina's method to extract harmonics from the impulse response of a log sweep.
+///
+/// Per-frequency mapping convention: `harmonics_db[k][i]` is the magnitude of
+/// the (k+2)-th harmonic's transfer function evaluated at `frequencies[i]`
+/// itself — i.e. `|H_k(f)|`, not `|H_k(k·f)|` — and `thd_percent[i]` is
+/// `sqrt(Σ_k |H_k(f)|²) / |H_1(f)|` with every term taken at the same
+/// frequency `f = frequencies[i]`.
 pub(super) fn compute_thd_from_ir(
     impulse: &[f32],
     sample_rate: f32,
@@ -464,14 +485,31 @@ pub(super) fn compute_thd_from_ir(
         // Extract windowed harmonic IR
         let mut harmonic_ir = vec![0.0f32; win_len];
         let mut max_harmonic_sample = 0.0f32;
+        let mut weighted_window_sum = 0.0f32;
+        let mut sample_abs_sum = 0.0f32;
         for (i, harmonic_ir_val) in harmonic_ir.iter_mut().enumerate() {
             let src_idx =
                 (center - (win_len as isize / 2) + i as isize).rem_euclid(n as isize) as usize;
             // Apply Hann window
             let w = 0.5 * (1.0 - (2.0 * PI * i as f32 / (win_len as f32 - 1.0)).cos());
-            *harmonic_ir_val = impulse[src_idx] * w;
+            let u = impulse[src_idx];
+            *harmonic_ir_val = u * w;
             max_harmonic_sample = max_harmonic_sample.max(harmonic_ir_val.abs());
+            weighted_window_sum += u.abs() * w;
+            sample_abs_sum += u.abs();
         }
+
+        // Amplitude-weighted coherent gain of the Hann window over the actual
+        // harmonic content: ~1.0 for a compact impulse near the window centre
+        // (where the window is ~1), ~0.5 for content spread across the whole
+        // window. Compensating by its inverse recovers the unwindowed
+        // transfer-function magnitude instead of reading up to ~6 dB low for
+        // spread harmonic IRs.
+        let window_gain = if sample_abs_sum > 1e-12 {
+            weighted_window_sum / sample_abs_sum
+        } else {
+            1.0
+        };
 
         if k_idx == 0 {
             log::debug!(
@@ -499,8 +537,9 @@ pub(super) fn compute_thd_from_ir(
                     // transfer function. Undo compute_fft_padded's signal-level
                     // 1/N convention: unlike the fundamental's recorded/reference
                     // ratio, there is no second spectrum here for that factor to
-                    // cancel against.
-                    let mag = spectrum[bin].norm() * fft_size as f32;
+                    // cancel against. Also undo the window's effective coherent
+                    // gain so spread harmonic content is not underreported.
+                    let mag = spectrum[bin].norm() * fft_size as f32 / window_gain;
                     // Convert to dB (threshold at -120 dB to avoid log of tiny values)
                     if mag > 1e-6 {
                         harmonic_db[i] = 20.0 * mag.log10();
@@ -602,6 +641,34 @@ pub fn compute_windowed_fr(
                 .collect();
             let spl = vec![-200.0_f32; num_output_points];
             return (freqs, spl);
+        }
+
+        if win_len < 4 {
+            // A 1-3 sample window has no usable frequency resolution (the FFT
+            // has too few bins for the log-frequency mapping below). Report a
+            // flat spectrum at the window's RMS level: for a single sample
+            // this is exact, since the DFT of [x] is a constant |x|.
+            let rms = (impulse_response[start..end]
+                .iter()
+                .map(|s| s * s)
+                .sum::<f32>()
+                / win_len as f32)
+                .sqrt();
+            let db = if rms > 1e-20 {
+                20.0 * rms.log10()
+            } else {
+                -200.0
+            };
+            let log_start = 20.0_f32.ln();
+            let log_end = 20000.0_f32.ln();
+            let freqs: Vec<f32> = (0..num_output_points)
+                .map(|i| {
+                    (log_start
+                        + (log_end - log_start) * i as f32 / (num_output_points.max(2) - 1) as f32)
+                        .exp()
+                })
+                .collect();
+            return (freqs, vec![db; num_output_points]);
         }
 
         // Extract and fade the window edges to reduce spectral leakage.
@@ -873,6 +940,7 @@ pub(super) fn compute_schroeder_decay(impulse: &[f32]) -> Vec<f32> {
 
 /// Compute RT60 from Impulse Response (Broadband)
 /// Uses Schroeder backward integration and least-squares T30/T20 extrapolation.
+/// Returns the reverberation time in **seconds** (0.0 when no fit is possible).
 pub fn compute_rt60_broadband(impulse: &[f32], sample_rate: f32) -> f32 {
     estimate_rt60_broadband(impulse, sample_rate)
         .map(|fit| fit.rt60_seconds)
@@ -922,7 +990,7 @@ pub fn compute_clarity_broadband(impulse: &[f32], sample_rate: f32) -> (f32, f32
     let c80 = if energy_80_inf > 1e-12 && energy_0_80 > 1e-12 {
         let ratio = energy_0_80 / energy_80_inf;
         (10.0 * ratio.log10()).clamp(-MAX_CLARITY_DB, MAX_CLARITY_DB)
-    } else if energy_80_inf > energy_0_80 {
+    } else if energy_0_80 > energy_80_inf {
         MAX_CLARITY_DB // Early energy dominates - excellent clarity
     } else {
         -MAX_CLARITY_DB // Late energy dominates - poor clarity
@@ -931,7 +999,10 @@ pub fn compute_clarity_broadband(impulse: &[f32], sample_rate: f32) -> (f32, f32
     (c50, c80)
 }
 
-/// Compute RT60 spectrum using octave band filtering
+/// Compute RT60 spectrum using octave band filtering.
+///
+/// Returns RT60 values in **milliseconds** interpolated onto `frequencies`,
+/// matching the `AnalysisResult::rt60_ms` field and the `rt60_ms` CSV column.
 pub fn compute_rt60_spectrum(impulse: &[f32], sample_rate: f32, frequencies: &[f32]) -> Vec<f32> {
     if impulse.is_empty() {
         return vec![0.0; frequencies.len()];
@@ -969,7 +1040,8 @@ pub fn compute_rt60_spectrum(impulse: &[f32], sample_rate: f32, frequencies: &[f
 
         // Compute RT60 for this band
         let fit = estimate_rt60_broadband(&filtered_f32, sample_rate);
-        let rt60 = fit.map(|fit| fit.rt60_seconds).unwrap_or(0.0);
+        // Public contract is milliseconds (AnalysisResult.rt60_ms, CSV rt60_ms).
+        let rt60_ms = fit.map(|fit| fit.rt60_seconds * 1000.0).unwrap_or(0.0);
         fit_summaries.push(match fit {
             Some(fit) => format!(
                 "{:.0}Hz:{:.3}s({:?},r2={:.3},{:.0}-{:.0}ms)",
@@ -983,7 +1055,7 @@ pub fn compute_rt60_spectrum(impulse: &[f32], sample_rate: f32, frequencies: &[f
             None => format!("{:.0}Hz:invalid", freq),
         });
 
-        band_rt60s.push(rt60);
+        band_rt60s.push(rt60_ms);
         valid_centers.push(freq);
     }
 
@@ -1118,6 +1190,181 @@ pub fn compute_clarity_spectrum(
     (c50_interp, c80_interp)
 }
 
+/// Compute RT60 and Clarity (C50, C80) spectra in a single band-filtering
+/// pass over the impulse response, returning `(rt60_ms, c50_db, c80_db)`.
+///
+/// [`compute_rt60_spectrum`] and [`compute_clarity_spectrum`] iterate the same
+/// octave bands and each convert the IR to f64 per band; this shared pass
+/// converts once and reuses scratch buffers across bands. The per-band filter
+/// chains are unchanged, so outputs are bit-identical to calling the two
+/// public functions separately (pinned by
+/// `tests::rt60_clarity_shared_pass_matches_separate_public_paths`).
+pub(super) fn compute_rt60_clarity_spectra(
+    impulse: &[f32],
+    sample_rate: f32,
+    frequencies: &[f32],
+) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
+    if impulse.is_empty() {
+        return (
+            vec![0.0; frequencies.len()],
+            vec![0.0; frequencies.len()],
+            vec![0.0; frequencies.len()],
+        );
+    }
+
+    // Octave band center frequencies
+    let centers = [
+        63.0f32, 125.0, 250.0, 500.0, 1000.0, 2000.0, 4000.0, 8000.0, 16000.0,
+    ];
+    let mut band_rt60s = Vec::with_capacity(centers.len());
+    let mut band_c50s = Vec::with_capacity(centers.len());
+    let mut band_c80s = Vec::with_capacity(centers.len());
+    let mut valid_centers = Vec::with_capacity(centers.len());
+    let mut fit_summaries = Vec::with_capacity(centers.len());
+
+    // Time boundaries for clarity calculation
+    let samp_50ms = (0.050 * sample_rate) as usize;
+    let samp_80ms = (0.080 * sample_rate) as usize;
+
+    // Convert to f64 once; every band's filter chain starts from this data.
+    let impulse_f64: Vec<f64> = impulse.iter().map(|&x| x as f64).collect();
+    let mut scratch = impulse_f64.clone();
+    let mut filtered_f32 = vec![0.0f32; impulse.len()];
+
+    for &freq in &centers {
+        // Skip if frequency is too high for sample rate
+        if freq >= sample_rate / 2.0 {
+            continue;
+        }
+
+        // --- RT60: single bandpass biquad, Q=1.414 (sqrt(2)) ~ 1 octave ---
+        let mut biquad = Biquad::new(
+            BiquadFilterType::Bandpass,
+            freq as f64,
+            sample_rate as f64,
+            1.414,
+            0.0,
+        );
+        scratch.copy_from_slice(&impulse_f64);
+        biquad.process_block(&mut scratch);
+        for (out, &x) in filtered_f32.iter_mut().zip(scratch.iter()) {
+            *out = x as f32;
+        }
+
+        // Compute RT60 for this band
+        let fit = estimate_rt60_broadband(&filtered_f32, sample_rate);
+        // Public contract is milliseconds (AnalysisResult.rt60_ms, CSV rt60_ms).
+        let rt60_ms = fit.map(|fit| fit.rt60_seconds * 1000.0).unwrap_or(0.0);
+        fit_summaries.push(match fit {
+            Some(fit) => format!(
+                "{:.0}Hz:{:.3}s({:?},r2={:.3},{:.0}-{:.0}ms)",
+                freq,
+                fit.rt60_seconds,
+                fit.method,
+                fit.r_squared,
+                fit.fit_start_seconds * 1000.0,
+                fit.fit_end_seconds * 1000.0,
+            ),
+            None => format!("{:.0}Hz:invalid", freq),
+        });
+        band_rt60s.push(rt60_ms);
+
+        // --- Clarity: cascaded bandpass biquads (Q=0.707 per stage) ---
+        let mut biquad1 = Biquad::new(
+            BiquadFilterType::Bandpass,
+            freq as f64,
+            sample_rate as f64,
+            0.707, // Lower Q per stage, cascaded gives Q ~ 1.0
+            0.0,
+        );
+        let mut biquad2 = Biquad::new(
+            BiquadFilterType::Bandpass,
+            freq as f64,
+            sample_rate as f64,
+            0.707,
+            0.0,
+        );
+        scratch.copy_from_slice(&impulse_f64);
+        biquad1.process_block(&mut scratch);
+        biquad2.process_block(&mut scratch);
+
+        // Compute energy in early and late windows directly
+        let mut energy_0_50 = 0.0f64;
+        let mut energy_50_inf = 0.0f64;
+        let mut energy_0_80 = 0.0f64;
+        let mut energy_80_inf = 0.0f64;
+
+        for (i, &samp) in scratch.iter().enumerate() {
+            let sq = samp * samp;
+
+            if i < samp_50ms {
+                energy_0_50 += sq;
+            } else {
+                energy_50_inf += sq;
+            }
+
+            if i < samp_80ms {
+                energy_0_80 += sq;
+            } else {
+                energy_80_inf += sq;
+            }
+        }
+
+        // Compute C50 and C80 with proper handling
+        // When late energy is very small, clarity is high (capped at 40 dB for display)
+        const MAX_CLARITY_DB: f32 = 40.0;
+        const MIN_ENERGY: f64 = 1e-20;
+
+        let c50 = if energy_50_inf > MIN_ENERGY && energy_0_50 > MIN_ENERGY {
+            let ratio = energy_0_50 / energy_50_inf;
+            (10.0 * ratio.log10() as f32).clamp(-MAX_CLARITY_DB, MAX_CLARITY_DB)
+        } else if energy_0_50 > energy_50_inf {
+            MAX_CLARITY_DB
+        } else {
+            -MAX_CLARITY_DB
+        };
+
+        let c80 = if energy_80_inf > MIN_ENERGY && energy_0_80 > MIN_ENERGY {
+            let ratio = energy_0_80 / energy_80_inf;
+            (10.0 * ratio.log10() as f32).clamp(-MAX_CLARITY_DB, MAX_CLARITY_DB)
+        } else if energy_0_80 > energy_80_inf {
+            MAX_CLARITY_DB
+        } else {
+            -MAX_CLARITY_DB
+        };
+
+        band_c50s.push(c50);
+        band_c80s.push(c80);
+        valid_centers.push(freq);
+    }
+
+    // Log per-band values
+    log::info!("[RT60] Per-band values: {:?}", fit_summaries);
+    log::info!(
+        "[Clarity] Per-band C50: {:?}",
+        valid_centers
+            .iter()
+            .zip(band_c50s.iter())
+            .map(|(f, v)| format!("{:.0}Hz:{:.1}dB", f, v))
+            .collect::<Vec<_>>()
+    );
+
+    if valid_centers.is_empty() {
+        return (
+            vec![0.0; frequencies.len()],
+            vec![0.0; frequencies.len()],
+            vec![0.0; frequencies.len()],
+        );
+    }
+
+    // Interpolate to output frequency grid
+    let rt60_interp = interpolate_log(&valid_centers, &band_rt60s, frequencies);
+    let c50_interp = interpolate_log(&valid_centers, &band_c50s, frequencies);
+    let c80_interp = interpolate_log(&valid_centers, &band_c80s, frequencies);
+
+    (rt60_interp, c50_interp, c80_interp)
+}
+
 /// Compute Spectrogram from Impulse Response
 /// Returns peak-amplitude-calibrated dBFS values as
 /// `(spectrogram_matrix_db, frequency_bins, time_bins)`. A bin-centred sine
@@ -1139,7 +1386,8 @@ pub fn compute_spectrogram(
     }
 
     let num_frames = 1 + (impulse.len() - window_size) / hop_size;
-    let mut spectrogram = Vec::with_capacity(num_frames);
+    let num_bins = window_size / 2;
+    let mut spectrogram = vec![vec![0.0f32; num_bins]; num_frames];
     let mut times = Vec::with_capacity(num_frames);
 
     // Precompute Hann window
@@ -1151,45 +1399,39 @@ pub fn compute_spectrogram(
     // Setup FFT
     let fft = plan_fft_forward(window_size);
 
-    for i in 0..num_frames {
+    // Reuse one FFT buffer across all frames instead of allocating per frame.
+    let mut buffer = vec![Complex::new(0.0f32, 0.0); window_size];
+
+    for (i, magnitude_db) in spectrogram.iter_mut().enumerate() {
         let start = i * hop_size;
         let time_ms = (start as f32 / sample_rate) * 1000.0;
         times.push(time_ms);
 
-        let mut buffer: Vec<Complex<f32>> = (0..window_size)
-            .map(|j| {
-                let sample = impulse.get(start + j).copied().unwrap_or(0.0);
-                Complex::new(sample * window[j], 0.0)
-            })
-            .collect();
+        for (j, slot) in buffer.iter_mut().enumerate() {
+            let sample = impulse.get(start + j).copied().unwrap_or(0.0);
+            *slot = Complex::new(sample * window[j], 0.0);
+        }
 
         fft.process(&mut buffer);
 
         // Take magnitude of first half (up to Nyquist)
         // Store as dB
-        let magnitude_db: Vec<f32> = buffer[..window_size / 2]
-            .iter()
-            .enumerate()
-            .map(|(bin, c)| {
-                let one_sided_scale = if bin == 0 {
-                    1.0 / coherent_sum
-                } else {
-                    2.0 / coherent_sum
-                };
-                let mag = c.norm() * one_sided_scale;
-                if mag > 1e-9 {
-                    20.0 * mag.log10()
-                } else {
-                    -180.0
-                }
-            })
-            .collect();
-
-        spectrogram.push(magnitude_db);
+        for (bin, (out, c)) in magnitude_db.iter_mut().zip(buffer.iter()).enumerate() {
+            let one_sided_scale = if bin == 0 {
+                1.0 / coherent_sum
+            } else {
+                2.0 / coherent_sum
+            };
+            let mag = c.norm() * one_sided_scale;
+            *out = if mag > 1e-9 {
+                20.0 * mag.log10()
+            } else {
+                -180.0
+            };
+        }
     }
 
     // Generate frequency bins
-    let num_bins = window_size / 2;
     let freq_step = sample_rate / window_size as f32;
     let freqs: Vec<f32> = (0..num_bins).map(|i| i as f32 * freq_step).collect();
 

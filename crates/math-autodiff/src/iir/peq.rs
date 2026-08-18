@@ -325,10 +325,16 @@ impl ParametricEq {
     /// Build a fresh inner SOS filter reflecting the current parameters.
     ///
     /// Used by the immutable `forward` pass.
-    fn build_fresh_inner(&self) -> SosFilter {
-        let mut inner = self.inner.clone();
+    fn build_fresh_inner(&self) -> Result<SosFilter, AutodiffError> {
+        let mut inner = SosFilter::new(
+            self.nfft,
+            self.n_sections,
+            self.n_channels,
+            self.n_channels,
+            self.alias_decay_db,
+        )?;
         Self::fill_sos_param(&mut inner.param, &self.param, self.fs, self.band_type);
-        inner
+        Ok(inner)
     }
 }
 
@@ -357,7 +363,7 @@ impl DiffModule<f64> for ParametricEq {
             )));
         }
 
-        let inner = self.build_fresh_inner();
+        let inner = self.build_fresh_inner()?;
         inner.forward(input)
     }
 

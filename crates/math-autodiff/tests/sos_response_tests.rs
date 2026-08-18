@@ -19,7 +19,7 @@ fn sos_response_dc_and_nyquist_gains_are_correct() {
     a[[0, 1, 0, 0]] = Complex::from(-0.5);
     a[[0, 2, 0, 0]] = Complex::from(0.25);
 
-    let resp = sos_response(&b, &a, nfft, &gamma);
+    let resp = sos_response(&b, &a, nfft, &gamma).unwrap();
     let h = sos_frequency_response(&b, &a, nfft, Some(&gamma)).unwrap();
 
     let expected_dc = Complex::from(1.0) / Complex::from(1.0 - 0.5 * gamma[1] + 0.25 * gamma[2]);
@@ -106,14 +106,14 @@ fn sos_response_jacobian_matches_finite_diff_for_b() {
     let epsilon = 1e-8;
 
     let (b, a) = build_two_section_coeffs();
-    let resp = sos_response(&b, &a, nfft, &gamma);
+    let resp = sos_response(&b, &a, nfft, &gamma).unwrap();
     let (dh_db, _) = sos_frequency_response_jacobian(&b, &a, nfft, Some(&gamma)).unwrap();
 
     for section in 0..2 {
         for tap in 0..3 {
             let mut b_perturbed = b.clone();
             b_perturbed[[section, tap, 0, 0]].re += epsilon;
-            let resp_perturbed = sos_response(&b_perturbed, &a, nfft, &gamma);
+            let resp_perturbed = sos_response(&b_perturbed, &a, nfft, &gamma).unwrap();
             let h_perturbed = sos_frequency_response(&b_perturbed, &a, nfft, Some(&gamma)).unwrap();
 
             let expected = (&resp_perturbed.h - &resp.h) / Complex::from(epsilon);
@@ -146,14 +146,14 @@ fn sos_response_jacobian_matches_finite_diff_for_a() {
     let epsilon = 1e-8;
 
     let (b, a) = build_two_section_coeffs();
-    let resp = sos_response(&b, &a, nfft, &gamma);
+    let resp = sos_response(&b, &a, nfft, &gamma).unwrap();
     let (_, dh_da) = sos_frequency_response_jacobian(&b, &a, nfft, Some(&gamma)).unwrap();
 
     for section in 0..2 {
         for tap in 0..3 {
             let mut a_perturbed = a.clone();
             a_perturbed[[section, tap, 0, 0]].re += epsilon;
-            let resp_perturbed = sos_response(&b, &a_perturbed, nfft, &gamma);
+            let resp_perturbed = sos_response(&b, &a_perturbed, nfft, &gamma).unwrap();
             let h_perturbed = sos_frequency_response(&b, &a_perturbed, nfft, Some(&gamma)).unwrap();
 
             let expected = (&resp_perturbed.h - &resp.h) / Complex::from(epsilon);
@@ -326,5 +326,17 @@ fn sos_frequency_response_parallel_errors_on_bad_tap_axis() {
     let b = Array3::zeros((1, 4, 1));
     let a = Array3::zeros((1, 4, 1));
     let err = sos_frequency_response_parallel(&b, &a, 64, None).unwrap_err();
+    assert!(err.to_string().contains("second axis must be 3"));
+}
+
+#[test]
+fn sos_response_returns_errors_instead_of_panicking_on_invalid_inputs() {
+    let b = Array4::zeros((1, 3, 1, 1));
+    let mismatched_a = Array4::zeros((1, 3, 2, 1));
+    let err = sos_response(&b, &mismatched_a, 64, &[1.0, 1.0, 1.0]).unwrap_err();
+    assert!(err.to_string().contains("same shape"));
+
+    let bad_taps = Array4::zeros((1, 4, 1, 1));
+    let err = sos_response(&bad_taps, &bad_taps, 64, &[1.0, 1.0, 1.0]).unwrap_err();
     assert!(err.to_string().contains("second axis must be 3"));
 }

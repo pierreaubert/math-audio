@@ -74,7 +74,10 @@ impl LevelDetector {
                 let oldest = self.window_buf[self.window_pos] as f64;
                 self.sum_sq = (self.sum_sq + sq - oldest).max(0.0);
                 self.window_buf[self.window_pos] = sample * sample;
-                self.window_pos = (self.window_pos + 1) % self.window_len;
+                self.window_pos += 1;
+                if self.window_pos >= self.window_len {
+                    self.window_pos = 0;
+                }
 
                 (self.sum_sq / self.window_len as f64).sqrt() as f32
             }

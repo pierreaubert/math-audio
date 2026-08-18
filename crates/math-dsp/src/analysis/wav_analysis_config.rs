@@ -13,7 +13,7 @@ pub struct WavAnalysisConfig {
     pub overlap: f32,
     /// Use single FFT instead of Welch's method (better for sweeps and impulse responses)
     pub single_fft: bool,
-    /// Apply pink compensation (-3dB/octave) for log sweeps
+    /// Apply pink compensation (+3 dB/octave) for log sweeps
     pub pink_compensation: bool,
     /// Use rectangular window instead of Hann
     pub no_window: bool,

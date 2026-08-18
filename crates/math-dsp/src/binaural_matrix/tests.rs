@@ -170,6 +170,51 @@ fn fdw_complex_half_spectrum_returns_fft_bins() {
     assert!(spectrum[1].norm() > 0.0);
 }
 
+/// Regression test: the DC bin must be computed from the same Hann-windowed
+/// segment around `direct_sample` as every other bin, not from the unwindowed
+/// sum of the full IR (which includes reverb-tail energy the neighboring
+/// bins exclude).
+#[test]
+fn fdw_complex_half_spectrum_dc_bin_excludes_reverb_tail() {
+    let sample_rate = 48_000.0;
+    let fft_size = 256;
+    let direct = 100usize;
+    let mut ir = vec![0.01f64; 4096]; // dense reverb tail
+    ir[direct] = 1.0; // direct sound
+
+    let spectrum =
+        fdw_complex_half_spectrum(&ir, sample_rate, fft_size, direct, 8.0, 3.0, 30.0).unwrap();
+
+    // Expected DC: Hann-windowed segment around the direct sound. At 0 Hz the
+    // window length clamp yields `max_window_ms` and the phase term is 1.
+    let half = (30.0 / 1000.0 * sample_rate * 0.5).round() as isize;
+    let mut expected = 0.0f64;
+    for delta in -half..=half {
+        let idx = direct as isize + delta;
+        if idx < 0 || idx >= ir.len() as isize {
+            continue;
+        }
+        let x = delta as f64 / half as f64;
+        let w = 0.5 + 0.5 * (std::f64::consts::PI * x).cos();
+        expected += ir[idx as usize] * w;
+    }
+
+    // Sanity: the unwindowed full-IR sum (old behavior) must be dominated by
+    // the tail so this test can actually distinguish the two.
+    let full_sum: f64 = ir.iter().sum();
+    assert!(
+        full_sum > 4.0 * expected,
+        "test setup: tail should dominate the full sum ({full_sum} vs {expected})"
+    );
+
+    assert!(
+        (spectrum[0].re - expected).abs() < 1e-9 * expected.abs().max(1.0),
+        "DC bin should be the windowed sum {expected}, got {}",
+        spectrum[0].re
+    );
+    assert!(spectrum[0].im.abs() < 1e-9, "DC bin must be real");
+}
+
 #[test]
 fn weighted_inverse_rejects_empty_positions() {
     let target = vec![Complex64::new(1.0, 0.0); 4];
@@ -307,5 +352,76 @@ fn weighted_inverse_unweighted_matches_regularized() {
             (a - b).norm() < 1e-9,
             "weighted and regularized should match when weight=1"
         );
+    }
+}
+
+/// Characterization test: the solver now uses an LU factorization
+/// (`normal.lu().solve(&rhs)`) instead of an explicit inverse
+/// (`normal.try_inverse() * rhs`). Pin agreement with the old formulation
+/// (reimplemented inline below) to a tight tolerance.
+#[test]
+fn lu_solve_matches_explicit_inverse_reference() {
+    let target = vec![
+        Complex64::new(1.0, 0.0),
+        Complex64::new(0.0, 0.0),
+        Complex64::new(0.0, 0.0),
+        Complex64::new(1.0, 0.0),
+    ];
+    let positions = vec![
+        TransferMatrixBin::new(
+            2,
+            3,
+            vec![
+                Complex64::new(1.0, 0.1),
+                Complex64::new(0.2, -0.3),
+                Complex64::new(0.4, 0.2),
+                Complex64::new(0.15, 0.05),
+                Complex64::new(0.9, -0.1),
+                Complex64::new(-0.2, 0.35),
+            ],
+        ),
+        TransferMatrixBin::new(
+            2,
+            3,
+            vec![
+                Complex64::new(0.7, -0.2),
+                Complex64::new(0.45, 0.1),
+                Complex64::new(0.1, 0.4),
+                Complex64::new(0.35, 0.25),
+                Complex64::new(0.8, 0.0),
+                Complex64::new(0.05, -0.15),
+            ],
+        ),
+    ];
+    let beta = 1e-3;
+    let solved = solve_regularized_inverse_bin(&positions, &target, beta, None).unwrap();
+
+    // Reference: old explicit-inverse formulation.
+    let speakers = 3usize;
+    let ears = 2usize;
+    let target_matrix = DMatrix::from_row_slice(ears, ears, &target);
+    let mut normal = DMatrix::<Complex64>::zeros(speakers, speakers);
+    let mut rhs = DMatrix::<Complex64>::zeros(speakers, ears);
+    for matrix in &positions {
+        let h = matrix.as_matrix();
+        let h_h = h.adjoint();
+        normal += &h_h * &h;
+        rhs += h_h * &target_matrix;
+    }
+    for idx in 0..speakers {
+        normal[(idx, idx)] += Complex64::new(beta, 0.0);
+    }
+    let reference = normal.try_inverse().unwrap() * rhs;
+
+    assert_eq!(solved.values.len(), speakers * ears);
+    for row in 0..speakers {
+        for col in 0..ears {
+            let got = solved.values[row * ears + col];
+            let expected = reference[(row, col)];
+            assert!(
+                (got - expected).norm() < 1e-12,
+                "LU solve should match explicit inverse: got {got}, expected {expected}"
+            );
+        }
     }
 }

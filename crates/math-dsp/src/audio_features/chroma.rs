@@ -10,7 +10,16 @@ use oxiblas_ndarray::blas::dot_view;
 use realfft::{RealFftPlanner, RealToComplex};
 use rustfft::num_complex::Complex;
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
+
+/// Cache key for chroma filters: `(sample_rate, n_fft, n_chroma, quantized
+/// tuning)` — same keying as `ChromaFeatureExtractor`'s per-instance cache.
+type ChromaFilterKey = (u32, usize, u32, i64);
+
+/// Process-wide cache of transposed single-precision chroma filters for the
+/// standalone `compute_chroma_features` path.
+static CHROMA_FILTER_CACHE: OnceLock<Mutex<HashMap<ChromaFilterKey, Arc<Array2<f32>>>>> =
+    OnceLock::new();
 
 const WINDOW_SIZE: usize = 8192;
 const MAX_VALUE: f32 = 1.0;
@@ -144,22 +153,31 @@ impl ChromaFeatureExtractor {
     pub fn compute(&mut self, samples: &[f32], sample_rate: u32) -> Result<Vec<f32>, ChromaError> {
         let n_chroma = 12u32;
 
+        // Reflect-padding in compute_stft indexes samples[pad - i] and
+        // samples[len - 2 - i] with pad = window_size/2; too-short input
+        // would panic.
+        if samples.len() <= self.window_size / 2 {
+            return Err(ChromaError(format!(
+                "signal too short for chroma analysis: {} samples, need more than {}",
+                samples.len(),
+                self.window_size / 2
+            )));
+        }
+
         let spectrum = self.compute_stft(samples);
         let tuning = estimate_tuning(sample_rate, &spectrum, self.window_size, 0.01, n_chroma)?;
-        let cache_key = (
-            sample_rate,
-            self.window_size,
-            n_chroma,
-            Self::quantize_tuning(tuning),
-        );
+        let cache_key = (sample_rate, self.window_size, n_chroma, quantize_tuning(tuning));
 
         let filter = match self.filter_cache.get(&cache_key) {
             Some(f) => f,
             None => {
                 let f = chroma_filter(sample_rate, self.window_size, n_chroma, tuning)?;
-                // Store in transposed, contiguous, single-precision form for the
-                // cache-friendly f32 matmul fast path.
-                let f_t = f.t().mapv(|x| x as f32);
+                // Store transposed in standard layout so the flat-offset
+                // indexing of the f32 matmul fast path reads whole rows.
+                // (`Array::t().mapv()` would keep F-order memory and
+                // silently scramble the fast path.)
+                let mut f_t = Array2::<f32>::zeros((f.shape()[1], f.shape()[0]));
+                f_t.assign(&f.t().mapv(|x| x as f32));
                 self.filter_cache.insert(cache_key, f_t);
                 self.filter_cache.get(&cache_key).unwrap()
             }
@@ -204,11 +222,6 @@ impl ChromaFeatureExtractor {
         features.push(normalized_ratio);
 
         Ok(features)
-    }
-
-    fn quantize_tuning(tuning: f64) -> i64 {
-        // Tuning is in the range [-0.5, 0.5) bins; quantize to 1e-4 bins.
-        (tuning * 10_000.0).round() as i64
     }
 }
 
@@ -289,17 +302,16 @@ fn chroma_matmul(filter: &Array2<f32>, spectrum: &Array2<f64>, chroma_buf: &mut 
 
     chroma_buf[..out_len].fill(0.0);
 
-    // Fast path: flat slices for contiguous memory-order access. Process four
+    // Fast path: flat slices, only for standard-layout (C-order) operands so
+    // the flat-offset indexing below matches logical rows. Process four
     // chroma rows per inner pass so the spectrum row (the largest operand) is
     // read once per quadruple instead of once per row.
-    if let (Some(f), Some(s)) = (
-        filter.as_slice_memory_order(),
-        spectrum.as_slice_memory_order(),
-    ) {
+    if let (Some(f), Some(s)) = (filter.as_slice(), spectrum.as_slice()) {
         for i in 0..n_bins {
             let f_row = &f[i * n_chroma..(i + 1) * n_chroma];
             let s_row = &s[i * n_frames..(i + 1) * n_frames];
-            for r in (0..n_chroma).step_by(4) {
+            let n_quads = n_chroma / 4 * 4;
+            for r in (0..n_quads).step_by(4) {
                 let fc0 = f_row[r];
                 let fc1 = f_row[r + 1];
                 let fc2 = f_row[r + 2];
@@ -319,6 +331,17 @@ fn chroma_matmul(filter: &Array2<f32>, spectrum: &Array2<f64>, chroma_buf: &mut 
                     out1[j] += fc1 * v;
                     out2[j] += fc2 * v;
                     out3[j] += fc3 * v;
+                }
+            }
+            // Remainder rows when n_chroma is not a multiple of 4.
+            for r in n_quads..n_chroma {
+                let fc = f_row[r];
+                if fc == 0.0 {
+                    continue;
+                }
+                let out = &mut chroma_buf[r * n_frames..(r + 1) * n_frames];
+                for j in 0..n_frames {
+                    out[j] += fc * s_row[j] as f32;
                 }
             }
         }
@@ -344,7 +367,21 @@ fn chroma_matmul(filter: &Array2<f32>, spectrum: &Array2<f64>, chroma_buf: &mut 
 pub fn compute_chroma_features(samples: &[f32], sample_rate: u32) -> Result<Vec<f32>, ChromaError> {
     let n_chroma = 12u32;
 
+    // utils::stft reflect-pads by WINDOW_SIZE/2, which needs
+    // samples.len() > WINDOW_SIZE/2; too-short input would panic.
+    if samples.len() <= WINDOW_SIZE / 2 {
+        return Err(ChromaError(format!(
+            "signal too short for chroma analysis: {} samples, need more than {}",
+            samples.len(),
+            WINDOW_SIZE / 2
+        )));
+    }
+
     let mut spectrum = stft(samples, WINDOW_SIZE, 2205);
+    // Square the linear magnitudes from utils::stft up front: pip_track's
+    // threshold and `chroma_stft_with_filter` both operate on squared
+    // magnitudes, matching `ChromaFeatureExtractor::compute`.
+    spectrum.mapv_inplace(|x| x * x);
     let tuning = estimate_tuning(sample_rate, &spectrum, WINDOW_SIZE, 0.01, 12)?;
     let chroma = chroma_stft(sample_rate, &mut spectrum, WINDOW_SIZE, n_chroma, tuning)?;
 
@@ -416,16 +453,16 @@ fn chroma_interval_features(mut chroma: Array2<f64>) -> Result<Array1<f64>, Chro
 
 /// 12-bit masks for the 10 interval templates (columns of the template matrix).
 const TEMPLATE_MASKS: [u16; 10] = [
-    0xFFF, // all bins
-    0x001, // bin 0
-    0x002, // bin 1
-    0x184, // bins 2, 7, 8
-    0x248, // bins 3, 6, 9
-    0x010, // bin 4
-    0x120, // bins 5, 8
-    0x0C0, // bins 6, 7
-    0x200, // bin 9
-    0x000, // none
+    0x003, // minor 2nd {0,1}
+    0x005, // major 2nd {0,2}
+    0x009, // minor 3rd {0,3}
+    0x011, // major 3rd {0,4}
+    0x021, // perfect 4th {0,5}
+    0x041, // tritone {0,6}
+    0x091, // major triad {0,4,7}
+    0x089, // minor triad {0,3,7}
+    0x049, // diminished triad {0,3,6}
+    0x111, // augmented triad {0,4,8}
 ];
 
 fn extract_interval_features(chroma: &Array2<f64>, _templates: &Array2<i32>) -> Array2<f64> {
@@ -562,6 +599,13 @@ fn pip_track(
         None => return Ok((pitches, mags)),
     };
 
+    // Guard against tiny freq masks: the three shifted slices below need at
+    // least 4 in-range bins, otherwise `end - 3` underflows (debug panic) or
+    // the range inverts (empty after clamping). No peaks to find either way.
+    if end < beginning + 4 {
+        return Ok((pitches, mags));
+    }
+
     let zipped = Zip::indexed(spectrum.slice(s![beginning..end - 3, ..]))
         .and(spectrum.slice(s![beginning + 1..end - 2, ..]))
         .and(spectrum.slice(s![beginning + 2..end - 1, ..]));
@@ -575,8 +619,10 @@ fn pip_track(
             }
             shift = avg / shift;
             pitches.push(((i + beginning + 1) as f64 + shift) * sample_rate_float / n_fft as f64);
-            // `elem` is a squared magnitude; return the linear magnitude for tuning.
-            mags.push((elem + 0.5 * avg * shift).sqrt());
+            // Parabolically interpolated peak value, kept in the
+            // squared-magnitude domain of the spectrum (the downstream median
+            // filter in estimate_tuning is scale-invariant).
+            mags.push(elem + 0.5 * avg * shift);
         }
     });
 
@@ -658,21 +704,75 @@ fn chroma_stft(
     n_chroma: u32,
     tuning: f64,
 ) -> Result<Array2<f64>, ChromaError> {
-    // Standalone path receives linear magnitudes from `stft`; square them to
-    // match the input contract of `chroma_stft_with_filter`.
-    spectrum.mapv_inplace(|x| x * x);
-    let filter = chroma_filter(sample_rate, n_fft, n_chroma, tuning)?;
-    // Transpose to the contiguous `(n_bins, n_chroma)` layout and convert to
-    // the single-precision form expected by the matmul fast path.
-    let filter_t = filter.t().mapv(|x| x as f32);
+    // Standalone path: `spectrum` already holds squared magnitudes (squared
+    // by `compute_chroma_features` before tuning estimation).
+    //
+    // The filter depends only on (sample_rate, n_fft, n_chroma, tuning);
+    // cache it process-wide (keyed by quantized tuning, same as the
+    // extractor's per-instance cache) instead of rebuilding it per call.
+    let key: ChromaFilterKey = (sample_rate, n_fft, n_chroma, quantize_tuning(tuning));
+    let cache = CHROMA_FILTER_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let filter_t = {
+        let mut guard = cache.lock().expect("chroma filter cache poisoned");
+        match guard.get(&key) {
+            Some(f) => Arc::clone(f),
+            None => {
+                let filter = chroma_filter(sample_rate, n_fft, n_chroma, tuning)?;
+                // Transpose to a standard-layout, contiguous
+                // `(n_bins, n_chroma)` buffer in single precision: the
+                // matmul fast path indexes rows by flat offset, so an
+                // F-order `Array::t().mapv()` result would read scrambled
+                // data.
+                let mut f_t = Array2::<f32>::zeros((filter.shape()[1], filter.shape()[0]));
+                f_t.assign(&filter.t().mapv(|x| x as f32));
+                let f_t = Arc::new(f_t);
+                guard.insert(key, Arc::clone(&f_t));
+                f_t
+            }
+        }
+    };
     let n_frames = spectrum.shape()[1];
     let mut chroma_buf = vec![0.0_f32; n_chroma as usize * n_frames];
     chroma_stft_with_filter(&filter_t, spectrum, &mut chroma_buf)
 }
 
+/// Tuning is in the range [-0.5, 0.5) bins; quantize to 1e-4 bins so the
+/// filter caches key on an integer.
+fn quantize_tuning(tuning: f64) -> i64 {
+    (tuning * 10_000.0).round() as i64
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_chroma_matmul_non_multiple_of_4_rows() {
+        // n_chroma = 6 exercises the remainder path of the fast loop
+        // (previously the quad loop would index past the row end).
+        let n_bins = 3;
+        let n_chroma = 6;
+        let n_frames = 5;
+        let filter =
+            Array2::from_shape_fn((n_bins, n_chroma), |(i, r)| (i * n_chroma + r + 1) as f32);
+        let spectrum =
+            Array2::from_shape_fn((n_bins, n_frames), |(i, j)| (i * n_frames + j + 1) as f64);
+        let mut buf = vec![0.0f32; n_chroma * n_frames];
+        chroma_matmul(&filter, &spectrum, &mut buf);
+        // Reference: straightforward per-row accumulation (same order).
+        for r in 0..n_chroma {
+            for j in 0..n_frames {
+                let expected: f32 = (0..n_bins)
+                    .map(|i| filter[[i, r]] * spectrum[[i, j]] as f32)
+                    .sum();
+                assert!(
+                    (buf[r * n_frames + j] - expected).abs() < 1e-6,
+                    "mismatch at ({r}, {j}): got {}, expected {expected}",
+                    buf[r * n_frames + j]
+                );
+            }
+        }
+    }
 
     #[test]
     fn test_chroma_features_length() {
@@ -700,6 +800,144 @@ mod tests {
 
         for (expected, actual) in normalized.iter().zip(expected.iter()) {
             assert!((expected - actual).abs() < 1e-6);
+        }
+    }
+
+    fn reference_template_matrix() -> Array2<i32> {
+        arr2(&[
+            [1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
+            [1, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            [0, 1, 0, 0, 0, 0, 0, 0, 0, 0],
+            [0, 0, 1, 0, 0, 0, 0, 1, 1, 0],
+            [0, 0, 0, 1, 0, 0, 1, 0, 0, 1],
+            [0, 0, 0, 0, 1, 0, 0, 0, 0, 0],
+            [0, 0, 0, 0, 0, 1, 0, 0, 1, 0],
+            [0, 0, 0, 0, 0, 0, 1, 1, 0, 0],
+            [0, 0, 0, 0, 0, 0, 0, 0, 0, 1],
+            [0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            [0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            [0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        ])
+    }
+
+    fn synth_tones(freqs: &[f32], sr: u32, secs: f32) -> Vec<f32> {
+        let n = (sr as f32 * secs) as usize;
+        let mut out = vec![0.0f32; n];
+        let scale = 1.0 / freqs.len() as f32;
+        for &f in freqs {
+            for (i, s) in out.iter_mut().enumerate() {
+                *s += scale * (2.0 * std::f32::consts::PI * f * i as f32 / sr as f32).sin();
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn test_template_masks_match_template_columns() {
+        // TEMPLATE_MASKS must encode the COLUMNS of the template matrix
+        // (bit i set <=> row i of that column is 1).
+        let templates = reference_template_matrix();
+        for col in 0..templates.ncols() {
+            let mut mask = 0u16;
+            for row in 0..templates.nrows() {
+                if templates[[row, col]] != 0 {
+                    mask |= 1 << row;
+                }
+            }
+            assert_eq!(
+                TEMPLATE_MASKS[col], mask,
+                "mask for template column {col} does not match template matrix"
+            );
+        }
+    }
+
+    #[test]
+    fn test_chroma_major_triad_feature_dominates() {
+        // C4-E4-G4 major triad -> feature 6 (major triad template {0,4,7})
+        // must dominate the triad group [6..10].
+        let sr = 22050u32;
+        let signal = synth_tones(&[261.63, 329.63, 392.00], sr, 5.0);
+        let features = compute_chroma_features(&signal, sr).unwrap();
+        let triads = &features[6..10];
+        assert!(
+            triads[0] > triads[1] && triads[0] > triads[2] && triads[0] > triads[3],
+            "major triad feature should dominate: {triads:?}"
+        );
+    }
+
+    #[test]
+    fn test_chroma_minor_triad_feature_dominates() {
+        // C4-Eb4-G4 minor triad -> feature 7 (minor triad template {0,3,7})
+        // must dominate the triad group [6..10].
+        let sr = 22050u32;
+        let signal = synth_tones(&[261.63, 311.13, 392.00], sr, 5.0);
+        let features = compute_chroma_features(&signal, sr).unwrap();
+        let triads = &features[6..10];
+        assert!(
+            triads[1] > triads[0] && triads[1] > triads[2] && triads[1] > triads[3],
+            "minor triad feature should dominate: {triads:?}"
+        );
+    }
+
+    #[test]
+    fn test_chroma_dyad_major_third_feature_dominates() {
+        // C4-E4 dyad -> feature 3 (major third template {0,4}) must dominate
+        // the interval group [0..6].
+        let sr = 22050u32;
+        let signal = synth_tones(&[261.63, 329.63], sr, 5.0);
+        let features = compute_chroma_features(&signal, sr).unwrap();
+        let intervals = &features[0..6];
+        let argmax = intervals
+            .iter()
+            .enumerate()
+            .max_by(|a, b| a.1.total_cmp(b.1))
+            .map(|(i, _)| i)
+            .unwrap();
+        assert_eq!(argmax, 3, "interval features: {intervals:?}");
+    }
+
+    #[test]
+    fn test_chroma_short_signal_returns_err() {
+        // Shorter than half the window: reflect-padding would panic.
+        let signal = vec![0.5f32; 100];
+        let result = compute_chroma_features(&signal, 22050);
+        assert!(result.is_err(), "short signal should error, not panic");
+        let result = ChromaFeatureExtractor::new().compute(&signal, 22050);
+        assert!(result.is_err(), "short signal should error, not panic");
+    }
+
+    #[test]
+    fn test_chroma_exactly_half_window_returns_err() {
+        let signal = vec![0.5f32; WINDOW_SIZE / 2];
+        assert!(compute_chroma_features(&signal, 22050).is_err());
+        assert!(ChromaFeatureExtractor::new()
+            .compute(&signal, 22050)
+            .is_err());
+    }
+
+    #[test]
+    fn test_pip_track_few_bins_no_panic() {
+        // n_fft=4 at sr=600: the [150, 300) Hz freq mask selects only bin 1,
+        // so `end - 3` would underflow and `beginning..end - 3` would panic.
+        let spectrum = Array2::<f64>::ones((3, 4));
+        let result = pip_track(600, &spectrum, 4);
+        assert!(result.is_ok(), "pip_track should not panic: {result:?}");
+    }
+
+    #[test]
+    fn test_chroma_both_paths_agree() {
+        // compute_chroma_features (utils::stft) and ChromaFeatureExtractor::compute
+        // must produce matching features for the same input.
+        let sr = 22050u32;
+        let signal = synth_tones(&[442.0, 554.4, 659.3], sr, 5.0);
+        let a = compute_chroma_features(&signal, sr).unwrap();
+        let b = ChromaFeatureExtractor::new().compute(&signal, sr).unwrap();
+        assert_eq!(a.len(), b.len());
+        for (i, (&x, &y)) in a.iter().zip(&b).enumerate() {
+            assert!(
+                (x - y).abs() < 1e-3,
+                "feature {i} differs between paths: {x} vs {y}"
+            );
         }
     }
 

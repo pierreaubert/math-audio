@@ -89,6 +89,14 @@ fn white_noise_is_non_zero_and_bounded() {
 }
 
 #[test]
+fn white_noise_draws_independent_values_per_channel() {
+    let signal = signal_gallery(SignalType::WhiteNoise, N_SAMPLES, N_CHANNELS, FS);
+    assert!(
+        (0..N_SAMPLES).any(|sample| { signal.data[[0, sample, 0]] != signal.data[[0, sample, 1]] })
+    );
+}
+
+#[test]
 fn sweep_covers_frequency_range() {
     let signal = signal_gallery(
         SignalType::Sweep {

@@ -177,8 +177,11 @@ pub fn try_gen_log_sweep(
 /// * `f_end` - Ending frequency in Hz
 /// * `amp` - Amplitude (0.0 to 1.0)
 /// * `sample_rate` - Sample rate in Hz
-/// * `bass_octave_duration_s` - Seconds per octave below 100 Hz
+/// * `bass_octave_duration_s` - Seconds per octave below 100 Hz; values
+///   below 0.1 are clamped to 0.1 (zero/negative would otherwise yield a
+///   zero or negative time scale and a silently degenerate sweep)
 /// * `min_total_duration_s` - Lower bound on total sweep duration
+///   (values ≤ 0 mean "no floor")
 pub fn gen_log_sweep_octave_scaled(
     f_start: f32,
     f_end: f32,
@@ -194,7 +197,10 @@ pub fn gen_log_sweep_octave_scaled(
     const BASS_BOUNDARY: f64 = 100.0;
     const MID_BOUNDARY: f64 = 1000.0;
 
-    let bass_s_oct = bass_octave_duration_s as f64;
+    // Floor on the per-octave rate: a non-positive value would make the
+    // zone durations zero/negative and the stretch `scale` meaningless.
+    const MIN_BASS_OCTAVE_DURATION_S: f64 = 0.1;
+    let bass_s_oct = (bass_octave_duration_s as f64).max(MIN_BASS_OCTAVE_DURATION_S);
     let mid_s_oct = bass_s_oct * 0.5;
     let high_s_oct = bass_s_oct * 0.25;
 
@@ -324,9 +330,10 @@ pub fn gen_white_noise_seeded(
     for _ in 0..n_frames {
         // LCG constants from Numerical Recipes
         seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
-        // Convert to [-1, 1] range
-        // Mask to 32 bits to get proper range [0, u32::MAX]
-        let random_u32 = (seed & 0xFFFFFFFF) as u32;
+        // Fold the 64-bit state into 32 bits from the high end: the low
+        // bits of an LCG have short periods (bit k has period 2^(k+1)).
+        // Same extraction as gen_probe_spectrum.
+        let random_u32 = ((seed >> 33) ^ seed) as u32;
         let random = (random_u32 as f32 / u32::MAX as f32) * 2.0 - 1.0;
         signal.push(clip(amp * random));
     }
@@ -363,21 +370,26 @@ pub fn gen_pink_noise_seeded(amp: f32, sample_rate: u32, duration: f32, mut seed
     let mut b6 = 0.0f32;
 
     // Normalization factor derived from the filter coefficients.
-    // Each filter is y_i[n] = a_i*y_i[n-1] + b_i*w[n] driven by the same white
-    // noise w[n] (uniform [-1,1], variance 1/3). The total output variance is:
-    //   Var = Σ_ij b_i*b_j/(3*(1 - a_i*a_j))        (IIR cross-covariances)
-    //       + Σ_i 2*d*b_i/3                           (direct-IIR cross-terms)
-    //       + (d² + e²)/3                              (direct + delayed terms)
-    // where d=0.5362 (direct white gain) and e=0.115926 (delayed white gain).
-    // This gives RMS ≈ 1.744. Dividing by this matches the white noise RMS
-    // behavior: amp=1.0 produces output in [-1,1] with comparable RMS (~0.58).
-    const PINK_NORM: f32 = 1.0 / 1.744;
+    // Each filter is y_i[n] = a_i*y_i[n-1] + b_i*w[n] driven by the same
+    // white noise w[n] (uniform [-1,1], variance 1/3). The steady-state
+    // output variance is:
+    //   Var = Σ_ij b_i*b_j/(3*(1 - a_i*a_j))    (IIR auto/cross-covariances)
+    //       + Σ_i 2*d*b_i/3                      (direct-white ↔ IIR cross)
+    //       + Σ_i 2*e*a_i*b_i/3                  (delayed-white b6 ↔ IIR cross)
+    //       + (d² + e²)/3                         (direct + delayed white terms)
+    // where d=0.5362 (direct white gain) and e=0.115926 (delayed white
+    // gain, b6[n] = e*w[n-1]; cov(y_i[n], w[n-1]) = a_i*b_i/3). This gives
+    // RMS ≈ 1.7624. Dividing by this value makes RMS(output) ≈ amp for
+    // moderate amp (peaks still approach ±1 near amp=1.0, where clip()
+    // bounds them).
+    const PINK_NORM: f32 = 1.0 / 1.7624;
 
     for _ in 0..n_frames {
         // Generate white noise
         seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
-        // Mask to 32 bits to get proper range [0, u32::MAX]
-        let random_u32 = (seed & 0xFFFFFFFF) as u32;
+        // Fold the 64-bit state into 32 bits from the high end: the low
+        // bits of an LCG have short periods (bit k has period 2^(k+1)).
+        let random_u32 = ((seed >> 33) ^ seed) as u32;
         let white = (random_u32 as f32 / u32::MAX as f32) * 2.0 - 1.0;
 
         // Update pink noise state at different rates
@@ -450,7 +462,8 @@ pub fn gen_dirac(amp: f32, sample_rate: u32, duration: f32) -> Vec<f32> {
 /// Generate an impulse signal (first sample is amplitude, rest are zero)
 ///
 /// # Arguments
-/// * `amp` - Amplitude (0.0 to 1.0)
+/// * `amp` - Amplitude (clipped to ±0.999999 by `clip`, so amp ≥ 1.0
+///   produces a 0.999999 sample)
 /// * `sample_rate` - Sample rate in Hz
 /// * `duration` - Duration in seconds
 pub fn gen_impulse(amp: f32, sample_rate: u32, duration: f32) -> Vec<f32> {
@@ -465,7 +478,8 @@ pub fn gen_impulse(amp: f32, sample_rate: u32, duration: f32) -> Vec<f32> {
 /// Generate a step signal (all samples are amplitude)
 ///
 /// # Arguments
-/// * `amp` - Amplitude (0.0 to 1.0)
+/// * `amp` - Amplitude (clipped to ±0.999999 by `clip`, so amp ≥ 1.0
+///   produces 0.999999 samples)
 /// * `sample_rate` - Sample rate in Hz
 /// * `duration` - Duration in seconds
 pub fn gen_step(amp: f32, sample_rate: u32, duration: f32) -> Vec<f32> {
@@ -492,15 +506,6 @@ pub fn gen_m_noise_seeded(amp: f32, sample_rate: u32, duration: f32, mut seed: u
     let n_frames = frames_for(duration, sample_rate);
     let srate = sample_rate as f64;
 
-    // Generate white noise
-    let mut noise_buffer = Vec::with_capacity(n_frames);
-    for _ in 0..n_frames {
-        seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
-        let random_u32 = (seed & 0xFFFFFFFF) as u32;
-        let white = (random_u32 as f64 / u32::MAX as f64) * 2.0 - 1.0;
-        noise_buffer.push(white);
-    }
-
     // ITU-R 468 weighting approximation using cascaded biquad filters:
     //   - Highpass at 20 Hz removes sub-bass
     //   - Low shelf +5 dB at 100 Hz shapes the low-frequency rise
@@ -515,17 +520,23 @@ pub fn gen_m_noise_seeded(amp: f32, sample_rate: u32, duration: f32, mut seed: u
         Biquad::new(BiquadFilterType::Lowpass, 22000.0, srate, 0.0, 0.0),
     ];
 
+    // Stream the white noise straight through the biquad chain into the
+    // output — no intermediate noise buffer.
     let amp_f64 = amp as f64;
-    noise_buffer
-        .iter()
-        .map(|&sample| {
-            let mut s = sample;
-            for f in &mut filters {
-                s = f.process(s);
-            }
-            clip((amp_f64 * s) as f32)
-        })
-        .collect()
+    let mut out = Vec::with_capacity(n_frames);
+    for _ in 0..n_frames {
+        seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+        // Fold the 64-bit state into 32 bits from the high end: the low
+        // bits of an LCG have short periods (bit k has period 2^(k+1)).
+        let random_u32 = ((seed >> 33) ^ seed) as u32;
+        let white = (random_u32 as f64 / u32::MAX as f64) * 2.0 - 1.0;
+        let mut s = white;
+        for f in &mut filters {
+            s = f.process(s);
+        }
+        out.push(clip((amp_f64 * s) as f32));
+    }
+    out
 }
 
 /// Generate the frequency-domain spectrum for an allpass probe signal.
@@ -544,21 +555,25 @@ pub(super) fn gen_probe_spectrum(fft_size: usize, seed: u64) -> Vec<Complex<f32>
     spectrum[0] = Complex::new(1.0, 0.0);
 
     let mut phase: f32 = 0.0;
-    for bin in spectrum[1..spectrum_size - 1].iter_mut() {
-        // LCG step
-        rng_state = rng_state
-            .wrapping_mul(6364136223846793005)
-            .wrapping_add(1442695040888963407);
-        let random_u32 = ((rng_state >> 33) ^ rng_state) as u32;
-        let delta = (random_u32 as f32 / u32::MAX as f32) * max_delta;
-        phase += delta;
+    // fft_size 0/1/2 leave no interior bins between DC and Nyquist;
+    // skip the loop so the empty interior slice is never formed.
+    if spectrum_size > 2 {
+        for bin in spectrum[1..spectrum_size - 1].iter_mut() {
+            // LCG step
+            rng_state = rng_state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            let random_u32 = ((rng_state >> 33) ^ rng_state) as u32;
+            let delta = (random_u32 as f32 / u32::MAX as f32) * max_delta;
+            phase += delta;
 
-        let (sin_p, cos_p) = phase.sin_cos();
-        *bin = Complex::new(cos_p, sin_p);
+            let (sin_p, cos_p) = phase.sin_cos();
+            *bin = Complex::new(cos_p, sin_p);
 
-        // Avoid phase growing unboundedly (wrap at 2π)
-        if phase > 2.0 * PI {
-            phase -= 2.0 * PI;
+            // Avoid phase growing unboundedly (wrap at 2π)
+            if phase > 2.0 * PI {
+                phase -= 2.0 * PI;
+            }
         }
     }
 
@@ -579,7 +594,9 @@ pub(super) fn gen_probe_spectrum(fft_size: usize, seed: u64) -> Vec<Complex<f32>
 ///
 /// # Arguments
 /// * `n_frames` - Number of output samples (determines frequency resolution)
-/// * `sample_rate` - Sample rate in Hz
+/// * `sample_rate` - Sample rate in Hz; currently unused (the spectrum is
+///   allpass at every bin, so no Hz→bin mapping is needed). Kept for API
+///   symmetry with [`gen_narrowband_probe`], which does need it.
 /// * `amp` - Peak amplitude (signal is normalized to this)
 /// * `seed` - RNG seed for reproducible phase (same seed = same probe)
 pub fn gen_allpass_probe(n_frames: usize, _sample_rate: u32, amp: f32, seed: u64) -> Vec<f32> {
@@ -622,8 +639,13 @@ pub fn gen_allpass_probe(n_frames: usize, _sample_rate: u32, amp: f32, seed: u64
 /// * `sample_rate` - Sample rate in Hz
 /// * `amp` - Peak amplitude (signal is normalized to this)
 /// * `seed` - RNG seed (same seed as wideband = identical phase within passband)
-/// * `lo_hz` - Lower cutoff frequency in Hz
+/// * `lo_hz` - Lower cutoff frequency in Hz (negative values are clamped to 0)
 /// * `hi_hz` - Upper cutoff frequency in Hz
+///
+/// # Returns
+/// The probe signal, or an empty vector when `n_frames == 0` or the band
+/// is inverted (`lo_hz >= hi_hz`) — an inverted band would otherwise
+/// silently produce an all-zeros buffer.
 pub fn gen_narrowband_probe(
     n_frames: usize,
     sample_rate: u32,
@@ -632,9 +654,10 @@ pub fn gen_narrowband_probe(
     lo_hz: f32,
     hi_hz: f32,
 ) -> Vec<f32> {
-    if n_frames == 0 {
+    if n_frames == 0 || lo_hz >= hi_hz {
         return Vec::new();
     }
+    let lo_hz = lo_hz.max(0.0);
 
     let fft_size = n_frames;
     let spectrum_size = fft_size / 2 + 1;
@@ -654,7 +677,10 @@ pub fn gen_narrowband_probe(
             // Outside passband: zero
             fft.freq_buffer[k] = Complex::new(0.0, 0.0);
         } else {
-            // Inside passband: apply spectrum with optional taper at edges
+            // Inside passband: apply spectrum with tapers at the edges.
+            // When the band is narrower than ~2*taper_bins the two edge
+            // tapers overlap; they must compose (multiply), not overwrite,
+            // so the envelope stays symmetric around the band centre.
             let mut gain = 1.0_f32;
 
             // Lower edge taper (Hann half-window, rising from near-zero to 1.0)
@@ -662,14 +688,14 @@ pub fn gen_narrowband_probe(
             if k < lo_bin + taper_bins && k >= lo_bin {
                 // Use (taper_bins + 1) so edge bins get nonzero gain
                 let t = (k - lo_bin + 1) as f32 / (taper_bins + 1) as f32;
-                gain = 0.5 * (1.0 - (PI * t).cos());
+                gain *= 0.5 * (1.0 - (PI * t).cos());
             }
 
             // Upper edge taper (Hann half-window, falling from 1.0 to near-zero)
             let hi_bin = (hi_hz / freq_resolution).floor() as usize;
             if hi_bin >= taper_bins && k > hi_bin - taper_bins && k <= hi_bin {
                 let t = (hi_bin - k + 1) as f32 / (taper_bins + 1) as f32;
-                gain = 0.5 * (1.0 - (PI * t).cos());
+                gain *= 0.5 * (1.0 - (PI * t).cos());
             }
 
             fft.freq_buffer[k] = spectrum[k] * gain;
@@ -718,14 +744,18 @@ pub fn gen_bass_tone_burst(freq_hz: f32, num_cycles: u16, sample_rate: u32, amp:
     if n < 2 {
         return Vec::new();
     }
-    let omega = 2.0 * PI * freq_hz / sample_rate as f32;
+    let omega = 2.0 * std::f64::consts::PI * freq_hz as f64 / sample_rate as f64;
     let n_f = n as f32;
     (0..n)
         .map(|k| {
             let t = k as f32;
             // Hann envelope: (1 - cos(2π k / (n-1))) / 2
             let w = 0.5 * (1.0 - (2.0 * PI * t / (n_f - 1.0)).cos());
-            clip(amp * w * (omega * t).sin())
+            // f64 phase with 2π wrapping (same rationale as gen_log_sweep):
+            // the raw argument reaches ~7.5e6 rad for a long high-frequency
+            // burst, where f32 rounding alone would cost ~0.5 rad of phase.
+            let phase = (omega * k as f64) % (2.0 * std::f64::consts::PI);
+            clip(amp * w * phase.sin() as f32)
         })
         .collect()
 }
@@ -763,7 +793,7 @@ pub fn gen_steady_tone(
     if n < 2 * fade_n.max(1) {
         return Vec::new();
     }
-    let omega = 2.0 * PI * freq_hz / sample_rate as f32;
+    let omega = 2.0 * std::f64::consts::PI * freq_hz as f64 / sample_rate as f64;
     (0..n)
         .map(|k| {
             let env = if fade_n == 0 {
@@ -778,7 +808,11 @@ pub fn gen_steady_tone(
             } else {
                 1.0
             };
-            clip(amp * env * (omega * k as f32).sin())
+            // f64 phase with 2π wrapping (same rationale as gen_log_sweep):
+            // at 20 kHz a 60 s tone reaches ~7.5e6 rad, where f32 argument
+            // rounding alone would cost ~0.5 rad of phase error.
+            let phase = (omega * k as f64) % (2.0 * std::f64::consts::PI);
+            clip(amp * env * phase.sin() as f32)
         })
         .collect()
 }

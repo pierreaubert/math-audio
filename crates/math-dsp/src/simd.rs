@@ -1,3 +1,4 @@
+mod analog;
 mod apply;
 mod complex;
 mod flush;
@@ -8,6 +9,7 @@ mod scoped_ftz;
 mod tests;
 mod window;
 
+pub use analog::*;
 pub use apply::*;
 pub use complex::*;
 pub use flush::*;

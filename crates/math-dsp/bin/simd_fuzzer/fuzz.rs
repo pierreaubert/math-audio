@@ -315,14 +315,15 @@ pub(super) fn fuzz_apply_per_channel_gain(rng: &mut StdRng, iterations: usize) -
 pub(super) fn fuzz_compute_covariance(rng: &mut StdRng, iterations: usize) -> usize {
     let failures = AtomicUsize::new(0);
     for iter in 0..iterations {
-        let size = rand_size(rng).max(2); // need at least 2 for start < end
+        let size = rand_size(rng).max(1);
         let range = rand_value_range(rng);
 
         let left = rand_complex_vec(rng, size, range);
         let right = rand_complex_vec(rng, size, range);
 
-        let start = rng.random_range(0..size - 1);
-        let end = rng.random_range(start + 1..=size);
+        // Empty ranges (start == end) are valid and must return zeros.
+        let start = rng.random_range(0..size);
+        let end = rng.random_range(start..=size);
 
         let (simd_xx, simd_yy, simd_xy) = simd::compute_covariance_simd(&left, &right, start, end);
         let (scalar_xx, scalar_yy, scalar_xy) =

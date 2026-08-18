@@ -4,16 +4,21 @@ use super::heap_entry::HeapEntry;
 pub struct RtpghiProcessor {
     pub(super) fft_size: usize,
     pub(super) hop_size: usize,
-    /// Gamma parameter for the Gaussian-like window (Hann: gamma ≈ 0.25688 * fft_size²)
+    /// Gamma parameter for the Gaussian-like window
+    /// (Hann: gamma = Cg * fft_size² with Cg = 0.25645, per LTFAT `pghi_findgamma`)
     pub(super) gamma: f64,
     /// Previous frame log-magnitudes
     pub(super) prev_log_mag: Vec<f64>,
-    /// Previous frame phases
+    /// Previous frame phases (wrapped to (-pi, pi])
     pub(super) prev_phase: Vec<f64>,
     /// Whether we have a previous frame
     pub(super) has_prev: bool,
-    /// Tolerance for log-magnitude (bins below this are set to random phase)
+    /// Relative log-magnitude tolerance: bins more than `log_mag_tol` below the
+    /// frame maximum log-magnitude are skipped (LTFAT `tol = 1e-6` convention;
+    /// the value is a natural-log offset, so ln(1e-6) ≈ -13.8155)
     pub(super) log_mag_tol: f64,
+    /// Effective absolute log-magnitude threshold of the previous frame
+    pub(super) prev_tol: f64,
 
     // Pre-allocated scratch buffers for process_frame_into (zero-alloc hot path)
     pub(super) scratch_log_mag: Vec<f64>,
@@ -33,9 +38,9 @@ impl RtpghiProcessor {
     pub fn new(fft_size: usize, hop_size: usize) -> Self {
         let spectrum_size = fft_size / 2 + 1;
 
-        // Lambda parameter for Hann window approximated as Gaussian:
-        // lambda ≈ 0.17 * M^2 (from LTFAT reference implementation)
-        let gamma = 0.17 * (fft_size as f64) * (fft_size as f64);
+        // Gamma of a Hann window approximated as Gaussian:
+        // gamma = Cg * M^2 with Cg = 0.25645 (LTFAT `pghi_findgamma` table)
+        let gamma = 0.25645 * (fft_size as f64) * (fft_size as f64);
 
         Self {
             fft_size,
@@ -44,7 +49,9 @@ impl RtpghiProcessor {
             prev_log_mag: vec![f64::NEG_INFINITY; spectrum_size],
             prev_phase: vec![0.0; spectrum_size],
             has_prev: false,
-            log_mag_tol: -60.0, // -60 dB threshold
+            // ln(1e-6): keep bins within 1e-6 (-120 dB) of the frame maximum
+            log_mag_tol: -13.815_510_557_964_274,
+            prev_tol: f64::NEG_INFINITY,
             scratch_log_mag: vec![0.0; spectrum_size],
             scratch_phases: vec![0.0; spectrum_size],
             scratch_integrated: vec![false; spectrum_size],
@@ -100,6 +107,11 @@ impl RtpghiProcessor {
             };
         }
 
+        // Effective threshold: relative to the frame maximum magnitude
+        // (LTFAT `tol` convention; log_mag_tol = ln(1e-6) by default)
+        let frame_max = log_mag.iter().fold(f64::NEG_INFINITY, |acc, &v| acc.max(v));
+        let tol = frame_max + self.log_mag_tol;
+
         // Zero scratch
         for v in phases.iter_mut() {
             *v = 0.0;
@@ -112,6 +124,7 @@ impl RtpghiProcessor {
             // First frame: use zero phase
             self.prev_log_mag.copy_from_slice(log_mag);
             self.prev_phase.copy_from_slice(phases);
+            self.prev_tol = tol;
             self.has_prev = true;
             for (out, &p) in phases_out.iter_mut().zip(phases.iter()) {
                 *out = p as f32;
@@ -119,41 +132,40 @@ impl RtpghiProcessor {
             return;
         }
 
-        // Phase gradient estimation
-        let hop = self.hop_size as f64;
+        // Phase gradient estimation via the Cauchy-Riemann relations for a
+        // Gaussian-window STFT (LTFAT `comp_pghiphasegrad`):
+        //   tgrad = omega_k * a + (a*M/gamma) * d(log|F|)/d(bin)
+        //   fgrad = -(gamma/(a*M)) * d(log|F|)/d(frame)
+        let a = self.hop_size as f64;
         let two_pi = 2.0 * std::f64::consts::PI;
         let gamma = self.gamma;
-        let log_mag_tol = self.log_mag_tol;
-        let fft_size = self.fft_size;
+        let m = self.fft_size as f64;
+        let am_over_gamma = a * m / gamma;
+        let gamma_over_am = gamma / (a * m);
+        let prev_tol = self.prev_tol;
 
-        // Time-direction phase gradient
+        // Time-direction phase gradient: expected bin advance plus the
+        // frequency-direction log-magnitude slope
         for k in 0..spectrum_size {
-            let omega_k = two_pi * k as f64 / fft_size as f64;
-            let expected_advance = omega_k * hop;
-            let time_grad = if log_mag[k] > log_mag_tol && self.prev_log_mag[k] > log_mag_tol {
-                gamma * (log_mag[k] - self.prev_log_mag[k])
+            let omega_k = two_pi * k as f64 / m;
+            let expected_advance = omega_k * a;
+            let time_grad = if k > 0
+                && k + 1 < spectrum_size
+                && log_mag[k - 1] > tol
+                && log_mag[k + 1] > tol
+            {
+                am_over_gamma * (log_mag[k + 1] - log_mag[k - 1]) / 2.0
             } else {
                 0.0
             };
             d_phase_time[k] = expected_advance + time_grad;
         }
 
-        // Frequency-direction phase gradient
-        let inv_gamma = if gamma.abs() > 1e-30 {
-            1.0 / gamma
-        } else {
-            0.0
-        };
-        d_phase_freq[0] = 0.0;
-        if spectrum_size > 1 {
-            d_phase_freq[spectrum_size - 1] = 0.0;
-        }
-        for k in 1..spectrum_size.saturating_sub(1) {
-            d_phase_freq[k] = if log_mag[k] > log_mag_tol
-                && log_mag[k - 1] > log_mag_tol
-                && log_mag[k + 1] > log_mag_tol
-            {
-                inv_gamma * (log_mag[k + 1] - log_mag[k - 1]) / 2.0
+        // Frequency-direction phase gradient: minus the scaled time-direction
+        // log-magnitude slope
+        for k in 0..spectrum_size {
+            d_phase_freq[k] = if log_mag[k] > tol && self.prev_log_mag[k] > prev_tol {
+                -gamma_over_am * (log_mag[k] - self.prev_log_mag[k])
             } else {
                 0.0
             };
@@ -162,7 +174,7 @@ impl RtpghiProcessor {
         // Build sorted list by magnitude descending (reuse pre-allocated vec)
         self.scratch_heap.clear();
         for (k, &mag) in log_mag.iter().enumerate() {
-            if mag > log_mag_tol {
+            if mag > tol {
                 self.scratch_heap.push(HeapEntry {
                     magnitude: mag,
                     bin: k,
@@ -180,16 +192,31 @@ impl RtpghiProcessor {
                 continue;
             }
 
-            let phase_from_time = self.prev_phase[k] + d_phase_time[k];
+            // Time-direction estimate, brought onto the principal branch.
+            // Neighbor estimates are aligned to it before averaging so that
+            // values straddling the +/-pi wrap boundary do not cancel out.
+            let phase_from_time = (self.prev_phase[k] + d_phase_time[k] + std::f64::consts::PI)
+                .rem_euclid(two_pi)
+                - std::f64::consts::PI;
 
             let phase_from_freq_below = if k > 0 && integrated[k - 1] {
-                Some(phases[k - 1] + d_phase_freq[k - 1])
+                let est = phases[k - 1] + d_phase_freq[k - 1];
+                Some(
+                    phase_from_time
+                        + (est - phase_from_time + std::f64::consts::PI).rem_euclid(two_pi)
+                        - std::f64::consts::PI,
+                )
             } else {
                 None
             };
 
             let phase_from_freq_above = if k + 1 < spectrum_size && integrated[k + 1] {
-                Some(phases[k + 1] - d_phase_freq[k + 1])
+                let est = phases[k + 1] - d_phase_freq[k + 1];
+                Some(
+                    phase_from_time
+                        + (est - phase_from_time + std::f64::consts::PI).rem_euclid(two_pi)
+                        - std::f64::consts::PI,
+                )
             } else {
                 None
             };
@@ -197,21 +224,21 @@ impl RtpghiProcessor {
             let phase = match (phase_from_freq_below, phase_from_freq_above) {
                 (Some(below), Some(above)) => {
                     let avg = (below + above) / 2.0;
-                    if self.prev_log_mag[k] > log_mag_tol {
+                    if self.prev_log_mag[k] > prev_tol {
                         (avg + phase_from_time) / 2.0
                     } else {
                         avg
                     }
                 }
                 (Some(below), None) => {
-                    if self.prev_log_mag[k] > log_mag_tol {
+                    if self.prev_log_mag[k] > prev_tol {
                         (below + phase_from_time) / 2.0
                     } else {
                         below
                     }
                 }
                 (None, Some(above)) => {
-                    if self.prev_log_mag[k] > log_mag_tol {
+                    if self.prev_log_mag[k] > prev_tol {
                         (above + phase_from_time) / 2.0
                     } else {
                         above
@@ -220,7 +247,11 @@ impl RtpghiProcessor {
                 (None, None) => phase_from_time,
             };
 
-            phases[k] = phase;
+            // Wrap to (-pi, pi]: keeps prev_phase bounded so the f64 -> f32
+            // output conversion does not accumulate quantization error on
+            // long-running streams.
+            phases[k] =
+                (phase + std::f64::consts::PI).rem_euclid(two_pi) - std::f64::consts::PI;
             integrated[k] = true;
         }
 
@@ -234,6 +265,7 @@ impl RtpghiProcessor {
         // Store for next frame
         self.prev_log_mag.copy_from_slice(log_mag);
         self.prev_phase.copy_from_slice(phases);
+        self.prev_tol = tol;
 
         // Write output
         for (out, &p) in phases_out.iter_mut().zip(phases.iter()) {
@@ -245,6 +277,7 @@ impl RtpghiProcessor {
     pub fn reset(&mut self) {
         self.prev_log_mag.fill(f64::NEG_INFINITY);
         self.prev_phase.fill(0.0);
+        self.prev_tol = f64::NEG_INFINITY;
         self.has_prev = false;
     }
 
@@ -276,34 +309,40 @@ pub fn stretch_with_rtpghi(
 
     let num_input_frames = magnitude_frames.len();
     let num_output_frames = (num_input_frames as f64 * stretch_factor).ceil() as usize;
+    let spectrum_size = fft_size / 2 + 1;
 
-    // Interpolate magnitudes
-    let mut stretched_mags = Vec::with_capacity(num_output_frames);
+    // Reconstruct phases frame by frame, reusing the interpolation and phase
+    // buffers instead of allocating per output frame.
+    let mut processor = RtpghiProcessor::new(fft_size, hop_size);
+    let mut mag_buf = vec![0.0f32; spectrum_size];
+    let mut phases_out = vec![0.0f32; spectrum_size];
+    let mut phases = Vec::with_capacity(num_output_frames);
+
     for i in 0..num_output_frames {
         let src_pos = i as f64 / stretch_factor;
         let src_idx = src_pos.floor() as usize;
         let frac = (src_pos - src_idx as f64) as f32;
 
-        let frame = if src_idx + 1 < num_input_frames {
-            magnitude_frames[src_idx]
-                .iter()
+        // Interpolate magnitudes
+        if src_idx + 1 < num_input_frames {
+            for ((out, &a), &b) in mag_buf
+                .iter_mut()
+                .zip(&magnitude_frames[src_idx])
                 .zip(&magnitude_frames[src_idx + 1])
-                .map(|(&a, &b)| a * (1.0 - frac) + b * frac)
-                .collect()
+            {
+                *out = a * (1.0 - frac) + b * frac;
+            }
         } else if src_idx < num_input_frames {
-            magnitude_frames[src_idx].clone()
+            mag_buf.copy_from_slice(&magnitude_frames[src_idx]);
         } else {
-            magnitude_frames.last().unwrap().clone()
-        };
-        stretched_mags.push(frame);
+            mag_buf.copy_from_slice(magnitude_frames.last().unwrap());
+        }
+
+        processor.process_frame_into(&mag_buf, &mut phases_out);
+        phases.push(phases_out.clone());
     }
 
-    // Reconstruct phases
-    let mut processor = RtpghiProcessor::new(fft_size, hop_size);
-    stretched_mags
-        .iter()
-        .map(|mags| processor.process_frame(mags))
-        .collect()
+    phases
 }
 
 #[cfg(test)]
@@ -565,5 +604,206 @@ mod tests {
         for &p in &phases {
             assert_eq!(p, 0.0);
         }
+    }
+
+    /// B2: gamma must use the LTFAT `pghi_findgamma` Hann constant
+    /// Cg = 0.25645, i.e. gamma = 0.25645 * M^2.
+    #[test]
+    fn test_gamma_matches_hann_pghi_constant() {
+        for &fft_size in &[256usize, 1024, 4096] {
+            let processor = RtpghiProcessor::new(fft_size, fft_size / 4);
+            let cg = processor.gamma / (fft_size as f64 * fft_size as f64);
+            assert!(
+                (cg - 0.25645).abs() < 1e-4,
+                "gamma/M^2 for M={fft_size} is {cg}, expected Hann Cg = 0.25645"
+            );
+        }
+    }
+
+    /// B1: for a stationary off-bin sinusoid, the reconstructed phase in the
+    /// peak bins must advance at the TRUE tone frequency, not at the bin
+    /// center frequency.
+    #[test]
+    fn test_offbin_tone_phase_advances_at_true_frequency() {
+        let fft_size = 1024;
+        let hop_size = 256;
+        let sample_rate = 48000.0f64;
+        let tone_bin = 20.5f64; // exactly between bins 20 and 21
+        let freq = tone_bin * sample_rate / fft_size as f64;
+
+        let num_samples = 8192;
+        let signal: Vec<f32> = (0..num_samples)
+            .map(|i| (2.0 * std::f64::consts::PI * freq * i as f64 / sample_rate).sin() as f32)
+            .collect();
+
+        let mags = compute_stft_magnitudes(&signal, fft_size, hop_size);
+        assert!(mags.len() >= 10);
+
+        let mut processor = RtpghiProcessor::new(fft_size, hop_size);
+        let mut prev: Option<Vec<f32>> = None;
+        // True per-frame phase advance (mod 2*pi): 2*pi*tone_bin*hop/M
+        let true_advance =
+            (2.0 * std::f64::consts::PI * tone_bin * hop_size as f64 / fft_size as f64)
+                .rem_euclid(2.0 * std::f64::consts::PI);
+        let two_pi = 2.0 * std::f64::consts::PI;
+
+        for frame in &mags {
+            let phases = processor.process_frame(frame);
+            if let Some(prev_phases) = &prev {
+                for k in [20usize, 21] {
+                    let diff = (phases[k] as f64 - prev_phases[k] as f64).rem_euclid(two_pi);
+                    let err = (diff - true_advance)
+                        .rem_euclid(two_pi)
+                        .min((true_advance - diff).rem_euclid(two_pi));
+                    assert!(
+                        err < 0.1,
+                        "bin {k}: phase advanced by {diff} rad/frame, expected {true_advance} (err {err} rad)"
+                    );
+                }
+            }
+            prev = Some(phases);
+        }
+    }
+
+    /// B1 (end-to-end): stretch a stationary off-bin tone by a non-integer
+    /// factor through `stretch_with_rtpghi` and verify that the reconstructed
+    /// peak-bin phase keeps rotating at the TRUE tone rate (phasor coherence),
+    /// not at the bin-center rate.
+    #[test]
+    fn test_stretched_offbin_tone_phase_coherence() {
+        let fft_size = 1024;
+        let hop_size = 256;
+        let sample_rate = 48000.0f64;
+        let tone_bin = 20.5f64; // exactly between bins 20 and 21
+        let freq = tone_bin * sample_rate / fft_size as f64;
+
+        let num_samples = 16384;
+        let signal: Vec<f32> = (0..num_samples)
+            .map(|i| (2.0 * std::f64::consts::PI * freq * i as f64 / sample_rate).sin() as f32)
+            .collect();
+
+        let mags = compute_stft_magnitudes(&signal, fft_size, hop_size);
+        let phases = stretch_with_rtpghi(&mags, 1.5, fft_size, hop_size);
+        assert_eq!(phases.len(), (mags.len() as f64 * 1.5).ceil() as usize);
+
+        // Coherence of the bin-20 phase series against the expected rotation
+        // theta = 2*pi*tone_bin*hop/M per frame. With swapped/mis-scaled
+        // gradients the phase rotates at the bin-center rate and the series
+        // decorrelates (coherence ~ 0).
+        let two_pi = 2.0 * std::f64::consts::PI;
+        let theta = (two_pi * tone_bin * hop_size as f64 / fft_size as f64).rem_euclid(two_pi);
+        let (mut re, mut im, mut w) = (0.0f64, 0.0f64, 0.0f64);
+        for (n, ph) in phases.iter().enumerate().skip(2) {
+            let z = ph[20] as f64 - theta * n as f64;
+            re += z.cos();
+            im += z.sin();
+            w += 1.0;
+        }
+        let rho = (re * re + im * im).sqrt() / w;
+        assert!(
+            rho > 0.95,
+            "peak-bin phasor coherence {rho:.3}, expected > 0.95 (phase rotation is garbage otherwise)"
+        );
+    }
+
+    /// B3: bins more than 1e-6 (-120 dB) below the frame maximum must be
+    /// skipped (LTFAT relative `tol` convention), not integrated.
+    #[test]
+    fn test_quiet_bins_below_relative_threshold_are_skipped() {
+        let fft_size = 1024;
+        let hop_size = 256;
+        let spectrum_size = fft_size / 2 + 1;
+
+        let mut processor = RtpghiProcessor::new(fft_size, hop_size);
+        let prime = vec![1.0f32; spectrum_size];
+        let _ = processor.process_frame(&prime);
+
+        // One loud bin, everything else at 1e-9 of it (far below tol = 1e-6)
+        let mut mags = vec![1.0e-9f32; spectrum_size];
+        mags[101] = 1.0;
+        let phases = processor.process_frame(&mags);
+
+        // Loud bin: advance = 2*pi*101*256/1024 = 50.5*pi == pi/2 (mod 2*pi)
+        assert!(
+            (phases[101].abs() - std::f32::consts::FRAC_PI_2).abs() < 1e-3,
+            "loud bin phase should be pi/2, got {}",
+            phases[101]
+        );
+        // Quiet bins must be skipped: zero phase
+        for (k, &p) in phases.iter().enumerate() {
+            if k != 101 {
+                assert_eq!(p, 0.0, "bin {k} below relative threshold must be skipped");
+            }
+        }
+    }
+
+    /// B4: integrated phases must stay wrapped to (-pi, pi] no matter how many
+    /// frames have been processed.
+    #[test]
+    fn test_phases_stay_wrapped() {
+        let fft_size = 1024;
+        let hop_size = 256;
+        let sample_rate = 48000.0f64;
+        let freq = 20.5 * sample_rate / fft_size as f64;
+
+        let num_samples = 200 * hop_size + fft_size;
+        let signal: Vec<f32> = (0..num_samples)
+            .map(|i| (2.0 * std::f64::consts::PI * freq * i as f64 / sample_rate).sin() as f32)
+            .collect();
+        let mags = compute_stft_magnitudes(&signal, fft_size, hop_size);
+
+        let mut processor = RtpghiProcessor::new(fft_size, hop_size);
+        let bound = std::f32::consts::PI + 1e-4;
+        for (n, frame) in mags.iter().enumerate() {
+            let phases = processor.process_frame(frame);
+            for (k, &p) in phases.iter().enumerate() {
+                assert!(
+                    p.abs() <= bound,
+                    "frame {n} bin {k}: phase {p} escapes (-pi, pi]"
+                );
+            }
+        }
+    }
+
+    /// B4: even with a huge previously accumulated phase (simulating a
+    /// long-running stream), the output phase must remain accurate.
+    #[test]
+    fn test_phase_accuracy_after_large_accumulated_phase() {
+        let fft_size = 1024;
+        let hop_size = 256;
+        let sample_rate = 48000.0f64;
+        let tone_bin = 20.5f64;
+        let freq = tone_bin * sample_rate / fft_size as f64;
+
+        let num_samples = 4096;
+        let signal: Vec<f32> = (0..num_samples)
+            .map(|i| (2.0 * std::f64::consts::PI * freq * i as f64 / sample_rate).sin() as f32)
+            .collect();
+        let mags = compute_stft_magnitudes(&signal, fft_size, hop_size);
+
+        let mut processor = RtpghiProcessor::new(fft_size, hop_size);
+        let _ = processor.process_frame(&mags[0]);
+
+        // Simulate hours of accumulated unwrapped phase
+        for p in processor.prev_phase.iter_mut() {
+            *p = 1.0e9;
+        }
+
+        let phases = processor.process_frame(&mags[1]);
+
+        let two_pi = 2.0 * std::f64::consts::PI;
+        let true_advance =
+            (2.0 * std::f64::consts::PI * tone_bin * hop_size as f64 / fft_size as f64)
+                .rem_euclid(two_pi);
+        let expected = (1.0e9f64 + true_advance + std::f64::consts::PI).rem_euclid(two_pi)
+            - std::f64::consts::PI;
+        let got = phases[20] as f64;
+        let err = (got - expected)
+            .rem_euclid(two_pi)
+            .min((expected - got).rem_euclid(two_pi));
+        assert!(
+            err < 1e-2,
+            "peak bin phase {got} vs expected {expected} (err {err} rad) after large accumulation"
+        );
     }
 }

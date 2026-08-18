@@ -45,7 +45,9 @@ impl Sgd {
             }
         }
         for (p, g) in params.iter_mut().zip(grads) {
-            **p -= &(*g * self.lr);
+            ndarray::Zip::from(&mut **p)
+                .and(&**g)
+                .for_each(|parameter, &gradient| *parameter -= self.lr * gradient);
         }
         Ok(())
     }

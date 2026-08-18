@@ -75,28 +75,52 @@ pub fn read_analysis_csv(csv_path: &Path) -> Result<AnalysisResult, String> {
     let mut clarity_c80_db = Vec::new();
     let mut excess_group_delay_ms = Vec::new();
 
-    for line in lines {
+    for (row, line) in lines.enumerate() {
         let line = line.map_err(|e| format!("Failed to read line: {}", e))?;
-        let parts: Vec<&str> = line.split(',').map(|s| s.trim()).collect();
+        // Header is row 0; data rows start at line 2 of the file.
+        let line_no = row + 2;
 
-        if parts.len() < 3 {
+        // Skip blank lines (e.g. trailing whitespace-only lines)
+        if line.trim().is_empty() {
             continue;
         }
 
-        let freq: f32 = parts[0].parse().unwrap_or(0.0);
-        let spl: f32 = parts[1].parse().unwrap_or(0.0);
-        let phase: f32 = parts[2].parse().unwrap_or(0.0);
+        let parts: Vec<&str> = line.split(',').map(|s| s.trim()).collect();
 
-        frequencies.push(freq);
-        spl_db.push(spl);
-        phase_deg.push(phase);
+        if parts.len() < 3 {
+            return Err(format!(
+                "Malformed CSV at line {}: expected at least 3 columns, got {}",
+                line_no,
+                parts.len()
+            ));
+        }
+        if has_extended_format && parts.len() < 8 {
+            return Err(format!(
+                "Malformed CSV at line {}: extended format requires 8 columns, got {}",
+                line_no,
+                parts.len()
+            ));
+        }
 
-        if has_extended_format && parts.len() >= 8 {
-            thd_percent.push(parts[3].parse().unwrap_or(0.0));
-            rt60_ms.push(parts[4].parse().unwrap_or(0.0));
-            clarity_c50_db.push(parts[5].parse().unwrap_or(0.0));
-            clarity_c80_db.push(parts[6].parse().unwrap_or(0.0));
-            excess_group_delay_ms.push(parts[7].parse().unwrap_or(0.0));
+        let parse_field = |field: &str, name: &str| -> Result<f32, String> {
+            field.parse().map_err(|_| {
+                format!(
+                    "Malformed CSV at line {}: invalid {} value '{}'",
+                    line_no, name, field
+                )
+            })
+        };
+
+        frequencies.push(parse_field(parts[0], "frequency_hz")?);
+        spl_db.push(parse_field(parts[1], "spl_db")?);
+        phase_deg.push(parse_field(parts[2], "phase_deg")?);
+
+        if has_extended_format {
+            thd_percent.push(parse_field(parts[3], "thd_percent")?);
+            rt60_ms.push(parse_field(parts[4], "rt60_ms")?);
+            clarity_c50_db.push(parse_field(parts[5], "c50_db")?);
+            clarity_c80_db.push(parse_field(parts[6], "c80_db")?);
+            excess_group_delay_ms.push(parse_field(parts[7], "group_delay_ms")?);
         }
     }
 

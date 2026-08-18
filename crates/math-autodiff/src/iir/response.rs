@@ -162,23 +162,19 @@ where
 /// * `nfft` - FFT length.
 /// * `gamma` - anti-alias envelope `[gamma^0, gamma^1, gamma^2]`.
 ///
-/// # Panics
+/// # Errors
 ///
-/// Panics if `b` and `a` have different shapes.
-#[must_use]
+/// Returns an error if the coefficient tensors have incompatible shapes, the
+/// tap axis is not length three, or `nfft` is zero.
 pub fn sos_response(
     b: &Array4<Complex<f64>>,
     a: &Array4<Complex<f64>>,
     nfft: usize,
     gamma: &[f64; 3],
-) -> SosResponse {
-    assert_eq!(
-        b.dim(),
-        a.dim(),
-        "sos_response: b and a must have the same shape"
-    );
+) -> Result<SosResponse, AutodiffError> {
+    validate_sos_4d_inputs(b, a, nfft)?;
     let basis = SosFrequencyBasis::new(nfft, gamma);
-    sos_response_with_basis(b, a, &basis)
+    Ok(sos_response_with_basis(b, a, &basis))
 }
 
 pub(crate) fn sos_response_with_basis(
@@ -204,13 +200,40 @@ pub(crate) fn sos_coefficient_vjp_with_basis(
     h: &mut Array3<Complex<f64>>,
     b_response: &mut Array4<Complex<f64>>,
     a_response: &mut Array4<Complex<f64>>,
-) -> (Array4<f64>, Array4<f64>) {
+) -> Result<(Array4<f64>, Array4<f64>), AutodiffError> {
+    if b.dim() != a.dim() {
+        return Err(AutodiffError::Message(format!(
+            "sos_coefficient_vjp: b and a must have the same shape, got {:?} and {:?}",
+            b.dim(),
+            a.dim()
+        )));
+    }
     let (n_sections, _, n_out, n_in) = b.dim();
+    if b.shape()[1] != 3 {
+        return Err(AutodiffError::Message(format!(
+            "sos_coefficient_vjp: tap axis must be 3, got {}",
+            b.shape()[1]
+        )));
+    }
     let n_bins = basis.n_bins();
-    debug_assert_eq!(dl_dh.dim(), (n_bins, n_out, n_in));
-    debug_assert_eq!(h.dim(), (n_bins, n_out, n_in));
-    debug_assert_eq!(b_response.dim(), (n_sections, n_bins, n_out, n_in));
-    debug_assert_eq!(a_response.dim(), (n_sections, n_bins, n_out, n_in));
+    let expected_h = (n_bins, n_out, n_in);
+    let expected_response = (n_sections, n_bins, n_out, n_in);
+    if dl_dh.dim() != expected_h || h.dim() != expected_h {
+        return Err(AutodiffError::Message(format!(
+            "sos_coefficient_vjp: expected response-gradient shapes {:?}, got {:?} and {:?}",
+            expected_h,
+            dl_dh.dim(),
+            h.dim()
+        )));
+    }
+    if b_response.dim() != expected_response || a_response.dim() != expected_response {
+        return Err(AutodiffError::Message(format!(
+            "sos_coefficient_vjp: expected coefficient-response shapes {:?}, got {:?} and {:?}",
+            expected_response,
+            b_response.dim(),
+            a_response.dim()
+        )));
+    }
 
     h.fill(Complex::from(1.0));
     let mut has_zero_b = false;
@@ -231,12 +254,22 @@ pub(crate) fn sos_coefficient_vjp_with_basis(
     let b_tap_stride = b_strides[1].cast_unsigned();
     let b_out_stride = b_strides[2].cast_unsigned();
     let b_in_stride = b_strides[3].cast_unsigned();
+    let a_strides = a.strides();
+    let a_sec_stride = a_strides[0].cast_unsigned();
+    let a_tap_stride = a_strides[1].cast_unsigned();
+    let a_out_stride = a_strides[2].cast_unsigned();
+    let a_in_stride = a_strides[3].cast_unsigned();
 
     let resp_strides = b_response.strides();
     let resp_sec_stride = resp_strides[0].cast_unsigned();
     let resp_bin_stride = resp_strides[1].cast_unsigned();
     let resp_out_stride = resp_strides[2].cast_unsigned();
     let resp_in_stride = resp_strides[3].cast_unsigned();
+    let a_resp_strides = a_response.strides();
+    let a_resp_sec_stride = a_resp_strides[0].cast_unsigned();
+    let a_resp_bin_stride = a_resp_strides[1].cast_unsigned();
+    let a_resp_out_stride = a_resp_strides[2].cast_unsigned();
+    let a_resp_in_stride = a_resp_strides[3].cast_unsigned();
 
     let h_strides = h.strides();
     let h_bin_stride = h_strides[0].cast_unsigned();
@@ -275,9 +308,14 @@ pub(crate) fn sos_coefficient_vjp_with_basis(
                 for section in 0..n_sections {
                     let coeff_base =
                         section * b_sec_stride + out_ch * b_out_stride + in_ch * b_in_stride;
+                    let a_coeff_base =
+                        section * a_sec_stride + out_ch * a_out_stride + in_ch * a_in_stride;
                     let resp_base = section * resp_sec_stride
                         + out_ch * resp_out_stride
                         + in_ch * resp_in_stride;
+                    let a_resp_base = section * a_resp_sec_stride
+                        + out_ch * a_resp_out_stride
+                        + in_ch * a_resp_in_stride;
                     // SAFETY: coeff_base is built from bounded section/out/in and
                     // the three tap offsets (0/1/2) are inside the tap axis of length 3.
                     let (b0, b1, b2, a0, a1, a2) = unsafe {
@@ -285,9 +323,9 @@ pub(crate) fn sos_coefficient_vjp_with_basis(
                             *b_ptr.add(coeff_base),
                             *b_ptr.add(coeff_base + b_tap_stride),
                             *b_ptr.add(coeff_base + 2 * b_tap_stride),
-                            *a_ptr.add(coeff_base),
-                            *a_ptr.add(coeff_base + b_tap_stride),
-                            *a_ptr.add(coeff_base + 2 * b_tap_stride),
+                            *a_ptr.add(a_coeff_base),
+                            *a_ptr.add(a_coeff_base + a_tap_stride),
+                            *a_ptr.add(a_coeff_base + 2 * a_tap_stride),
                         )
                     };
                     for i in 0..SOS_BIN_CHUNK {
@@ -301,7 +339,7 @@ pub(crate) fn sos_coefficient_vjp_with_basis(
                         // bin dimension of length n_bins for this section/channel.
                         unsafe {
                             *b_resp_ptr.add(resp_base + bin * resp_bin_stride) = numerator;
-                            *a_resp_ptr.add(resp_base + bin * resp_bin_stride) = denominator;
+                            *a_resp_ptr.add(a_resp_base + bin * a_resp_bin_stride) = denominator;
                         }
                         num_chunk[i] *= numerator;
                         den_chunk[i] *= denominator;
@@ -335,18 +373,23 @@ pub(crate) fn sos_coefficient_vjp_with_basis(
                 for section in 0..n_sections {
                     let coeff_base =
                         section * b_sec_stride + out_ch * b_out_stride + in_ch * b_in_stride;
+                    let a_coeff_base =
+                        section * a_sec_stride + out_ch * a_out_stride + in_ch * a_in_stride;
                     let resp_base = section * resp_sec_stride
                         + out_ch * resp_out_stride
                         + in_ch * resp_in_stride;
+                    let a_resp_base = section * a_resp_sec_stride
+                        + out_ch * a_resp_out_stride
+                        + in_ch * a_resp_in_stride;
                     // SAFETY: same bounded coeff_base/tap offsets as above.
                     let (b0, b1, b2, a0, a1, a2) = unsafe {
                         (
                             *b_ptr.add(coeff_base),
                             *b_ptr.add(coeff_base + b_tap_stride),
                             *b_ptr.add(coeff_base + 2 * b_tap_stride),
-                            *a_ptr.add(coeff_base),
-                            *a_ptr.add(coeff_base + b_tap_stride),
-                            *a_ptr.add(coeff_base + 2 * b_tap_stride),
+                            *a_ptr.add(a_coeff_base),
+                            *a_ptr.add(a_coeff_base + a_tap_stride),
+                            *a_ptr.add(a_coeff_base + 2 * a_tap_stride),
                         )
                     };
                     let numerator = b0 * basis0 + b1 * basis1 + b2 * basis2;
@@ -354,7 +397,7 @@ pub(crate) fn sos_coefficient_vjp_with_basis(
                     // SAFETY: resp_base + bin*resp_bin_stride is in bounds.
                     unsafe {
                         *b_resp_ptr.add(resp_base + bin * resp_bin_stride) = numerator;
-                        *a_resp_ptr.add(resp_base + bin * resp_bin_stride) = denominator;
+                        *a_resp_ptr.add(a_resp_base + bin * a_resp_bin_stride) = denominator;
                     }
                     num_val *= numerator;
                     den_val *= denominator;
@@ -423,9 +466,9 @@ pub(crate) fn sos_coefficient_vjp_with_basis(
                     let b_base = section * resp_sec_stride
                         + out_ch * resp_out_stride
                         + in_ch * resp_in_stride;
-                    let a_base = section * resp_sec_stride
-                        + out_ch * resp_out_stride
-                        + in_ch * resp_in_stride;
+                    let a_base = section * a_resp_sec_stride
+                        + out_ch * a_resp_out_stride
+                        + in_ch * a_resp_in_stride;
                     let h_base = out_ch * h_out_stride + in_ch * h_in_stride;
                     let dl_base = out_ch * dl_out_stride + in_ch * dl_in_stride;
 
@@ -436,7 +479,7 @@ pub(crate) fn sos_coefficient_vjp_with_basis(
                     unsafe {
                         for bin in 0..n_bins {
                             let b_bin = *b_resp_ptr.add(b_base + bin * resp_bin_stride);
-                            let a_bin = *a_resp_ptr.add(a_base + bin * resp_bin_stride);
+                            let a_bin = *a_resp_ptr.add(a_base + bin * a_resp_bin_stride);
                             let h_bin = *h_ptr.add(h_base + bin * h_bin_stride);
                             let loss_gradient = (*dl_ptr.add(dl_base + bin * dl_bin_stride)).conj();
 
@@ -473,7 +516,7 @@ pub(crate) fn sos_coefficient_vjp_with_basis(
         }
     }
 
-    (db, da)
+    Ok((db, da))
 }
 
 fn sos_response_impl<S>(

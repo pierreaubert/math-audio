@@ -298,16 +298,39 @@ mod tests {
         let mut mt = vec![0.0; num_bins];
         let mut mr = vec![0.0; num_bins];
 
-        let signal = vec![1.0; num_bins];
-        sep.process(&signal, &mut mt, &mut mr);
+        // Prime the time history with loud, stable (tonal) data
+        let loud = vec![1.0; num_bins];
+        for _ in 0..10 {
+            sep.process(&loud, &mut mt, &mut mr);
+        }
 
         sep.reset();
 
-        // After reset, time history should be cleared
+        // After reset, time history must be cleared: processing a silence
+        // frame must give the same masks as a fresh separator, with no
+        // influence from the pre-reset loud frames.
         let silence = vec![0.01; num_bins];
         sep.process(&silence, &mut mt, &mut mr);
-        // Should not see influence from pre-reset data
-        // (tonal estimate from time-median should be ~0.01, not ~1.0)
+
+        let mut fresh = TonalTransientSeparator::new(num_bins, 5, 5);
+        let mut fmt = vec![0.0; num_bins];
+        let mut fmr = vec![0.0; num_bins];
+        fresh.process(&silence, &mut fmt, &mut fmr);
+
+        for bin in 0..num_bins {
+            assert!(
+                (mt[bin] - fmt[bin]).abs() < 1e-6,
+                "Tonal mask at bin {bin} differs from fresh separator: {} vs {} (pre-reset data leaked)",
+                mt[bin],
+                fmt[bin]
+            );
+            assert!(
+                (mr[bin] - fmr[bin]).abs() < 1e-6,
+                "Transient mask at bin {bin} differs from fresh separator: {} vs {} (pre-reset data leaked)",
+                mr[bin],
+                fmr[bin]
+            );
+        }
     }
 
     #[test]

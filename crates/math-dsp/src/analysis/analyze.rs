@@ -1,10 +1,8 @@
-use super::compute::compute_clarity_spectrum;
 use super::compute::compute_fft;
 use super::compute::compute_group_delay;
-use super::compute::compute_rt60_spectrum;
+use super::compute::compute_rt60_clarity_spectra;
 use super::compute::compute_single_fft_spectrum_internal;
 use super::compute::compute_spectrogram;
-use super::compute::compute_thd_from_ir;
 use super::compute::compute_welch_spectrum_into;
 use super::compute::with_welch_buffers;
 use super::estimate::estimate_lag_with_confidence;
@@ -12,7 +10,7 @@ use super::interpolate::interpolate_log;
 use super::interpolate::interpolate_log_phase;
 use super::load::load_wav_mono;
 use super::load::load_wav_mono_with_rate;
-use super::measurement::{analyze_ess_recording, effective_sweep_duration_seconds};
+use super::measurement::analyze_ess_recording;
 use super::misc::generate_log_frequencies;
 use super::misc::next_power_of_two;
 use super::misc::wav_next_power_of_two;
@@ -211,9 +209,8 @@ fn analysis_result_from_ess(ess: EssAnalysisResult, sample_rate: u32) -> Analysi
         .map(|curve| interpolate_log(&ess.frequencies, curve, &frequencies))
         .collect();
     let excess_group_delay_ms = compute_group_delay(&frequencies, &phase_deg);
-    let rt60_ms = compute_rt60_spectrum(&impulse_response, sample_rate as f32, &frequencies);
-    let (clarity_c50_db, clarity_c80_db) =
-        compute_clarity_spectrum(&impulse_response, sample_rate as f32, &frequencies);
+    let (rt60_ms, clarity_c50_db, clarity_c80_db) =
+        compute_rt60_clarity_spectra(&impulse_response, sample_rate as f32, &frequencies);
     let (spectrogram_db, _, _) =
         compute_spectrogram(&impulse_response, sample_rate as f32, 512, 128);
 
@@ -380,6 +377,10 @@ pub fn analyze_recording(
 
     // Apply 1/24 octave smoothing for each target frequency
     let mut skipped_count = 0;
+    // Loop-invariant 1/24 octave bandwidth factors: f * 2^(+/- 1/48).
+    let octave_fraction = 1.0 / 48.0;
+    let octave_factor_lower = 2.0_f32.powf(-octave_fraction);
+    let octave_factor_upper = 2.0_f32.powf(octave_fraction);
     for i in 0..num_output_points {
         // Log-spaced target frequency
         let target_freq =
@@ -387,9 +388,8 @@ pub fn analyze_recording(
 
         // 1/24 octave bandwidth: +/- 1/48 octave around target frequency
         // Lower and upper frequency bounds: f * 2^(+/- 1/48)
-        let octave_fraction = 1.0 / 48.0;
-        let freq_lower = target_freq * 2.0_f32.powf(-octave_fraction);
-        let freq_upper = target_freq * 2.0_f32.powf(octave_fraction);
+        let freq_lower = target_freq * octave_factor_lower;
+        let freq_upper = target_freq * octave_factor_upper;
 
         // Find FFT bins within this frequency range
         let bin_lower = ((freq_lower / freq_resolution).floor() as usize).max(1);
@@ -550,24 +550,13 @@ pub fn analyze_recording(
         .map(|i| i as f32 / sample_rate as f32 * 1000.0)
         .collect();
 
-    // --- Compute THD if sweep range is provided ---
-    let (thd_percent, harmonic_distortion_db) = if let Some((start, end)) = sweep_range {
-        // Assume sweep duration is same as impulse length (circular convolution)
-        // or derived from reference signal length
-        let duration = effective_sweep_duration_seconds(reference_signal, sample_rate)
-            .unwrap_or(reference_signal.len() as f32 / sample_rate as f32);
-        compute_thd_from_ir(
-            &impulse_response,
-            sample_rate as f32,
-            &frequencies,
-            &spl_db,
-            start,
-            end,
-            duration,
-        )
-    } else {
-        (vec![0.0; frequencies.len()], Vec::new())
-    };
+    // --- THD is only computed by the canonical ESS path ---
+    // `sweep_range = Some(..)` early-returns through `analyze_ess_recording`
+    // above, so this legacy transfer-function path always runs with
+    // `sweep_range = None` and reports zero THD: without sweep timing there
+    // is no Farina reference for separating harmonics in the IR.
+    let thd_percent = vec![0.0; frequencies.len()];
+    let harmonic_distortion_db = Vec::new();
 
     // --- Compute Excess Group Delay ---
     let excess_group_delay_ms = compute_group_delay(&frequencies, &phase_deg);
@@ -583,9 +572,8 @@ pub fn analyze_recording(
         sample_rate
     );
 
-    let rt60_ms = compute_rt60_spectrum(&impulse_response, sample_rate as f32, &frequencies);
-    let (clarity_c50_db, clarity_c80_db) =
-        compute_clarity_spectrum(&impulse_response, sample_rate as f32, &frequencies);
+    let (rt60_ms, clarity_c50_db, clarity_c80_db) =
+        compute_rt60_clarity_spectra(&impulse_response, sample_rate as f32, &frequencies);
 
     // Debug: Log computed metrics
     if !rt60_ms.is_empty() {

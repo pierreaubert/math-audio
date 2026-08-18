@@ -216,8 +216,11 @@ pub(super) fn estimate_rt60_broadband(impulse: &[f32], sample_rate: f32) -> Opti
 /// A Hann window is applied before the FFT to reduce spectral
 /// leakage that would otherwise push DC noise into every other bin
 /// and make bass SNR look healthier than it is.
+///
+/// Fewer than 2 samples cannot support a Hann window (division by
+/// `n - 1`); an empty vector is returned in that case.
 pub fn estimate_noise_floor_db_from_silence(silence: &[f32], _sample_rate: u32) -> Vec<f32> {
-    if silence.is_empty() {
+    if silence.len() < 2 {
         return Vec::new();
     }
     let n = silence.len();
@@ -243,12 +246,15 @@ pub fn estimate_noise_floor_db_from_silence(silence: &[f32], _sample_rate: u32) 
     // `m`, and Hann windowing multiplies that by its coherent gain
     // of `0.5` — so the windowed peak is `N/4`. Multiply by `4/N` to
     // recover the underlying sinusoid amplitude (and let
-    // `20·log10(mag)` match the tone's dBFS).
-    let norm = 4.0 / n as f32;
-
+    // `20·log10(mag)` match the tone's dBFS). DC and Nyquist are
+    // one-sided bins with no negative-frequency image to fold in, so
+    // they use `2/N` instead.
     buf.into_iter()
         .take(spectrum_size)
-        .map(|c| {
+        .enumerate()
+        .map(|(bin, c)| {
+            let one_sided = bin == 0 || (fft_size.is_multiple_of(2) && bin == fft_size / 2);
+            let norm = if one_sided { 2.0 / n as f32 } else { 4.0 / n as f32 };
             let mag = c.norm() * norm;
             if mag > 1e-20 {
                 20.0 * mag.log10()

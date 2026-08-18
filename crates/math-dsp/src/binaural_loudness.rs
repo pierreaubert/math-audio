@@ -129,7 +129,7 @@ impl BinauralLoudness {
     /// `prev_true_peak` resets after read, so we max-merge each call.
     fn refresh_cumulative_true_peak(&mut self) {
         for ch in 0..2u32 {
-            // prev_true_peak returns 0.0 when TRUE_PEAK mode is disabled.
+            // prev_true_peak errors when TRUE_PEAK mode is disabled; skip.
             if let Ok(p) = self.ebur128.prev_true_peak(ch) {
                 let i = ch as usize;
                 if p > self.cum_true_peak[i] {

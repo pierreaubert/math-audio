@@ -279,7 +279,7 @@ impl MicrophoneCompensation {
 
     /// Interpolate compensation value at a given frequency
     ///
-    /// Uses linear interpolation in dB domain.
+    /// Uses linear interpolation in the dB domain against log-frequency.
     /// Returns 0.0 for frequencies outside the calibration range.
     pub fn interpolate_at(&self, freq: f32) -> f32 {
         if self.frequencies.is_empty() || !freq.is_finite() || freq <= 0.0 {

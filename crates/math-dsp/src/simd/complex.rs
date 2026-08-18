@@ -152,9 +152,16 @@ pub fn complex_mul_add_simd_chunk(
 /// - AVX2 on x86-64 (4 complex at once)
 /// - NEON on aarch64 (2 complex at once)
 /// - Scalar fallback with auto-vectorization hints
+///
+/// # Panics
+/// Panics if `src` or `hrtf` are shorter than `dst` (the SIMD kernels index
+/// all three slices through raw pointers, so mismatched lengths would read
+/// out of bounds).
 #[inline]
 pub fn complex_mul_add_simd(dst: &mut [Complex<f32>], src: &[Complex<f32>], hrtf: &[Complex<f32>]) {
     let len = dst.len();
+    assert_eq!(src.len(), len, "src length must match dst length");
+    assert_eq!(hrtf.len(), len, "hrtf length must match dst length");
 
     #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
     {
@@ -205,9 +212,16 @@ pub fn complex_mul_add_simd(dst: &mut [Complex<f32>], src: &[Complex<f32>], hrtf
 /// SIMD-optimized complex multiplication (without accumulation)
 ///
 /// Computes: `dst[i] = src[i] * hrtf[i]` for all `i`
+///
+/// # Panics
+/// Panics if `src` or `hrtf` are shorter than `dst` (the SIMD kernels index
+/// all three slices through raw pointers, so mismatched lengths would read
+/// out of bounds).
 #[inline]
 pub fn complex_mul_simd(dst: &mut [Complex<f32>], src: &[Complex<f32>], hrtf: &[Complex<f32>]) {
     let len = dst.len();
+    assert_eq!(src.len(), len, "src length must match dst length");
+    assert_eq!(hrtf.len(), len, "hrtf length must match dst length");
 
     #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
     {
@@ -325,10 +339,15 @@ pub fn complex_mul_simd(dst: &mut [Complex<f32>], src: &[Complex<f32>], hrtf: &[
 /// SIMD-optimized in-place complex multiplication
 ///
 /// Computes: `dst[i] *= hrtf[i]` for all `i`
+///
+/// # Panics
+/// Panics if `hrtf` is shorter than `dst` (the SIMD kernels index both slices
+/// through raw pointers, so a mismatched length would read out of bounds).
 #[inline]
 #[allow(dead_code)]
 pub fn complex_mul_inplace_simd(dst: &mut [Complex<f32>], hrtf: &[Complex<f32>]) {
     let len = dst.len();
+    assert_eq!(hrtf.len(), len, "hrtf length must match dst length");
 
     #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
     {

@@ -434,9 +434,10 @@ impl DiffModule<f64> for SvFilter {
             )));
         }
 
-        // The inner filter must track the current physical parameters. We use a
-        // fresh copy so that `forward` remains callable on a shared reference.
-        let mut inner = self.inner.clone();
+        // The inner filter must track the current physical parameters. Build
+        // only the required SOS storage so the immutable forward path does not
+        // clone the reusable backward state.
+        let mut inner = SosFilter::new(self.nfft, 1, self.n_out, self.n_in, self.alias_decay_db)?;
         let n_params = self.filter_type.n_params();
         let param_view = self
             .param

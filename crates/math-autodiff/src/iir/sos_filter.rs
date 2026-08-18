@@ -21,7 +21,9 @@ use ndarray::{Array3, Array4, ArrayD, Axis, IxDyn};
 use num_complex::Complex;
 
 use crate::error::AutodiffError;
-use crate::iir::response::{sos_frequency_response, sos_response};
+use crate::iir::response::{
+    SosFrequencyBasis, sos_coefficient_vjp_with_basis, sos_frequency_response,
+};
 use crate::module::{DiffModule, validate_spectral_gradient_shape};
 use crate::tensor::DiffTensor;
 
@@ -57,7 +59,42 @@ fn split_param(
     Ok((b, a))
 }
 
+fn validate_stable_denominators(a: &Array4<Complex<f64>>) -> Result<(), AutodiffError> {
+    for section in 0..a.dim().0 {
+        for out_ch in 0..a.dim().2 {
+            for in_ch in 0..a.dim().3 {
+                let a0 = a[[section, 0, out_ch, in_ch]];
+                let a1 = a[[section, 1, out_ch, in_ch]];
+                let a2 = a[[section, 2, out_ch, in_ch]];
+                if !a0.is_finite() || a0.norm() <= f64::EPSILON {
+                    return Err(AutodiffError::Message(format!(
+                        "SosFilter: denominator section {section} has an invalid leading coefficient"
+                    )));
+                }
+                let discriminant = (a1 * a1 - Complex::from(4.0) * a0 * a2).sqrt();
+                let denominator = Complex::from(2.0) * a0;
+                let pole_a = (-a1 + discriminant) / denominator;
+                let pole_b = (-a1 - discriminant) / denominator;
+                if !pole_a.is_finite()
+                    || !pole_b.is_finite()
+                    || pole_a.norm() >= 1.0
+                    || pole_b.norm() >= 1.0
+                {
+                    return Err(AutodiffError::Message(format!(
+                        "SosFilter: denominator section {section} has an unstable pole"
+                    )));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Generic cascade of second-order sections with learnable coefficients.
+///
+/// The raw-coefficient interface intentionally exposes pole stability to the
+/// optimizer, but forward and backward reject non-finite or unit-circle poles
+/// with [`AutodiffError`] instead of producing NaNs.
 #[derive(Debug, Clone)]
 pub struct SosFilter {
     pub nfft: usize,
@@ -67,6 +104,11 @@ pub struct SosFilter {
     pub alias_decay_db: f64,
     pub param: ArrayD<f64>,
     pub param_grad: ArrayD<f64>,
+    work_h: Array3<Complex<f64>>,
+    work_b_response: Array4<Complex<f64>>,
+    work_a_response: Array4<Complex<f64>>,
+    work_dl_dh: Array3<Complex<f64>>,
+    work_grad_input: ArrayD<Complex<f64>>,
 }
 
 impl SosFilter {
@@ -124,6 +166,11 @@ impl SosFilter {
             alias_decay_db,
             param,
             param_grad: ArrayD::zeros(IxDyn(&[n_sections, 6, n_out, n_in])),
+            work_h: Array3::zeros((0, 0, 0)),
+            work_b_response: Array4::zeros((0, 0, 0, 0)),
+            work_a_response: Array4::zeros((0, 0, 0, 0)),
+            work_dl_dh: Array3::zeros((0, 0, 0)),
+            work_grad_input: ArrayD::zeros(IxDyn(&[])),
         })
     }
 
@@ -163,6 +210,7 @@ impl DiffModule<f64> for SosFilter {
         }
 
         let (b, a) = split_param(&self.param)?;
+        validate_stable_denominators(&a)?;
         let gamma = self.gamma();
         let h = sos_frequency_response(&b, &a, self.nfft, Some(&gamma))?;
 
@@ -188,6 +236,7 @@ impl DiffModule<f64> for SosFilter {
         Ok(DiffTensor::from_array(output))
     }
 
+    #[allow(clippy::too_many_lines)]
     fn backward(
         &mut self,
         input: &DiffTensor<f64>,
@@ -226,14 +275,29 @@ impl DiffModule<f64> for SosFilter {
         }
 
         let (b, a) = split_param(&self.param)?;
+        validate_stable_denominators(&a)?;
         let gamma = self.gamma();
-        let response = sos_response(&b, &a, self.nfft, &gamma);
-        let h = response.h;
-        let dh_db = response.dh_db;
-        let dh_da = response.dh_da;
+        let basis = SosFrequencyBasis::new(self.nfft, &gamma);
+
+        if self.work_dl_dh.dim() != (n_bins, n_out, n_in) {
+            self.work_dl_dh = Array3::zeros((n_bins, n_out, n_in));
+        }
+        if self.work_h.dim() != (n_bins, n_out, n_in) {
+            self.work_h = Array3::zeros((n_bins, n_out, n_in));
+        }
+        if self.work_b_response.dim() != (self.n_sections, n_bins, n_out, n_in) {
+            self.work_b_response = Array4::zeros((self.n_sections, n_bins, n_out, n_in));
+        }
+        if self.work_a_response.dim() != (self.n_sections, n_bins, n_out, n_in) {
+            self.work_a_response = Array4::zeros((self.n_sections, n_bins, n_out, n_in));
+        }
+        if self.work_grad_input.shape() != input_shape {
+            self.work_grad_input = ArrayD::zeros(IxDyn(input_shape));
+        }
+        self.work_dl_dh.fill(Complex::default());
+        self.work_grad_input.fill(Complex::default());
 
         // dL/dH[bin, out, in] = sum_b grad_output[b, bin, out] * conj(input[b, bin, in])
-        let mut dl_dh = Array3::<Complex<f64>>::zeros((n_bins, n_out, n_in));
         for bin in 0..n_bins {
             for out_ch in 0..n_out {
                 for in_ch in 0..n_in {
@@ -241,7 +305,7 @@ impl DiffModule<f64> for SosFilter {
                     let grad_bin = grad_slice.index_axis(Axis(1), out_ch);
                     let input_slice = input.data.index_axis(Axis(1), bin);
                     let input_bin = input_slice.index_axis(Axis(1), in_ch);
-                    dl_dh[[bin, out_ch, in_ch]] = grad_bin
+                    self.work_dl_dh[[bin, out_ch, in_ch]] = grad_bin
                         .iter()
                         .zip(input_bin.iter())
                         .map(|(g, x)| *g * x.conj())
@@ -250,42 +314,46 @@ impl DiffModule<f64> for SosFilter {
             }
         }
 
-        let mut param_grad = self
-            .param_grad
-            .view_mut()
-            .into_shape_with_order((self.n_sections, 6, self.n_out, self.n_in))
-            .map_err(|e| {
-                AutodiffError::Message(format!("SosFilter: failed to reshape param_grad: {e}"))
-            })?;
+        let (response_db, response_da) = sos_coefficient_vjp_with_basis(
+            &b,
+            &a,
+            &basis,
+            &self.work_dl_dh,
+            &mut self.work_h,
+            &mut self.work_b_response,
+            &mut self.work_a_response,
+        )?;
 
-        for section in 0..self.n_sections {
-            for out_ch in 0..n_out {
-                for in_ch in 0..n_in {
-                    for tap in 0..3 {
-                        let mut accum_b = 0.0;
-                        let mut accum_a = 0.0;
-                        for bin in 0..n_bins {
-                            let term = dl_dh[[bin, out_ch, in_ch]].conj();
-                            let db_term = term * dh_db[[bin, section, tap, out_ch, in_ch]];
-                            let da_term = term * dh_da[[bin, section, tap, out_ch, in_ch]];
-                            accum_b += db_term.re;
-                            accum_a += da_term.re;
+        {
+            let mut param_grad = self
+                .param_grad
+                .view_mut()
+                .into_shape_with_order((self.n_sections, 6, self.n_out, self.n_in))
+                .map_err(|e| {
+                    AutodiffError::Message(format!("SosFilter: failed to reshape param_grad: {e}"))
+                })?;
+
+            for section in 0..self.n_sections {
+                for out_ch in 0..n_out {
+                    for in_ch in 0..n_in {
+                        for tap in 0..3 {
+                            let accum_b = response_db[[section, tap, out_ch, in_ch]];
+                            let accum_a = response_da[[section, tap, out_ch, in_ch]];
+                            param_grad[[section, tap, out_ch, in_ch]] += accum_b;
+                            param_grad[[section, 3 + tap, out_ch, in_ch]] += accum_a;
                         }
-                        param_grad[[section, tap, out_ch, in_ch]] += accum_b;
-                        param_grad[[section, 3 + tap, out_ch, in_ch]] += accum_a;
                     }
                 }
             }
         }
-
-        let mut grad_input = ArrayD::zeros(IxDyn(input_shape));
+        let h = &self.work_h;
         for in_ch in 0..n_in {
             for out_ch in 0..n_out {
                 for bin in 0..n_bins {
                     let h_conj = h[[bin, out_ch, in_ch]].conj();
                     let grad_slice = grad_output.data.index_axis(Axis(1), bin);
                     let grad_bin = grad_slice.index_axis(Axis(1), out_ch);
-                    let mut input_grad_slice = grad_input.index_axis_mut(Axis(1), bin);
+                    let mut input_grad_slice = self.work_grad_input.index_axis_mut(Axis(1), bin);
                     let mut input_grad_bin = input_grad_slice.index_axis_mut(Axis(1), in_ch);
                     for (destination, &gradient) in input_grad_bin.iter_mut().zip(grad_bin.iter()) {
                         *destination += gradient * h_conj;
@@ -294,6 +362,7 @@ impl DiffModule<f64> for SosFilter {
             }
         }
 
+        let grad_input = std::mem::replace(&mut self.work_grad_input, ArrayD::zeros(IxDyn(&[])));
         Ok(DiffTensor::from_array(grad_input))
     }
 

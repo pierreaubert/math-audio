@@ -38,6 +38,37 @@ jobs:
       - name: cargo test (library)
         run: cargo test --lib --release
 
+  avx2-tests:
+    name: AVX2 SIMD Tests (math-dsp, x86_64)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-avx2-${{ hashFiles('**/Cargo.lock') }}
+
+      # Compile-only gate: guarantees the AVX2 kernels build even if the
+      # runner's CPU support ever changes.
+      - name: cargo check math-dsp with AVX2
+        run: cargo check -p math-dsp --all-targets
+        env:
+          RUSTFLAGS: -C target-feature=+avx2
+
+      # ubuntu-latest runners support AVX2, so the kernels are executed.
+      - name: cargo test math-dsp with AVX2
+        run: cargo test -p math-dsp
+        env:
+          RUSTFLAGS: -C target-feature=+avx2
+
   qa-math:
     name: Math Audio QA
     runs-on: ubuntu-latest

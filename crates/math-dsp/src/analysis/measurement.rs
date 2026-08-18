@@ -303,19 +303,27 @@ pub fn average_deconvolved_sweeps(
         });
     }
 
+    let num_realizations = realizations.len();
+    // Reusable scratch buffers: recordings are typically <= 8 channels, so a
+    // fill-and-sort per bin on a hoisted buffer beats two fresh Vec per bin.
+    let mut scratch_re = Vec::with_capacity(num_realizations);
+    let mut scratch_im = Vec::with_capacity(num_realizations);
     let mut medians_re = Vec::with_capacity(bins);
     let mut medians_im = Vec::with_capacity(bins);
     for bin in 0..bins {
-        let mut real: Vec<f32> = realizations.iter().map(|value| value[bin].re).collect();
-        let mut imag: Vec<f32> = realizations.iter().map(|value| value[bin].im).collect();
-        medians_re.push(median(&mut real));
-        medians_im.push(median(&mut imag));
+        scratch_re.clear();
+        scratch_im.clear();
+        scratch_re.extend(realizations.iter().map(|value| value[bin].re));
+        scratch_im.extend(realizations.iter().map(|value| value[bin].im));
+        medians_re.push(median(&mut scratch_re));
+        medians_im.push(median(&mut scratch_im));
     }
 
+    let mut distances = Vec::with_capacity(bins);
     let scores: Vec<f32> = realizations
         .iter()
         .map(|realization| {
-            let mut distances = Vec::with_capacity(bins);
+            distances.clear();
             for bin in 0..bins {
                 let center = Complex::new(medians_re[bin], medians_im[bin]);
                 let scale = center.norm().max(1e-6);
@@ -324,12 +332,15 @@ pub fn average_deconvolved_sweeps(
             median(&mut distances)
         })
         .collect();
-    let center_score = median(&mut scores.clone());
-    let deviations: Vec<f32> = scores
+    // `scores` is needed below, so median over a reusable sorted copy.
+    scratch_re.clear();
+    scratch_re.extend_from_slice(&scores);
+    let center_score = median(&mut scratch_re);
+    let mut deviations: Vec<f32> = scores
         .iter()
         .map(|score| (score - center_score).abs())
         .collect();
-    let mad = median(&mut deviations.clone());
+    let mad = median(&mut deviations);
     let threshold = center_score + 3.0 * mad.max(1e-6);
     let accepted_indices: Vec<usize> = scores
         .iter()

@@ -45,10 +45,17 @@ impl EbuR128 {
     /// Create a new EBU R128 loudness meter.
     ///
     /// # Errors
-    /// Returns an error if channels is 0.
+    /// Returns an error if channels is 0 or if the sample rate is outside
+    /// the libebur128-validated range 16..=2822400 Hz. (Below 16 Hz the
+    /// 100 ms sub-block would contain 0 frames and produce NaN energies.)
     pub fn new(channels: u32, sample_rate: u32, mode: Mode) -> Result<Self, String> {
         if channels == 0 {
             return Err("channels must be > 0".into());
+        }
+        if !(16..=2_822_400).contains(&sample_rate) {
+            return Err(format!(
+                "sample_rate must be in 16..=2822400 Hz, got {sample_rate}"
+            ));
         }
         let nc = channels as usize;
         let sub_block_frames = (sample_rate as usize) / 10; // 100ms
@@ -101,6 +108,11 @@ impl EbuR128 {
             return Err("samples length must be a multiple of channel count".into());
         }
 
+        // K-weighting only feeds the loudness paths (M/S/I). Peak-only
+        // metering skips the per-sample biquads entirely.
+        let k_weighting =
+            self.mode.has(Mode::M) || self.mode.has(Mode::S) || self.mode.has(Mode::I);
+
         for frame in samples.chunks_exact(nc) {
             for (ch, &s) in frame.iter().enumerate() {
                 let x = s as f64;
@@ -122,8 +134,10 @@ impl EbuR128 {
                 }
 
                 // K-weighting
-                let y = self.filters[ch].process(x);
-                self.sub_block_accum[ch] += y * y;
+                if k_weighting {
+                    let y = self.filters[ch].process(x);
+                    self.sub_block_accum[ch] += y * y;
+                }
             }
 
             self.sub_block_pos += 1;
@@ -172,8 +186,13 @@ impl EbuR128 {
     }
 
     /// Momentary loudness (400ms window) in LUFS.
+    ///
+    /// Returns NaN if the measurement is NaN-contaminated (e.g. a NaN input
+    /// sample poisoned the K-weighting filter state) rather than silently
+    /// reporting -inf.
     pub fn loudness_momentary(&self) -> Result<f64, String> {
         match self.momentary_ring.mean() {
+            Some(e) if e.is_nan() => Ok(f64::NAN),
             Some(e) if e > 0.0 => Ok(energy_to_loudness(e)),
             Some(_) => Ok(f64::NEG_INFINITY),
             None => Ok(f64::NEG_INFINITY),
@@ -181,8 +200,12 @@ impl EbuR128 {
     }
 
     /// Short-term loudness (3s window) in LUFS.
+    ///
+    /// Returns NaN if the measurement is NaN-contaminated (see
+    /// [`loudness_momentary`](Self::loudness_momentary)).
     pub fn loudness_shortterm(&self) -> Result<f64, String> {
         match self.shortterm_ring.mean() {
+            Some(e) if e.is_nan() => Ok(f64::NAN),
             Some(e) if e > 0.0 => Ok(energy_to_loudness(e)),
             Some(_) => Ok(f64::NEG_INFINITY),
             None => Ok(f64::NEG_INFINITY),
@@ -204,6 +227,11 @@ impl EbuR128 {
         if blocks.is_empty() {
             return f64::NEG_INFINITY;
         }
+        // NaN-contaminated measurement: surface it instead of silently
+        // dropping NaN blocks at the gates.
+        if blocks.iter().any(|e| e.is_nan()) {
+            return f64::NAN;
+        }
 
         // Pass 1: Absolute gate at -70 LUFS
         let abs_gate_energy = loudness_to_energy(-70.0);
@@ -221,8 +249,10 @@ impl EbuR128 {
 
         let mean_above_abs = sum_abs / count_abs as f64;
 
-        // Pass 2: Relative gate at mean - 10 LUFS
-        let rel_gate_energy = mean_above_abs * loudness_to_energy(-10.0); // -10 dB below mean
+        // Pass 2: Relative gate at mean - 10 LU.
+        // Per BS.1770 / libebur128 the factor is 10^(-10/10) = 0.1 exactly;
+        // the -0.691 absolute offset must not leak into the relative factor.
+        let rel_gate_energy = mean_above_abs * 0.1;
         let mut sum_rel = 0.0f64;
         let mut count_rel = 0usize;
         for &e in blocks {
@@ -240,20 +270,34 @@ impl EbuR128 {
     }
 
     /// Sample peak for a given channel (maximum absolute sample value seen).
+    ///
+    /// # Errors
+    /// Returns an error if the channel is out of range or if
+    /// [`Mode::SAMPLE_PEAK`] was not enabled for this meter.
     pub fn sample_peak(&self, channel: u32) -> Result<f64, String> {
         let ch = channel as usize;
         if ch >= self.channels as usize {
             return Err(format!("channel {} out of range", channel));
+        }
+        if !self.mode.has(Mode::SAMPLE_PEAK) {
+            return Err("sample peak queried but Mode::SAMPLE_PEAK is not enabled".into());
         }
         Ok(self.sample_peak[ch])
     }
 
     /// Previous sample peak for a given channel (since last snapshot).
     /// Resets the stored value after reading (snapshot-and-reset semantics).
+    ///
+    /// # Errors
+    /// Returns an error if the channel is out of range or if
+    /// [`Mode::SAMPLE_PEAK`] was not enabled for this meter.
     pub fn prev_sample_peak(&mut self, channel: u32) -> Result<f64, String> {
         let ch = channel as usize;
         if ch >= self.channels as usize {
             return Err(format!("channel {} out of range", channel));
+        }
+        if !self.mode.has(Mode::SAMPLE_PEAK) {
+            return Err("sample peak queried but Mode::SAMPLE_PEAK is not enabled".into());
         }
         let val = self.prev_sample_peak[ch];
         self.prev_sample_peak[ch] = 0.0;
@@ -262,6 +306,10 @@ impl EbuR128 {
 
     /// Previous true peak for a given channel (since last snapshot).
     /// Resets the stored value after reading (snapshot-and-reset semantics).
+    ///
+    /// # Errors
+    /// Returns an error if the channel is out of range or if
+    /// [`Mode::TRUE_PEAK`] was not enabled for this meter.
     pub fn prev_true_peak(&mut self, channel: u32) -> Result<f64, String> {
         let ch = channel as usize;
         if ch >= self.channels as usize {
@@ -273,7 +321,7 @@ impl EbuR128 {
                 tp.prev_peak[ch] = 0.0;
                 Ok(val)
             }
-            None => Ok(0.0),
+            None => Err("true peak queried but Mode::TRUE_PEAK is not enabled".into()),
         }
     }
 
@@ -284,21 +332,25 @@ impl EbuR128 {
             return None;
         }
 
-        // Use blocks above absolute gate for consistency with loudness_global
+        // Use blocks above absolute gate for consistency with loudness_global.
+        // Zero-allocation sum+count, same pattern as compute_gated_loudness.
         let abs_gate_energy = loudness_to_energy(-70.0);
-        let above_abs: Vec<f64> = self
-            .gating_blocks
-            .iter()
-            .copied()
-            .filter(|&e| e > abs_gate_energy)
-            .collect();
-        if above_abs.is_empty() {
+        let mut sum_abs = 0.0f64;
+        let mut count_abs = 0usize;
+        for &e in &self.gating_blocks {
+            if e > abs_gate_energy {
+                sum_abs += e;
+                count_abs += 1;
+            }
+        }
+        if count_abs == 0 {
             return None;
         }
-        let mean_above_abs = above_abs.iter().sum::<f64>() / above_abs.len() as f64;
+        let mean_above_abs = sum_abs / count_abs as f64;
 
-        // Relative gate
-        let rel_gate_energy = mean_above_abs * loudness_to_energy(-10.0);
+        // Relative gate at mean - 10 LU (factor 10^(-10/10) = 0.1 exactly,
+        // matching compute_gated_loudness and libebur128)
+        let rel_gate_energy = mean_above_abs * 0.1;
         let mut count: u64 = 0;
         let mut total_energy: f64 = 0.0;
         for &e in &self.gating_blocks {
@@ -313,6 +365,21 @@ impl EbuR128 {
         } else {
             Some((count, total_energy))
         }
+    }
+
+    /// Weighted 400 ms block energies above the absolute gate (-70 LUFS),
+    /// without applying the per-track relative gate.
+    ///
+    /// Used for strict BS.1770 pooled album gating: pool these blocks across
+    /// all tracks of an album, then apply a single relative gate to the pool
+    /// (see `replaygain::compute_album_gain_pooled`).
+    pub fn gating_blocks_above_absolute_gate(&self) -> Vec<f64> {
+        let abs_gate_energy = loudness_to_energy(-70.0);
+        self.gating_blocks
+            .iter()
+            .copied()
+            .filter(|&e| e > abs_gate_energy)
+            .collect()
     }
 
     /// Reset all state (filters, accumulators, peaks, gating blocks).

@@ -1,6 +1,11 @@
 use num_complex::Complex64;
 use rustfft::FftPlanner;
+use std::cell::RefCell;
 use std::f64::consts::PI;
+
+thread_local! {
+    static FFT_PLANNER: RefCell<FftPlanner<f64>> = RefCell::new(FftPlanner::new());
+}
 
 /// Convert an RFFT half-spectrum into a real FIR.
 ///
@@ -34,8 +39,7 @@ pub fn half_spectrum_to_fir(
         spectrum[fft_size - bin] = spectrum[bin].conj();
     }
 
-    let mut planner = FftPlanner::<f64>::new();
-    let fft = planner.plan_fft_inverse(fft_size);
+    let fft = FFT_PLANNER.with(|planner| planner.borrow_mut().plan_fft_inverse(fft_size));
     fft.process(&mut spectrum);
 
     Ok(spectrum
@@ -72,8 +76,7 @@ pub fn deconvolve_sweep_to_ir(
         return Err("recording and reference must contain only finite samples".to_string());
     }
     let mut y = crate::analysis::deconvolve_sweep_f64_spectrum(recording, reference, fft_size)?;
-    let mut planner = FftPlanner::<f64>::new();
-    let ifft = planner.plan_fft_inverse(fft_size);
+    let ifft = FFT_PLANNER.with(|planner| planner.borrow_mut().plan_fft_inverse(fft_size));
     ifft.process(&mut y);
     Ok(y.into_iter().map(|v| v.re / fft_size as f64).collect())
 }
@@ -110,10 +113,9 @@ pub fn fdw_complex_half_spectrum(
     let mut out = Vec::with_capacity(num_bins);
     for bin in 0..num_bins {
         let freq = bin as f64 * sample_rate / fft_size as f64;
-        if bin == 0 {
-            out.push(Complex64::new(ir.iter().sum::<f64>(), 0.0));
-            continue;
-        }
+        // At DC (bin 0) cycles/freq is infinite, so the clamp selects
+        // `max_window_ms` and the phase term below is 1: the DC bin is the
+        // same Hann-windowed segment around `direct_sample` as all other bins.
         let window_ms = ((cycles / freq) * 1000.0).clamp(min_window_ms, max_window_ms);
         let half = ((window_ms / 1000.0) * sample_rate * 0.5).round().max(1.0) as isize;
         let center = direct_sample.min(ir.len() - 1) as isize;
@@ -164,8 +166,7 @@ pub(super) fn real_fft_half_spectrum(input: &[f64], fft_size: usize) -> Vec<Comp
     for idx in 0..copy_len {
         buffer[idx] = Complex64::new(input[idx], 0.0);
     }
-    let mut planner = FftPlanner::<f64>::new();
-    let fft = planner.plan_fft_forward(fft_size);
+    let fft = FFT_PLANNER.with(|planner| planner.borrow_mut().plan_fft_forward(fft_size));
     fft.process(&mut buffer);
     buffer.truncate(fft_size / 2 + 1);
     buffer

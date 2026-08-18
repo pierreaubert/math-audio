@@ -77,9 +77,12 @@ impl KWeightFilter {
         let k2sq = k2 * k2;
         let denom2 = 1.0 + k2 / q2 + k2sq;
         let s2 = Biquad {
-            b0: 1.0 / denom2,
-            b1: -2.0 / denom2,
-            b2: 1.0 / denom2,
+            // Per BS.1770-4 / libebur128 the numerator stays unnormalised
+            // [1, -2, 1]; only the denominator is divided by denom2. This
+            // makes compute_coeffs(48000) reproduce coeffs_48k().
+            b0: 1.0,
+            b1: -2.0,
+            b2: 1.0,
             a1: 2.0 * (k2sq - 1.0) / denom2,
             a2: (1.0 - k2 / q2 + k2sq) / denom2,
             z1: 0.0,

@@ -38,6 +38,92 @@ fn generate_test_sweep(
 }
 
 #[test]
+fn test_load_wav_mono_int_pcm_respects_bits_per_sample() {
+    // Integer PCM must be normalized by 1 << (bits_per_sample - 1):
+    // hound sign-extends 16/24-bit samples into i32 without left-shifting,
+    // so dividing by i32::MAX would make 16-bit files ~96 dB too quiet.
+    let dir = std::env::temp_dir().join(format!("sotf_test_pcm_norm_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+
+    // 16-bit PCM at half full scale
+    let path16 = dir.join("half16.wav");
+    let spec16 = hound::WavSpec {
+        channels: 1,
+        sample_rate: 48000,
+        bits_per_sample: 16,
+        sample_format: hound::SampleFormat::Int,
+    };
+    let mut writer = hound::WavWriter::create(&path16, spec16).unwrap();
+    let half_scale_16 = (0.5 * i16::MAX as f32) as i16;
+    for _ in 0..100 {
+        writer.write_sample(half_scale_16).unwrap();
+    }
+    writer.finalize().unwrap();
+
+    let samples = super::super::load::load_wav_mono(&path16).unwrap();
+    let peak = samples.iter().fold(0.0_f32, |a, &b| a.max(b.abs()));
+    assert!(
+        (peak - 0.5).abs() < 1e-3,
+        "16-bit half-scale should load as ~0.5, got {peak}"
+    );
+
+    // 24-bit PCM at quarter full scale
+    let path24 = dir.join("quarter24.wav");
+    let spec24 = hound::WavSpec {
+        channels: 1,
+        sample_rate: 48000,
+        bits_per_sample: 24,
+        sample_format: hound::SampleFormat::Int,
+    };
+    let mut writer = hound::WavWriter::create(&path24, spec24).unwrap();
+    let quarter_scale_24: i32 = 1 << 21; // 0.25 * 2^23
+    for _ in 0..100 {
+        writer.write_sample(quarter_scale_24).unwrap();
+    }
+    writer.finalize().unwrap();
+
+    let samples = super::super::load::load_wav_mono(&path24).unwrap();
+    let peak = samples.iter().fold(0.0_f32, |a, &b| a.max(b.abs()));
+    assert!(
+        (peak - 0.25).abs() < 1e-4,
+        "24-bit quarter-scale should load as ~0.25, got {peak}"
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn test_analyze_recording_legacy_path_reports_zero_thd() {
+    // The legacy (non-ESS) path has no sweep-timing reference for Farina
+    // harmonic separation; THD is only produced by the canonical ESS path
+    // (sweep_range = Some). Document that the legacy result reports zeros.
+    let sample_rate = 48000;
+    let reference = generate_test_sweep(20.0, 20000.0, 0.5, sample_rate, 0.5);
+    let delay = 64;
+    let mut recorded = vec![0.0_f32; reference.len() + delay];
+    for (i, &s) in reference.iter().enumerate() {
+        recorded[i + delay] = s * 0.5;
+    }
+
+    let dir = std::env::temp_dir().join(format!("sotf_test_legacy_thd_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let wav_path = dir.join("legacy.wav");
+    write_test_wav(&wav_path, &recorded, sample_rate);
+
+    let result = analyze_recording(&wav_path, &reference, sample_rate, None).unwrap();
+    std::fs::remove_dir_all(&dir).ok();
+
+    assert!(
+        result.thd_percent.iter().all(|&v| v == 0.0),
+        "legacy path must report zero THD"
+    );
+    assert!(
+        result.harmonic_distortion_db.is_empty(),
+        "legacy path must report no harmonic curves"
+    );
+}
+
+#[test]
 fn test_analyze_recording_normal_channel() {
     // Simulate a normal speaker: reference sweep played back and recorded
     // with some attenuation and small delay
@@ -72,11 +158,10 @@ fn test_analyze_recording_normal_channel() {
     }
     let avg_db = sum / count as f32;
 
-    // Expected: ~-6 dB (attenuation factor 0.5)
-    // Allow generous tolerance for windowing/FFT artifacts
+    // Expected: ~-6 dB (attenuation factor 0.5); measured -6.02 dB.
     assert!(
-        avg_db > -12.0 && avg_db < 0.0,
-        "Normal channel avg SPL should be near -6 dB, got {:.1} dB",
+        (avg_db + 6.0).abs() <= 2.0,
+        "Normal channel avg SPL should be -6 dB ± 2 dB, got {:.1} dB",
         avg_db
     );
 

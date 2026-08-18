@@ -216,20 +216,10 @@ impl FeatureExtractor {
                     break;
                 }
             }
-            if rolloff_bin > self.window_size as f32 / 2.0 {
-                rolloff_bin = self.window_size as f32 / 2.0;
-            }
             let rolloff_freq = rolloff_bin * sr / self.window_size as f32;
 
             // --- Flatness ---
-            let geo_len = (self.spectrum_buf.len() / 8) * 8;
-            let geo = geometric_mean(&self.spectrum_buf[..geo_len]);
-            let mean_mag = sum_mag / self.spectrum_buf.len() as f32;
-            let flatness = if geo == 0.0 || mean_mag == 0.0 {
-                0.0
-            } else {
-                geo / mean_mag
-            };
+            let flatness = spectral_flatness(&self.spectrum_buf);
 
             // Update online statistics for this frame.
             n += 1;
@@ -377,6 +367,25 @@ fn build_hann_window(size: usize) -> Vec<f32> {
         .collect()
 }
 
+/// Spectral flatness: geometric mean over arithmetic mean of the magnitude
+/// spectrum. Both means cover the same bins (truncated to a multiple of 8,
+/// which `geometric_mean` requires). Returns 0.0 for degenerate inputs
+/// (fewer than 8 bins or a zero mean).
+fn spectral_flatness(spectrum: &[f32]) -> f32 {
+    let geo_len = (spectrum.len() / 8) * 8;
+    if geo_len == 0 {
+        return 0.0;
+    }
+    let bins = &spectrum[..geo_len];
+    let geo = geometric_mean(bins);
+    let mean_mag = bins.iter().sum::<f32>() / geo_len as f32;
+    if geo == 0.0 || mean_mag == 0.0 {
+        0.0
+    } else {
+        geo / mean_mag
+    }
+}
+
 impl FeatureExtractor {
     /// Estimate BPM using autocorrelation of the onset envelope.
     fn estimate_bpm_autocorrelation(&mut self, sample_rate: u32) -> f32 {
@@ -466,5 +475,34 @@ mod tests {
 
         let features = AudioFeatureExtractor::new().analyze(&signal, sr).unwrap();
         assert_eq!(features.len(), FEATURES_COUNT);
+    }
+
+    #[test]
+    fn test_spectral_flatness_uses_consistent_bins() {
+        // Geometric and arithmetic means must cover the same bins. With the
+        // last (257th) bin carrying huge energy, a flatness computed with
+        // geo over 256 bins but mean over 257 bins would be skewed.
+        let mut spectrum = vec![1.0f32; 257];
+        spectrum[256] = 1e6;
+        let geo_len = 256;
+        let expected = geometric_mean(&spectrum[..geo_len])
+            / (spectrum[..geo_len].iter().sum::<f32>() / geo_len as f32);
+        assert!(
+            (spectral_flatness(&spectrum) - expected).abs() < 1e-6,
+            "flatness should use the same bin set for geo and arithmetic means"
+        );
+    }
+
+    #[test]
+    fn test_spectral_features_tiny_window_no_nan() {
+        // window_size < 14 -> fewer than 8 bins -> geometric_mean would get a
+        // zero-length slice and produce NaN. Flatness must stay finite.
+        let mut extractor = FeatureExtractor::with_window_size(8);
+        let samples = vec![0.5f32; 256];
+        let out = extractor.compute_spectral_features(&samples, 22050);
+        assert!(
+            out.iter().all(|v| v.is_finite()),
+            "spectral features must be finite for tiny windows, got {out:?}"
+        );
     }
 }

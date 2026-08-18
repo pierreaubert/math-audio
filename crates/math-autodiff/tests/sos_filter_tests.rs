@@ -50,6 +50,20 @@ fn sos_filter_forward_matches_single_section() {
 }
 
 #[test]
+fn sos_filter_rejects_unit_circle_poles() {
+    let n_bins = NFFT / 2 + 1;
+    let mut filter = SosFilter::new(NFFT, 1, 1, 1, 0.0).unwrap();
+    filter.param[[0, 0, 0, 0]] = 1.0;
+    filter.param[[0, 3, 0, 0]] = 1.0;
+    filter.param[[0, 4, 0, 0]] = -2.0;
+    filter.param[[0, 5, 0, 0]] = 1.0;
+    let input = DiffTensor::from_array(
+        Array3::<Complex<f64>>::from_elem((1, n_bins, 1), Complex::new(1.0, 0.0)).into_dyn(),
+    );
+    assert!(filter.forward(&input).is_err());
+}
+
+#[test]
 fn sos_filter_gradient_matches_finite_difference() {
     let n_bins = NFFT / 2 + 1;
     let mut filter = SosFilter::new(NFFT, 1, 1, 1, 0.0).unwrap();

@@ -15,6 +15,26 @@ fn fc_raw_from_hz(fc: f64, fs: f64) -> f64 {
     (fc_norm / (1.0 - fc_norm)).ln()
 }
 
+#[test]
+fn biquad_extreme_cutoff_parameters_remain_finite() {
+    let mut biquad =
+        Biquad::new(NFFT, FS, 1, BiquadFilterType::Lowpass, 1, 1, ALIAS_DECAY_DB).unwrap();
+    biquad.param[[0, 0, 0, 0]] = 1.0e300;
+    biquad.param[[0, 1, 0, 0]] = 1.0;
+    let input = ones_spectrum(&[1, NFFT / 2 + 1, 1]);
+    let output = biquad.forward(&input).unwrap();
+    assert!(
+        output
+            .data
+            .iter()
+            .all(|value| value.re.is_finite() && value.im.is_finite())
+    );
+
+    let gradient = ones_spectrum(&[1, NFFT / 2 + 1, 1]);
+    let _ = biquad.backward(&input, &output, &gradient).unwrap();
+    assert!(biquad.gradients()[0].iter().all(|value| value.is_finite()));
+}
+
 fn gain_raw_from_db(db_gain: f64) -> f64 {
     10.0_f64.powf(db_gain / 20.0)
 }

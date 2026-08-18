@@ -2,7 +2,7 @@ use approx::assert_abs_diff_eq;
 use math_audio_autodiff::fft::{Fft, FftAntiAlias, Ifft, IfftAntiAlias};
 use math_audio_autodiff::module::DiffModule;
 use math_audio_autodiff::tensor::DiffTensor;
-use ndarray::{Array1, Array3};
+use ndarray::{Array1, Array3, Array4};
 use num_complex::Complex;
 
 fn impulse(nfft: usize) -> DiffTensor<f64> {
@@ -130,6 +130,55 @@ fn fft_explicitly_ignores_imaginary_time_domain_input() {
     let fft = Fft::new(8);
     let output = fft.forward(&input).unwrap();
     assert!(output.data.iter().all(|sample| sample.norm() == 0.0));
+}
+
+#[test]
+fn single_channel_fft_and_ifft_accept_non_contiguous_inputs() {
+    let nfft = 16;
+    let time_data = Array4::from_shape_fn((2, 2, nfft, 1), |(outer, batch, time, _)| {
+        Complex::new((outer * 31 + batch * 7 + time) as f64, 0.0)
+    })
+    .permuted_axes([1, 0, 2, 3])
+    .into_dyn();
+    assert!(!time_data.is_standard_layout());
+    let non_contiguous_time = DiffTensor::from_array(time_data.clone());
+    let contiguous_time = DiffTensor::from_array(time_data.as_standard_layout().to_owned());
+
+    let fft = Fft::with_channels(nfft, 1);
+    let expected_spectrum = fft.forward(&contiguous_time).unwrap();
+    let actual_spectrum = fft.forward(&non_contiguous_time).unwrap();
+    for (actual, expected) in actual_spectrum
+        .data
+        .iter()
+        .zip(expected_spectrum.data.iter())
+    {
+        assert_abs_diff_eq!(actual.re, expected.re, epsilon = 1e-12);
+        assert_abs_diff_eq!(actual.im, expected.im, epsilon = 1e-12);
+    }
+
+    let spectrum_data = Array4::from_shape_fn((2, 2, nfft / 2 + 1, 1), |(outer, batch, bin, _)| {
+        let phase = (outer * 19 + batch * 5 + bin) as f64 * 0.13;
+        Complex::new(
+            phase.cos(),
+            if bin == 0 || bin == nfft / 2 {
+                0.0
+            } else {
+                phase.sin()
+            },
+        )
+    })
+    .permuted_axes([1, 0, 2, 3])
+    .into_dyn();
+    assert!(!spectrum_data.is_standard_layout());
+    let non_contiguous_spectrum = DiffTensor::from_array(spectrum_data.clone());
+    let contiguous_spectrum = DiffTensor::from_array(spectrum_data.as_standard_layout().to_owned());
+    let ifft = Ifft::with_channels(nfft, 1);
+    let expected_time = ifft.forward(&contiguous_spectrum).unwrap();
+    let actual_time = ifft.forward(&non_contiguous_spectrum).unwrap();
+    for (actual, expected) in actual_time.data.iter().zip(expected_time.data.iter()) {
+        assert_abs_diff_eq!(actual.re, expected.re, epsilon = 1e-12);
+        assert_abs_diff_eq!(actual.im, expected.im, epsilon = 1e-12);
+    }
 }
 
 #[test]

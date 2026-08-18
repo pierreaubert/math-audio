@@ -9,7 +9,6 @@ pub mod delay;
 pub mod error;
 pub mod fft;
 pub mod gain;
-pub mod gradient;
 pub mod iir;
 pub mod loss;
 pub mod matrix;

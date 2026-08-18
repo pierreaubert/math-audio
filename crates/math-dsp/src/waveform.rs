@@ -4,7 +4,14 @@ pub const WAVEFORM_SAMPLES: usize = 128;
 /// Compute a waveform representation from mono audio samples.
 ///
 /// Takes pre-decoded mono f32 samples and computes [`WAVEFORM_SAMPLES`] RMS
-/// amplitude bins, each normalised to 0–255.
+/// amplitude bins, one per chunk of `len / WAVEFORM_SAMPLES` samples. Bins
+/// are normalised **relative to the loudest chunk** (`max_rms`, floored at
+/// 0.001 to avoid division by zero) and scaled to 0–255, so the loudest
+/// chunk always maps to 255 regardless of absolute level.
+///
+/// Inputs shorter than [`WAVEFORM_SAMPLES`] samples are not RMS-averaged:
+/// each sample contributes `|sample|` (clamped to 1.0) × 255 and the
+/// remaining bins are zero-padded.
 ///
 /// Returns a `Vec<u8>` of exactly [`WAVEFORM_SAMPLES`] elements.
 pub fn compute_waveform(mono_samples: &[f32]) -> Vec<u8> {
@@ -105,5 +112,21 @@ mod tests {
         let waveform = compute_waveform(&samples);
         assert_eq!(waveform.len(), WAVEFORM_SAMPLES);
         assert!(waveform.iter().any(|&v| v > 0));
+    }
+
+    #[test]
+    fn test_normalization_relative_to_loudest_chunk() {
+        // Bins are normalised relative to the loudest chunk: the loudest
+        // chunk maps to 255 regardless of the absolute signal level.
+        let mut samples = vec![0.001f32; 256]; // 2 samples per chunk
+        for s in &mut samples[128..] {
+            *s = 0.01;
+        }
+        let waveform = compute_waveform(&samples);
+        assert_eq!(waveform[64], 255, "loudest chunk must map to 255");
+        assert!(
+            waveform[0] < 255,
+            "quieter chunk must scale relative to the loudest"
+        );
     }
 }
