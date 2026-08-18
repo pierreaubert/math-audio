@@ -43,7 +43,7 @@ pub(super) fn fuzz_complex_mul_add(rng: &mut StdRng, iterations: usize) -> usize
             "complex_mul_add",
             iter,
             size,
-            range * range, // product range
+            range + range * range, // accumulator and product both contribute
             &simd_dst,
             &scalar_dst,
             &failures,

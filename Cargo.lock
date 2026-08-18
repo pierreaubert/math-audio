@@ -1753,7 +1753,7 @@ dependencies = [
 
 [[package]]
 name = "math-autodiff"
-version = "0.5.2"
+version = "0.5.3"
 dependencies = [
  "approx",
  "criterion",
@@ -1794,7 +1794,7 @@ dependencies = [
 
 [[package]]
 name = "math-dsp"
-version = "0.5.24"
+version = "0.5.25"
 dependencies = [
  "approx",
  "clap",
