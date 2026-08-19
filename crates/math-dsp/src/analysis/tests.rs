@@ -558,7 +558,7 @@ fn clock_drift_estimator_reports_sample_domain_ppm() {
     let reference: Vec<f32> = (0..reference_len)
         .map(|index| {
             let index = index as f32;
-            (0.7 * (0.031 * index + 0.00001 * index * index).sin() + 0.3 * (0.097 * index).cos())
+            0.7 * (0.031 * index + 0.00001 * index * index).sin() + 0.3 * (0.097 * index).cos()
         })
         .collect();
     let recording_len = delay + ((reference_len - 1) as f64 * scale).ceil() as usize + 32;
