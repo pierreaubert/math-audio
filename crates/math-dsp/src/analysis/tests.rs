@@ -548,6 +548,47 @@ fn clock_drift_estimator_reports_zero_for_a_stable_clock() {
 }
 
 #[test]
+fn clock_drift_estimator_reports_sample_domain_ppm() {
+    let sample_rate = 44_100_u32;
+    let target_ppm = 10_000.0_f64;
+    let scale = 1.0 + target_ppm / 1_000_000.0;
+    let delay = 17_usize;
+    let reference_len = 1_024_usize;
+
+    let reference: Vec<f32> = (0..reference_len)
+        .map(|index| {
+            let index = index as f32;
+            (0.7 * (0.031 * index + 0.00001 * index * index).sin() + 0.3 * (0.097 * index).cos())
+        })
+        .collect();
+    let recording_len = delay + ((reference_len - 1) as f64 * scale).ceil() as usize + 32;
+    let mut recording = vec![0.0_f32; recording_len];
+    for (recording_index, sample) in recording.iter_mut().enumerate() {
+        let reference_position = (recording_index as f64 - delay as f64) / scale;
+        if !(0.0..=(reference_len - 1) as f64).contains(&reference_position) {
+            continue;
+        }
+        let left = reference_position.floor() as usize;
+        let right = (left + 1).min(reference_len - 1);
+        let fraction = (reference_position - left as f64) as f32;
+        *sample = reference[left] + fraction * (reference[right] - reference[left]);
+    }
+
+    let estimate = super::measurement::estimate_clock_drift(&reference, &recording, sample_rate)
+        .expect("a stretched capture should produce a drift estimate");
+    let elapsed_samples = (reference_len - reference_len / 4) as f64;
+    let lag_change =
+        (estimate.end_lag_samples - estimate.start_lag_samples) as f64 - elapsed_samples;
+    let expected_ppm = lag_change / elapsed_samples * 1e6;
+
+    assert!(lag_change > 3.0 && lag_change < 15.0, "{estimate:?}");
+    assert!(
+        (estimate.ppm - expected_ppm).abs() < 1e-6,
+        "sample-domain ppm expected {expected_ppm}, got {estimate:?}"
+    );
+}
+
+#[test]
 fn group_delay_recovers_a_linear_phase_delay() {
     let frequencies = [100.0_f32, 200.0, 300.0, 400.0];
     let delay_ms = 2.5_f32;

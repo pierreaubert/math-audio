@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.26] - 2026-07-10
+
+### Fixed
+- `clock drift: wrong division
+
 ## [0.5.22] - 2026-07-10
 
 ### Fixed

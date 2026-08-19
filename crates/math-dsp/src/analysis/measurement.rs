@@ -798,8 +798,9 @@ pub fn estimate_clock_drift(
     let end = estimate_lag_with_confidence(&reference[end_offset..], recording)?;
     let elapsed_samples = end_offset as f64;
     let lag_change = (end.lag_samples - start.lag_samples) as f64 - elapsed_samples;
-    let elapsed_seconds = elapsed_samples / sample_rate as f64;
-    let ppm = lag_change / elapsed_seconds * 1e6;
+    // Both quantities are measured in samples, so their ratio is the
+    // relative sample-clock drift. Convert that dimensionless ratio to ppm.
+    let ppm = lag_change / elapsed_samples * 1e6;
     Ok(ClockDriftEstimate {
         ppm,
         start_lag_samples: start.lag_samples,
