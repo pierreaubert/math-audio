@@ -199,6 +199,9 @@ CLI tool to analyze a WAV file and output frequency/SPL/phase as CSV.
 # Default (Welch's method)
 wav2csv recording.wav
 
+# Convert every WAV file in a directory (CSVs are written beside the WAVs)
+wav2csv measurements/
+
 # Log sweep analysis
 wav2csv sweep.wav --single-fft --pink-compensation --no-window
 

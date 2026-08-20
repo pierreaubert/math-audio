@@ -1,5 +1,6 @@
 use clap::Parser;
 use math_audio_dsp::analysis::{WavAnalysisConfig, analyze_wav_file, write_wav_analysis_csv};
+use std::fs;
 use std::path::PathBuf;
 
 /// Convert WAV file to frequency/SPL/phase CSV
@@ -13,10 +14,10 @@ For log sweeps: Use --single-fft --pink-compensation --no-window\n\
 For impulse responses: Use --single-fft"
 )]
 struct Cli {
-    /// Input WAV file
+    /// Input WAV file or directory containing WAV files
     input: PathBuf,
 
-    /// Output CSV file (defaults to input filename with .csv extension)
+    /// Output CSV file, or output directory when INPUT is a directory
     #[arg(short, long)]
     output: Option<PathBuf>,
 
@@ -63,8 +64,6 @@ fn main() {
 }
 
 fn run(cli: Cli) -> Result<(), String> {
-    println!("Loading WAV file: {:?}", cli.input);
-
     // Build configuration from CLI arguments
     let config = WavAnalysisConfig {
         num_points: cli.num_points,
@@ -77,8 +76,24 @@ fn run(cli: Cli) -> Result<(), String> {
         no_window: cli.no_window,
     };
 
-    // Analyze WAV file
-    let result = analyze_wav_file(&cli.input, &config)?;
+    let input_metadata = fs::metadata(&cli.input)
+        .map_err(|e| format!("Failed to inspect input {:?}: {}", cli.input, e))?;
+
+    if input_metadata.is_dir() {
+        return run_directory(&cli.input, cli.output.as_deref(), &config);
+    }
+
+    run_file(&cli.input, cli.output.as_deref(), &config)
+}
+
+fn run_file(
+    input: &std::path::Path,
+    output: Option<&std::path::Path>,
+    config: &WavAnalysisConfig,
+) -> Result<(), String> {
+    println!("Loading WAV file: {:?}", input);
+
+    let result = analyze_wav_file(input, config)?;
 
     println!(
         "Analyzed {} frequency points from {:.1} Hz to {:.1} Hz",
@@ -88,8 +103,8 @@ fn run(cli: Cli) -> Result<(), String> {
     );
 
     // Determine output path
-    let output_path = cli.output.unwrap_or_else(|| {
-        let mut path = cli.input.clone();
+    let output_path = output.map(PathBuf::from).unwrap_or_else(|| {
+        let mut path = input.to_owned();
         path.set_extension("csv");
         path
     });
@@ -99,5 +114,63 @@ fn run(cli: Cli) -> Result<(), String> {
     write_wav_analysis_csv(&result, &output_path)?;
 
     println!("Done!");
+    Ok(())
+}
+
+fn run_directory(
+    input_dir: &std::path::Path,
+    output: Option<&std::path::Path>,
+    config: &WavAnalysisConfig,
+) -> Result<(), String> {
+    let mut inputs = fs::read_dir(input_dir)
+        .map_err(|e| format!("Failed to read input directory {:?}: {}", input_dir, e))?
+        .map(|entry| {
+            entry
+                .map(|entry| entry.path())
+                .map_err(|e| format!("Failed to read directory entry: {}", e))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    inputs.retain(|path| {
+        path.is_file()
+            && path
+                .extension()
+                .and_then(|extension| extension.to_str())
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("wav"))
+    });
+    inputs.sort();
+
+    if inputs.is_empty() {
+        return Err(format!("No WAV files found in {:?}", input_dir));
+    }
+
+    let output_dir = output.unwrap_or(input_dir);
+    if output_dir.exists() && !output_dir.is_dir() {
+        return Err(format!(
+            "Output path must be a directory when input is a directory: {:?}",
+            output_dir
+        ));
+    }
+    if !output_dir.exists() {
+        fs::create_dir_all(output_dir)
+            .map_err(|e| format!("Failed to create output directory {:?}: {}", output_dir, e))?;
+    }
+
+    println!(
+        "Converting {} WAV files from {:?} to {:?}",
+        inputs.len(),
+        input_dir,
+        output_dir
+    );
+
+    for input in &inputs {
+        let file_stem = input
+            .file_stem()
+            .ok_or_else(|| format!("Cannot determine filename for {:?}", input))?;
+        let output_path = output_dir.join(file_stem).with_extension("csv");
+        run_file(input, Some(&output_path), config)?;
+    }
+
+    println!("Converted {} WAV files.", inputs.len());
     Ok(())
 }
