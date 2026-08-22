@@ -1314,6 +1314,38 @@ fn read_analysis_csv_rejects_malformed_rows() {
 }
 
 #[test]
+fn room_slope_reaches_requested_db_at_upper_frequency() {
+    let mut magnitudes = vec![0.0_f32, 0.0, 0.0];
+    let frequencies = vec![20.0_f32, (20.0_f32 * 20_000.0_f32).sqrt(), 20_000.0];
+
+    super::analyze::apply_room_slope(&mut magnitudes, &frequencies, 20.0, 20_000.0, -10.0);
+
+    assert!((magnitudes[0] - 0.0).abs() < 1e-5);
+    assert!((magnitudes[1] + 5.0).abs() < 1e-5);
+    assert!((magnitudes[2] + 10.0).abs() < 1e-5);
+}
+
+#[test]
+fn room_slope_is_skipped_for_subwoofer_measurements() {
+    let samples = vec![0.0_f32; 1024];
+    let config = WavAnalysisConfig {
+        num_points: 2,
+        min_freq: 20.0,
+        max_freq: 20_000.0,
+        fft_size: Some(1024),
+        single_fft: true,
+        no_window: true,
+        room_slope_db: Some(-10.0),
+        subwoofer: true,
+        ..Default::default()
+    };
+
+    let result = super::analyze_wav_buffer(&samples, 48_000, &config).unwrap();
+
+    assert_eq!(result.magnitude_db, vec![-200.0, -200.0]);
+}
+
+#[test]
 fn test_compute_average_response_basic() {
     let freqs = vec![100.0f32, 200.0, 400.0, 800.0];
     let mag = vec![0.0f32, 0.0, 0.0, 0.0];

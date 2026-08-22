@@ -10,10 +10,15 @@ use ndarray::Array1;
 use rand::rngs::StdRng;
 use rand::{Rng, RngExt, SeedableRng};
 use rayon::prelude::*;
+use std::cell::RefCell;
 
 use crate::CallbackAction;
 use crate::error::{DEError, Result};
 use crate::parallel_eval::ParallelConfig;
+
+thread_local! {
+    static CMA_X_SCRATCH: RefCell<Array1<f64>> = RefCell::new(Array1::zeros(0));
+}
 
 /// Per-generation callback payload for [`cma_es`].
 pub struct CmaEsIntermediate {
@@ -222,12 +227,6 @@ where
     let mut message = String::from("maximum evaluations reached");
     let mut success = false;
 
-    if let Some(n) = config.parallel.num_threads {
-        let _ = rayon::ThreadPoolBuilder::new()
-            .num_threads(n)
-            .build_global();
-    }
-
     while nfev < config.maxeval {
         std::mem::swap(&mut mean, &mut old_mean);
         let eval_budget = (config.maxeval - nfev).min(lambda);
@@ -253,7 +252,14 @@ where
                 .enumerate()
                 .with_min_len(16)
                 .for_each(|(i, fun)| {
-                    *fun = finite_or_infinity(f(&denormalise(&y_pool[i], &config.bounds)));
+                    CMA_X_SCRATCH.with(|slot| {
+                        let mut x_array = slot.borrow_mut();
+                        if x_array.len() != n {
+                            *x_array = Array1::zeros(n);
+                        }
+                        denormalise_into(&y_pool[i], &config.bounds, &mut x_array);
+                        *fun = finite_or_infinity(f(&x_array));
+                    });
                 });
         } else {
             let mut x_array = Array1::<f64>::zeros(n);
@@ -520,6 +526,7 @@ mod tests {
     use super::*;
     use ndarray::array;
     use std::sync::Arc;
+    use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[test]
@@ -723,5 +730,66 @@ mod tests {
             "Small sigma0 should still converge: f={}",
             report.fun
         );
+    }
+
+    #[test]
+    fn cma_es_uses_the_caller_pool_and_keeps_fixed_seed_results() {
+        let run = |threads: usize| {
+            let worker_ids = Arc::new(Mutex::new(std::collections::BTreeSet::new()));
+            let scratch_by_worker = Arc::new(Mutex::new(std::collections::BTreeMap::new()));
+            let calls = Arc::new(AtomicUsize::new(0));
+            let observed = worker_ids.clone();
+            let observed_scratch = scratch_by_worker.clone();
+            let observed_calls = calls.clone();
+            let objective = move |x: &Array1<f64>| {
+                let worker = rayon::current_thread_index().expect("inside caller pool");
+                observed.lock().expect("worker set lock").insert(worker);
+                if observed_calls.fetch_add(1, Ordering::Relaxed) > 0 {
+                    let mut scratch = observed_scratch.lock().expect("scratch map lock");
+                    let pointer = x.as_ptr() as usize;
+                    assert_eq!(
+                        *scratch.entry(worker).or_insert(pointer),
+                        pointer,
+                        "worker received a newly allocated CMA offspring buffer"
+                    );
+                }
+                let mut guard = 0.0;
+                for _ in 0..2_000 {
+                    guard = std::hint::black_box(guard + x[0] * f64::EPSILON);
+                }
+                x.iter().map(|value| value * value).sum::<f64>() + guard * 0.0
+            };
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .build()
+                .expect("caller-owned pool");
+            let report = pool
+                .install(|| {
+                    cma_es(
+                        &objective,
+                        CmaEsConfig {
+                            bounds: vec![(-5.0, 5.0); 4],
+                            lambda: 64,
+                            maxeval: 257,
+                            seed: Some(1234),
+                            parallel: ParallelConfig {
+                                enabled: true,
+                                num_threads: Some(threads),
+                            },
+                            ..Default::default()
+                        },
+                    )
+                })
+                .expect("CMA-ES run");
+            let used = worker_ids.lock().expect("worker set lock").len();
+            (report, used)
+        };
+
+        let (single, single_used) = run(1);
+        let (parallel, parallel_used) = run(2);
+        assert_eq!(single_used, 1);
+        assert_eq!(parallel_used, 2);
+        assert_eq!(single.fun, parallel.fun);
+        assert_eq!(single.x, parallel.x);
     }
 }

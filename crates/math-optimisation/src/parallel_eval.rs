@@ -7,7 +7,11 @@ use std::sync::Arc;
 pub struct ParallelConfig {
     /// Enable parallel evaluation
     pub enabled: bool,
-    /// Number of threads to use (None = use rayon default)
+    /// Requested worker count for application-owned pool construction.
+    ///
+    /// Solvers deliberately do not mutate Rayon's process-global pool. Callers
+    /// that require an exact worker count must invoke the solver from inside a
+    /// [`rayon::ThreadPool::install`] closure built with this value.
     pub num_threads: Option<usize>,
 }
 

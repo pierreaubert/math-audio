@@ -205,11 +205,21 @@ wav2csv measurements/
 # Log sweep analysis
 wav2csv sweep.wav --single-fft --pink-compensation --no-window
 
+# Log sweep with an assumed -10 dB in-room slope from 20 Hz to 20 kHz
+wav2csv sweep.wav --single-fft --pink-compensation --no-window --room-slope-db=-10
+
+# Subwoofer measurement: do not apply the in-room slope
+wav2csv subwoofer.wav --single-fft --pink-compensation --no-window --subwoofer
+
 # Custom parameters
 wav2csv recording.wav -o output.csv -n 4000 --min-freq 10 --max-freq 24000 --fft-size 32768
 ```
 
-Options: `--num-points`, `--min-freq`, `--max-freq`, `--fft-size`, `--overlap`, `--single-fft`, `--pink-compensation`, `--no-window`, `-o`/`--output`.
+Options: `--num-points`, `--min-freq`, `--max-freq`, `--fft-size`, `--overlap`, `--single-fft`, `--pink-compensation`, `--no-window`, `--room-slope-db`, `--subwoofer`, `-o`/`--output`.
+
+`--room-slope-db` is an end-to-end log-frequency tilt: `-10` adds 0 dB at
+`min-freq` and -10 dB at `max-freq`. It is optional and is never applied when
+`--subwoofer` is selected.
 
 ## Dependencies
 

@@ -166,14 +166,6 @@ where
             .map(|v| v != "0")
             .unwrap_or(false);
 
-        // Configure global rayon thread pool once if requested
-        if let Some(n) = self.config.parallel.num_threads {
-            // Ignore error if global pool already set
-            let _ = rayon::ThreadPoolBuilder::new()
-                .num_threads(n)
-                .build_global();
-        }
-
         // RNG
         let mut rng: StdRng = match self.config.seed {
             Some(s) => StdRng::seed_from_u64(s),

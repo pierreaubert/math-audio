@@ -1,4 +1,5 @@
 use super::super::biquad::{Biquad, BiquadFilterType, Peq};
+use super::peq_spl_into;
 use ndarray::Array1;
 
 /// Compute the combined PEQ response (in dB) on a given frequency grid for a Peq.
@@ -11,15 +12,21 @@ use ndarray::Array1;
 /// # Returns
 /// Frequency response in dB SPL at the specified frequency points
 pub fn compute_peq_response(freqs: &Array1<f64>, peq: &Peq, _sample_rate: f64) -> Array1<f64> {
-    if peq.is_empty() {
-        return Array1::zeros(freqs.len());
-    }
     let mut response = Array1::zeros(freqs.len());
-    for (weight, filter) in peq {
-        // Note: we're not using sample_rate here as filters already have their own srate
-        response += &(filter.np_log_result(freqs) * *weight);
-    }
+    let mut filter_scratch = Array1::zeros(freqs.len());
+    compute_peq_response_into(freqs, peq, _sample_rate, &mut response, &mut filter_scratch);
     response
+}
+
+/// Compute a combined PEQ response into caller-owned reusable buffers.
+pub fn compute_peq_response_into(
+    freqs: &Array1<f64>,
+    peq: &Peq,
+    _sample_rate: f64,
+    response: &mut Array1<f64>,
+    filter_scratch: &mut Array1<f64>,
+) {
+    peq_spl_into(freqs, peq, response, filter_scratch);
 }
 
 /// Compute A-weighting in dB for a given frequency

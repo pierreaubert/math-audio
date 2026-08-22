@@ -116,6 +116,18 @@ pub fn analyze_wav_buffer(
         }
     }
 
+    if !config.subwoofer {
+        if let Some(room_slope_db) = config.room_slope_db {
+            apply_room_slope(
+                &mut interp_mag,
+                &log_freqs,
+                config.min_freq,
+                config.max_freq,
+                room_slope_db,
+            );
+        }
+    }
+
     Ok(WavAnalysisOutput {
         frequencies: log_freqs,
         magnitude_db: interp_mag,
@@ -137,6 +149,36 @@ pub fn analyze_wav_file(
 ) -> Result<WavAnalysisOutput, String> {
     let (samples, sample_rate) = load_wav_mono_with_rate(path)?;
     analyze_wav_buffer(&samples, sample_rate, config)
+}
+
+/// Add a log-frequency response tilt to a magnitude curve.
+///
+/// `slope_db` is the desired change between `min_freq` and `max_freq`:
+/// `-10.0` adds 0 dB at the lower limit and -10 dB at the upper limit.
+pub(super) fn apply_room_slope(
+    magnitudes_db: &mut [f32],
+    frequencies: &[f32],
+    min_freq: f32,
+    max_freq: f32,
+    slope_db: f32,
+) {
+    if magnitudes_db.len() != frequencies.len()
+        || !slope_db.is_finite()
+        || !min_freq.is_finite()
+        || !max_freq.is_finite()
+        || min_freq <= 0.0
+        || max_freq <= min_freq
+    {
+        return;
+    }
+
+    let log_span = (max_freq / min_freq).ln();
+    for (magnitude, &frequency) in magnitudes_db.iter_mut().zip(frequencies) {
+        if frequency.is_finite() && frequency > 0.0 {
+            let position = ((frequency / min_freq).ln() / log_span).clamp(0.0, 1.0);
+            *magnitude += slope_db * position;
+        }
+    }
 }
 
 /// Time-align recorded and reference signals given an estimated lag.

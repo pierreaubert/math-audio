@@ -63,12 +63,40 @@ pub fn peq_spl(freq: &Array1<f64>, peq: &Peq) -> Array1<f64> {
     let mut current_filter = Array1::zeros(freq.len());
     let mut scratch = Array1::zeros(freq.len());
 
-    for (weight, iir) in peq {
-        iir.np_log_result_into(freq, &mut scratch);
-        current_filter += &(&scratch * *weight);
-    }
-
+    peq_spl_into(freq, peq, &mut current_filter, &mut scratch);
     current_filter
+}
+
+/// Compute a PEQ response into caller-owned buffers.
+///
+/// `response` and `filter_scratch` must both have the same length as `freq`.
+/// Keeping both buffers outside this function lets optimization workers reuse
+/// them across candidate evaluations without allocating in the hot path.
+pub fn peq_spl_into(
+    freq: &Array1<f64>,
+    peq: &Peq,
+    response: &mut Array1<f64>,
+    filter_scratch: &mut Array1<f64>,
+) {
+    assert_eq!(
+        response.len(),
+        freq.len(),
+        "response length must match frequency grid"
+    );
+    assert_eq!(
+        filter_scratch.len(),
+        freq.len(),
+        "filter scratch length must match frequency grid"
+    );
+
+    response.fill(0.0);
+
+    for (weight, iir) in peq {
+        iir.np_log_result_into(freq, filter_scratch);
+        for (sum, value) in response.iter_mut().zip(filter_scratch.iter()) {
+            *sum += *value * *weight;
+        }
+    }
 }
 
 /// Compute loudness-weighted gain adjustment for PEQ to maintain spectral balance

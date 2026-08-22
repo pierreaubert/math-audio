@@ -8,6 +8,7 @@ use super::consts::K_AUNBANDEQ_FILTER_TYPE_RESONANT_HIGH_PASS;
 use super::consts::K_AUNBANDEQ_FILTER_TYPE_RESONANT_LOW_PASS;
 use super::misc::a_weighting_db;
 use super::misc::compute_peq_response;
+use super::misc::compute_peq_response_into;
 use super::misc::enforce_rme_room_filter_constraints;
 use super::misc::filter_peqs_by_gain;
 use super::misc::get_filter_priority;
@@ -535,6 +536,62 @@ mod peq_tests {
         for (s, r) in spl.iter().zip(response.iter()) {
             assert!(approx_eq(*s, *r, 1e-10));
         }
+    }
+
+    #[test]
+    fn test_peq_spl_into_matches_allocating_api_and_overwrites_output() {
+        let peq = vec![
+            (
+                1.0,
+                Biquad::new(BiquadFilterType::Peak, 500.0, 48000.0, 2.0, 3.0),
+            ),
+            (
+                0.5,
+                Biquad::new(BiquadFilterType::Peak, 2000.0, 48000.0, 1.0, -4.0),
+            ),
+        ];
+        let freqs = array![100.0, 500.0, 1000.0, 2000.0, 10000.0];
+        let expected = peq_spl(&freqs, &peq);
+        let mut response = Array1::from_elem(freqs.len(), 1234.0);
+        let mut scratch = Array1::from_elem(freqs.len(), -5678.0);
+
+        peq_spl_into(&freqs, &peq, &mut response, &mut scratch);
+        assert!(
+            response
+                .iter()
+                .zip(expected.iter())
+                .all(|(actual, expected)| approx_eq(*actual, *expected, 1e-12))
+        );
+
+        response.fill(-99.0);
+        peq_spl_into(&freqs, &peq, &mut response, &mut scratch);
+        assert!(
+            response
+                .iter()
+                .zip(expected.iter())
+                .all(|(actual, expected)| approx_eq(*actual, *expected, 1e-12))
+        );
+    }
+
+    #[test]
+    fn test_compute_peq_response_into_clears_empty_peq() {
+        let freqs = array![100.0, 1000.0, 10000.0];
+        let mut response = Array1::from_elem(freqs.len(), 42.0);
+        let mut scratch = Array1::from_elem(freqs.len(), 7.0);
+
+        compute_peq_response_into(&freqs, &Peq::new(), 48000.0, &mut response, &mut scratch);
+
+        assert_eq!(response, Array1::zeros(freqs.len()));
+    }
+
+    #[test]
+    #[should_panic(expected = "response length must match frequency grid")]
+    fn test_peq_spl_into_rejects_mismatched_response() {
+        let freqs = array![100.0, 1000.0];
+        let mut response = Array1::zeros(1);
+        let mut scratch = Array1::zeros(2);
+
+        peq_spl_into(&freqs, &Peq::new(), &mut response, &mut scratch);
     }
 
     #[test]

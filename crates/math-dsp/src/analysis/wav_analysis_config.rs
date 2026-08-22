@@ -17,6 +17,11 @@ pub struct WavAnalysisConfig {
     pub pink_compensation: bool,
     /// Use rectangular window instead of Hann
     pub no_window: bool,
+    /// Desired in-room response slope in dB across the analysis frequency range.
+    /// The correction is zero at `min_freq` and reaches this value at `max_freq`.
+    pub room_slope_db: Option<f32>,
+    /// Skip the in-room response slope correction for subwoofer measurements.
+    pub subwoofer: bool,
 }
 
 impl Default for WavAnalysisConfig {
@@ -30,6 +35,8 @@ impl Default for WavAnalysisConfig {
             single_fft: false,
             pink_compensation: false,
             no_window: false,
+            room_slope_db: None,
+            subwoofer: false,
         }
     }
 }
