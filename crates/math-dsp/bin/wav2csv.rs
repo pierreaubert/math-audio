@@ -45,13 +45,19 @@ struct Cli {
     #[arg(long)]
     single_fft: bool,
 
-    /// Apply pink compensation (-3dB/octave) for log sweeps
+    /// Apply pink compensation (+3 dB/octave) for log sweeps
     #[arg(long)]
     pink_compensation: bool,
 
     /// Use rectangular window (no windowing) instead of Hann
     #[arg(long)]
     no_window: bool,
+    /// Apply a desired in-room response slope across min-freq..max-freq (for example: -10)
+    #[arg(long, value_name = "DB", conflicts_with = "subwoofer")]
+    room_slope_db: Option<f32>,
+    /// Skip the in-room response slope correction for a subwoofer measurement
+    #[arg(long, conflicts_with = "room_slope_db")]
+    subwoofer: bool,
 }
 
 fn main() {
@@ -74,6 +80,8 @@ fn run(cli: Cli) -> Result<(), String> {
         single_fft: cli.single_fft,
         pink_compensation: cli.pink_compensation,
         no_window: cli.no_window,
+        room_slope_db: cli.room_slope_db,
+        subwoofer: cli.subwoofer,
     };
 
     let input_metadata = fs::metadata(&cli.input)
