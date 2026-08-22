@@ -66,6 +66,7 @@ bench-math:
 
 clean:
 	cargo clean
+	rm -f *.log *.wav *.json TAGS
 	find . -name '*~' -exec rm {} \; -print
 	find . -name 'Cargo.lock' -exec rm {} \; -print
 
