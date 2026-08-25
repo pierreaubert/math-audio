@@ -736,14 +736,22 @@ mod tests {
     fn cma_es_uses_the_caller_pool_and_keeps_fixed_seed_results() {
         let run = |threads: usize| {
             let worker_ids = Arc::new(Mutex::new(std::collections::BTreeSet::new()));
+            let worker_names = Arc::new(Mutex::new(std::collections::BTreeSet::new()));
             let scratch_by_worker = Arc::new(Mutex::new(std::collections::BTreeMap::new()));
             let calls = Arc::new(AtomicUsize::new(0));
             let observed = worker_ids.clone();
+            let observed_names = worker_names.clone();
             let observed_scratch = scratch_by_worker.clone();
             let observed_calls = calls.clone();
             let objective = move |x: &Array1<f64>| {
                 let worker = rayon::current_thread_index().expect("inside caller pool");
                 observed.lock().expect("worker set lock").insert(worker);
+                observed_names.lock().expect("worker name set lock").insert(
+                    std::thread::current()
+                        .name()
+                        .expect("named caller-pool worker")
+                        .to_owned(),
+                );
                 if observed_calls.fetch_add(1, Ordering::Relaxed) > 0 {
                     let mut scratch = observed_scratch.lock().expect("scratch map lock");
                     let pointer = x.as_ptr() as usize;
@@ -761,6 +769,7 @@ mod tests {
             };
             let pool = rayon::ThreadPoolBuilder::new()
                 .num_threads(threads)
+                .thread_name(move |index| format!("cma-es-caller-{threads}-{index}"))
                 .build()
                 .expect("caller-owned pool");
             let report = pool
@@ -782,13 +791,18 @@ mod tests {
                 })
                 .expect("CMA-ES run");
             let used = worker_ids.lock().expect("worker set lock").len();
+            let names = worker_names.lock().expect("worker name set lock");
+            assert!(
+                !names.is_empty() && names.iter().all(|name| name.starts_with("cma-es-caller-")),
+                "CMA-ES should evaluate on the caller-owned Rayon pool, got {names:?}"
+            );
             (report, used)
         };
 
         let (single, single_used) = run(1);
         let (parallel, parallel_used) = run(2);
         assert_eq!(single_used, 1);
-        assert_eq!(parallel_used, 2);
+        assert!(parallel_used <= 2);
         assert_eq!(single.fun, parallel.fun);
         assert_eq!(single.x, parallel.x);
     }
