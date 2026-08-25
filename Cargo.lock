@@ -1879,7 +1879,7 @@ dependencies = [
 
 [[package]]
 name = "math-dsp"
-version = "0.5.26"
+version = "0.5.27"
 dependencies = [
  "approx",
  "clap",
@@ -1902,7 +1902,7 @@ dependencies = [
 
 [[package]]
 name = "math-iir-fir"
-version = "0.5.18"
+version = "0.5.19"
 dependencies = [
  "base64 0.22.1",
  "byteorder",

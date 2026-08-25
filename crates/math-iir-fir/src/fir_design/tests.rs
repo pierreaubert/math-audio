@@ -293,6 +293,26 @@ fn test_suppress_pre_ringing_basic() {
 }
 
 #[test]
+fn test_suppress_pre_ringing_uses_smooth_time_envelope() {
+    let mut ir = vec![0.0; 21];
+    ir[20] = 1.0;
+    ir[19] = 0.5;
+    ir[11] = 0.5;
+    let config = PreRingingConfig {
+        threshold_db: -20.0,
+        max_time_s: 0.01,
+    };
+
+    suppress_pre_ringing(&mut ir, &config, 1_000.0);
+
+    let threshold = 0.1;
+    assert!(ir[19].abs() < threshold);
+    assert!(ir[19].abs() > 0.09);
+    assert!(ir[11].abs() < 0.01);
+    assert!(ir[11].abs() < ir[19].abs());
+}
+
+#[test]
 fn test_suppress_pre_ringing_time_limit() {
     let mut ir = vec![0.0; 1000];
     ir[500] = 1.0; // main tap

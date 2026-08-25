@@ -66,18 +66,11 @@ pub fn suppress_pre_ringing(ir: &mut [f64], config: &PreRingingConfig, sample_ra
             // Beyond time limit (or zero time limit): fully suppress
             *sample = 0.0;
         } else if sample.abs() > threshold_linear {
-            // Exceeds threshold: clamp to threshold with sign preserved
-            // Use smooth fade: closer to time limit → more suppression
+            // Use a time-varying cap: the audible threshold is allowed close
+            // to the main impulse and fades smoothly to zero at the limit.
             let time_ratio = samples_before as f64 / max_pre_samples as f64;
-            // Cosine fade: 1.0 at main tap, 0.0 at time limit
             let fade = 0.5 * (1.0 + (std::f64::consts::PI * time_ratio).cos());
-            let clamped = sample.signum() * threshold_linear;
-            // Blend between clamped and original based on proximity to time limit
-            *sample = clamped + (*sample - clamped) * fade;
-            // Final clamp to threshold
-            if sample.abs() > threshold_linear {
-                *sample = sample.signum() * threshold_linear;
-            }
+            *sample = sample.signum() * threshold_linear * fade;
         }
     }
 }
