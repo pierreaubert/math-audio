@@ -7,6 +7,11 @@ use ndarray::Array1;
 /// Global minimum varies due to noise component
 /// Bounds: x in [0, 1]
 pub fn gramacy_lee_function(x: &Array1<f64>) -> f64 {
+    assert!(
+        x.len() == 1,
+        "gramacy_lee_function requires 1 dimension, got {}",
+        x.len()
+    );
     let x1 = x[0];
     (x1 * (x1 - 0.5) * (x1 - 1.0)).exp() + x1.powi(2) / 10.0
 }

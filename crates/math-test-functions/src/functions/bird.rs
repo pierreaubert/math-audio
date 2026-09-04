@@ -6,6 +6,7 @@ use ndarray::Array1;
 /// Global minimum: f(x) = -106.764537 at x = (4.70104, 3.15294) and (-1.58214, -3.13024)
 /// Bounds: x_i in [-2π, 2π]
 pub fn bird(x: &Array1<f64>) -> f64 {
+    assert!(x.len() == 2, "bird requires 2 dimensions, got {}", x.len());
     let x1 = x[0];
     let x2 = x[1];
     let term1 = x1.sin() * ((1.0 - x2.cos()).powi(2)).exp();

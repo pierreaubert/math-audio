@@ -206,20 +206,51 @@ pub(crate) fn checked_block_len(
     Ok(())
 }
 
+/// Nominal headroom limits for the realtime input/output guards.
+///
+/// Rationale (documented in lieu of a measured-hardware calibration):
+///
+/// - `INPUT_SANITIZE_LIMIT` (+/-16.0, i.e. +24.08 dB re 1.0 peak) sits well
+///   above the crate's 0 VU = -18 dBFS calibration (`level.rs`) and above any
+///   sane host nominal peak, while remaining far below `f32` overflow. It
+///   exists to stop a faulty host callback from injecting state-exploding
+///   energy (filter-history blowup, tanh-argument saturation) into persistent
+///   per-channel state. In-range audio, including +36 dB drive overshoot
+///   before the waveshaper, passes through untouched; only pathological
+///   callback spikes are clamped. Non-finite input maps to silence.
+/// - `OUTPUT_SAFETY_LIMIT` (+/-128.0, i.e. +42.14 dB re 1.0 peak) is the
+///   final output guard applied by [`finite_output`]. It is deliberately wider
+///   than the input guard so legitimate internal overshoot (resonant biquad
+///   ringing, summed Hammerstein branches, driven tanh tails before the DC
+///   blocker) is preserved, while still guaranteeing a finite, bounded block
+///   for the host. Non-finite or denormal output maps to 0.0.
+///
+/// Neither limit is a hardware headroom claim: there is no fitted device
+/// behind these numbers, so they are documented safety rails rather than
+/// calibrated analog-supply figures.
+pub(crate) const INPUT_SANITIZE_LIMIT: f32 = 16.0;
+/// Final output safety rail; see [`INPUT_SANITIZE_LIMIT`] for rationale.
+pub(crate) const OUTPUT_SAFETY_LIMIT: f32 = 128.0;
+
 /// Replace invalid callback input before it can enter persistent state.
+///
+/// Values within +/-`INPUT_SANITIZE_LIMIT` pass through untouched; larger
+/// magnitudes are clamped and non-finite input becomes silence.
 #[inline]
 pub(crate) fn sanitize_sample(sample: f32) -> f32 {
     if sample.is_finite() {
-        sample.clamp(-16.0, 16.0)
+        sample.clamp(-INPUT_SANITIZE_LIMIT, INPUT_SANITIZE_LIMIT)
     } else {
         0.0
     }
 }
 
+/// Bound one output sample to +/-`OUTPUT_SAFETY_LIMIT` with denormal
+/// flushing. Non-finite input becomes silence.
 #[inline]
 pub(crate) fn finite_output(sample: f32) -> f32 {
     if sample.is_finite() {
-        flush_denormal(sample.clamp(-128.0, 128.0))
+        flush_denormal(sample.clamp(-OUTPUT_SAFETY_LIMIT, OUTPUT_SAFETY_LIMIT))
     } else {
         0.0
     }
@@ -247,14 +278,47 @@ mod tests {
     }
 
     #[test]
+    fn clamp_guards_preserve_nominal_audio() {
+        assert_eq!(sanitize_sample(0.5), 0.5);
+        assert_eq!(sanitize_sample(16.0), 16.0);
+        assert_eq!(sanitize_sample(24.0), INPUT_SANITIZE_LIMIT);
+        assert_eq!(sanitize_sample(-24.0), -INPUT_SANITIZE_LIMIT);
+        assert_eq!(sanitize_sample(f32::INFINITY), 0.0);
+        assert_eq!(sanitize_sample(f32::NAN), 0.0);
+        assert_eq!(finite_output(1.0), 1.0);
+        assert_eq!(finite_output(200.0), OUTPUT_SAFETY_LIMIT);
+        assert_eq!(finite_output(-200.0), -OUTPUT_SAFETY_LIMIT);
+        assert_eq!(finite_output(f32::INFINITY), 0.0);
+        assert_eq!(finite_output(f32::NAN), 0.0);
+    }
+
+    #[test]
     fn reconfigure_preserves_the_configured_time_constant() {
-        let mut smoother = ControlSmoother::new(0.0, 80.0, 48_000.0);
-        smoother.set_target(1.0);
-        smoother.reconfigure(96_000.0);
-        let one_tau_samples = (0.080_f32 * 96_000.0_f32).round() as usize;
-        for _ in 0..one_tau_samples {
-            smoother.advance();
+        // Pinned across the standard host rates: after reconfiguration the
+        // smoother must still reach one time constant (1 - 1/e) after exactly
+        // tau samples at the NEW rate, with the target and time_ms unchanged.
+        for &(from_rate, to_rate) in &[
+            (48_000.0_f32, 96_000.0_f32),
+            (96_000.0_f32, 48_000.0_f32),
+            (44_100.0_f32, 192_000.0_f32),
+            (192_000.0_f32, 44_100.0_f32),
+        ] {
+            let mut smoother = ControlSmoother::new(0.0, 80.0, from_rate);
+            smoother.set_target(1.0);
+            assert_eq!(smoother.target(), 1.0);
+            smoother.reconfigure(to_rate);
+            assert_eq!(smoother.target(), 1.0);
+            let one_tau_samples = (0.080_f32 * to_rate).round() as usize;
+            for _ in 0..one_tau_samples {
+                smoother.advance();
+            }
+            assert!(
+                (smoother.current - (1.0 - (-1.0_f32).exp())).abs() < 0.01,
+                "from {from_rate} to {to_rate}: current={} expected={}",
+                smoother.current,
+                1.0 - (-1.0_f32).exp()
+            );
+            assert!(!smoother.is_settled() || smoother.current == smoother.target());
         }
-        assert!((smoother.current - (1.0 - (-1.0_f32).exp())).abs() < 0.01);
     }
 }

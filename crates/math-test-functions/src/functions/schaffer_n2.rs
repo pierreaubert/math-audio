@@ -6,6 +6,11 @@ use ndarray::Array1;
 /// Global minimum: f(x) = 0 at x = (0, 0)
 /// Bounds: x_i in [-100, 100]
 pub fn schaffer_n2(x: &Array1<f64>) -> f64 {
+    assert!(
+        x.len() == 2,
+        "schaffer_n2 requires 2 dimensions, got {}",
+        x.len()
+    );
     let x1 = x[0];
     let x2 = x[1];
     0.5 + ((x1.powi(2) + x2.powi(2)).sin().powi(2) - 0.5)

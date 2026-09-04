@@ -485,6 +485,80 @@ fn test_voronoi_new_and_accessors() {
     assert_eq!(v.vectors().len(), 3 * 4);
 }
 
+/// P1: `Voronoi::new` sanitizes non-finite bounds in all build modes
+/// (previously a `debug_assert` only, so release silently kept garbage).
+/// NaN components fall back to the triangulation's point bounding box.
+#[test]
+fn test_voronoi_new_sanitizes_nonfinite_bounds() {
+    let points = vec![(0.0, 0.0), (10.0, 0.0), (5.0, 10.0)];
+    let d = Delaunay::from_points(&points);
+    let v = d.voronoi([f64::NAN, f64::NEG_INFINITY, 10.0, f64::NAN]);
+    let [xmin, ymin, xmax, ymax] = v.bounds();
+    assert!(xmin.is_finite() && ymin.is_finite() && xmax.is_finite() && ymax.is_finite());
+    assert!(xmin < xmax && ymin < ymax, "bounds must be ordered, got {:?}", v.bounds());
+    // Finite components are kept, non-finite ones fall back to the points bbox.
+    assert_eq!(xmax, 10.0);
+    assert_eq!(xmin, 0.0);
+    assert_eq!(ymin, 0.0);
+    assert_eq!(ymax, 10.0);
+    // The diagram is still usable.
+    assert!(v.cell_polygon(0).is_some());
+}
+
+/// P1: reversed bounds are swapped, not kept as an inverted box.
+#[test]
+fn test_voronoi_new_sorts_reversed_bounds() {
+    let points = vec![(0.0, 0.0), (10.0, 0.0), (5.0, 10.0)];
+    let d = Delaunay::from_points(&points);
+    let v = d.voronoi([10.0, 10.0, 0.0, 0.0]);
+    assert_eq!(v.bounds(), [0.0, 0.0, 10.0, 10.0]);
+}
+
+/// P1: degenerate equal bounds are expanded to a strictly ordered box.
+#[test]
+fn test_voronoi_new_expands_degenerate_bounds() {
+    let points = vec![(0.0, 0.0), (10.0, 0.0), (5.0, 10.0)];
+    let d = Delaunay::from_points(&points);
+    let v = d.voronoi([5.0, 0.0, 5.0, 10.0]);
+    let [xmin, ymin, xmax, ymax] = v.bounds();
+    assert!(xmin < xmax && ymin < ymax, "bounds must be strictly ordered, got {:?}", v.bounds());
+    assert_eq!((xmin, ymin), (5.0, 0.0));
+}
+
+/// P1: fully non-finite bounds on an empty triangulation fall back to
+/// the unit box (no NaN leaks into the diagram).
+#[test]
+fn test_voronoi_new_all_nonfinite_bounds_fallback() {
+    let d = Delaunay::new(vec![]);
+    let v = d.voronoi([f64::NAN, f64::INFINITY, f64::NEG_INFINITY, f64::NAN]);
+    let [xmin, ymin, xmax, ymax] = v.bounds();
+    assert!(xmin.is_finite() && ymin.is_finite() && xmax.is_finite() && ymax.is_finite());
+    assert!(xmin < xmax && ymin < ymax);
+}
+
+/// P2: out-of-bounds cell queries return None/false instead of panicking.
+#[test]
+fn test_cell_polygon_and_contains_out_of_bounds() {
+    let points = vec![(0.0, 0.0), (10.0, 0.0), (5.0, 10.0)];
+    let d = Delaunay::from_points(&points);
+    let v = d.voronoi([0.0, 0.0, 10.0, 10.0]);
+    assert!(v.cell_polygon(d.len()).is_none());
+    assert!(v.cell_polygon(usize::MAX).is_none());
+    assert!(!v.contains(d.len(), 5.0, 5.0));
+    assert!(!v.contains(usize::MAX, 5.0, 5.0));
+}
+
+/// P2: pins the `cell_polygon` epsilon scale assumption — sub-unit boxes
+/// use the absolute 1e-9 floor (`bbox_scale` floors at 1.0).
+#[test]
+fn test_bbox_scale_floor_for_subunit_box() {
+    let points = vec![(0.0, 0.0), (1e-6, 0.0), (0.0, 1e-6)];
+    let d = Delaunay::from_points(&points);
+    let v = d.voronoi([0.0, 0.0, 1e-6, 1e-6]);
+    assert!((v.bbox_scale() - 1.0).abs() < 1e-12, "sub-unit box must floor at 1.0");
+    assert!((v.epsilon() - 1e-9).abs() < 1e-18, "epsilon must floor at absolute 1e-9");
+}
+
 #[test]
 fn test_voronoi_bbox_scale_and_epsilon_small() {
     let points = vec![(0.0, 0.0), (1.0, 0.0), (0.5, 1.0)];

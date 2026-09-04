@@ -42,6 +42,59 @@ pub enum IirError {
 /// A specialized `Result` type for IIR operations.
 pub type Result<T> = std::result::Result<T, IirError>;
 
+/// Errors that can occur during FIR filter construction.
+///
+/// Returned by the fallible `Fir::try_*` constructors. The infallible
+/// `Fir::new_custom` / `Fir::lowpass` / `Fir::highpass` / `Fir::bandpass` /
+/// `Fir::bandstop` constructors panic with one of these errors as the payload
+/// (via `expect`) when validation fails, in all build profiles.
+#[derive(Debug, Clone, PartialEq, Error)]
+pub enum FirError {
+    /// Coefficient list is empty (`Fir::try_new_custom` requires ≥ 1 tap).
+    #[error("FIR filter must have at least one tap (got empty coefficients)")]
+    EmptyCoeffs,
+
+    /// Tap count is zero (windowed-sinc constructors require `n_taps > 0`).
+    #[error("invalid tap count: {n_taps} (must be > 0)")]
+    InvalidTaps {
+        /// The invalid tap count.
+        n_taps: usize,
+    },
+
+    /// Sample rate is invalid (must be > 0).
+    #[error("invalid sample rate: {sample_rate} Hz (must be > 0)")]
+    InvalidSampleRate {
+        /// The invalid sample rate value.
+        sample_rate: f64,
+    },
+
+    /// Cutoff frequency is invalid (must be > 0 and < Nyquist).
+    #[error("invalid frequency: {freq} Hz (must be > 0 and < Nyquist frequency {nyquist} Hz)")]
+    InvalidFrequency {
+        /// The invalid frequency value.
+        freq: f64,
+        /// The Nyquist frequency (sample_rate / 2).
+        nyquist: f64,
+    },
+
+    /// Band edges are invalid (require `0 < freq_low < freq_high < Nyquist`).
+    #[error(
+        "invalid band edges: low {freq_low} Hz, high {freq_high} Hz \
+         (require 0 < low < high < Nyquist {nyquist} Hz)"
+    )]
+    InvalidBand {
+        /// The lower cutoff frequency.
+        freq_low: f64,
+        /// The upper cutoff frequency.
+        freq_high: f64,
+        /// The Nyquist frequency (sample_rate / 2).
+        nyquist: f64,
+    },
+}
+
+/// A specialized `Result` type for FIR operations.
+pub type FirResult<T> = std::result::Result<T, FirError>;
+
 impl IirError {
     /// Returns `true` if this is a frequency-related error.
     pub fn is_frequency_error(&self) -> bool {
@@ -94,6 +147,33 @@ mod tests {
 
         assert!(freq_err.is_frequency_error());
         assert!(!q_err.is_frequency_error());
+    }
+
+    #[test]
+    fn test_fir_error_display() {
+        assert_eq!(
+            FirError::EmptyCoeffs.to_string(),
+            "FIR filter must have at least one tap (got empty coefficients)"
+        );
+        assert_eq!(
+            FirError::InvalidTaps { n_taps: 0 }.to_string(),
+            "invalid tap count: 0 (must be > 0)"
+        );
+        let err = FirError::InvalidSampleRate { sample_rate: 0.0 };
+        assert!(err.to_string().contains('0'));
+        let err = FirError::InvalidFrequency {
+            freq: 30000.0,
+            nyquist: 24000.0,
+        };
+        assert!(err.to_string().contains("30000"));
+        assert!(err.to_string().contains("24000"));
+        let err = FirError::InvalidBand {
+            freq_low: 2000.0,
+            freq_high: 500.0,
+            nyquist: 24000.0,
+        };
+        assert!(err.to_string().contains("2000"));
+        assert!(err.to_string().contains("500"));
     }
 
     #[test]

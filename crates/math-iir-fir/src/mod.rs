@@ -60,7 +60,7 @@ mod phase_smooth;
 pub mod svf;
 
 // Re-export error types
-pub use error::{IirError, Result};
+pub use error::{FirError, FirResult, IirError, Result};
 
 // Re-export IIR types and functions
 pub use iir::{
@@ -76,8 +76,9 @@ pub use iir::{
 
 // Re-export FIR types and functions
 pub use fir::{
-    Fir, FirBank, FirFilterType, WindowType, compute_fir_bank_response, fir_bank_preamp_gain,
-    fir_bank_spl, generate_window,
+    Fir, FirBank, FirFilterType, WindowType, compute_fir_bank_response,
+    compute_fir_bank_response_into, fir_bank_preamp_gain, fir_bank_spl, fir_bank_spl_into,
+    generate_window,
 };
 
 // Re-export FIR design types and functions (frequency response matching)

@@ -182,6 +182,37 @@ fn test_estimate_noise_cutoff_finds_decay() {
 }
 
 #[test]
+fn test_noise_cutoff_snr_gate_rejects_flat_signal() {
+    // No decay above the floor (peak SNR = 0 dB): the gate returns the
+    // start sample so downstream Schroeder fits see an empty region.
+    let rir = vec![1.0f32; 4800];
+    assert_eq!(estimate_noise_cutoff(&rir, 0), 0);
+}
+
+#[test]
+fn test_noise_cutoff_lundeby_tracks_floor_crossover() {
+    // Deterministic exponential decay (T60 = 0.3 s) onto a −120 dB
+    // energy floor. The 10 dB crossing sits at env² = 1e-5 → t ≈ 0.25 s.
+    let sr = 48000.0;
+    let n = sr as usize; // 1 s
+    let alpha = std::f64::consts::LN_10 * 6.0 / (2.0 * 0.3);
+    let mut rir = vec![0.0f32; n];
+    for (i, sample) in rir.iter_mut().enumerate() {
+        let t = i as f64 / sr;
+        let env = (-alpha * t).exp().max(1e-3);
+        let sign = if i % 2 == 0 { 1.0 } else { -1.0 };
+        *sample = (env * sign) as f32;
+    }
+    let cutoff = estimate_noise_cutoff(&rir, 0);
+    // Peak SNR = 60 dB clears the 15 dB gate; crossing lands near 0.25 s
+    // with a generous ±60 ms tolerance for window averaging.
+    assert!(
+        cutoff > 4800 && cutoff < 24000,
+        "cutoff = {cutoff}, expected near 12000"
+    );
+}
+
+#[test]
 fn test_linear_fit_mismatched_and_constant_x() {
     assert!(linear_fit(&[0.0, 1.0], &[0.0]).is_none());
     assert!(linear_fit(&[1.0, 1.0], &[0.0, 1.0]).is_none());

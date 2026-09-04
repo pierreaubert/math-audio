@@ -1,3 +1,14 @@
+# 0.5.3
+
+## Fixes
+
+- Fixed-dimension functions now assert their arity (e.g. `eggholder`
+  requires 2 dims) instead of panicking on indexing or silently ignoring
+  extra dims; `rosenbrock`/`pinter` guard empty inputs.
+- `happy_cat` is now a deprecated alias delegating to `happycat`,
+  resolving the `|s-n|^0.5` vs `|s-n|^0.25` exponent divergence; the
+  function registry dispatches `happy_cat` to the reference definition.
+
 # 0.5.2
 
 ## Fixes

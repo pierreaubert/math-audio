@@ -6,6 +6,11 @@ use ndarray::Array1;
 /// Global minimum: f(x) = 0 at x = (0, 0, ..., 0)
 /// Bounds: x_i in [-1, 4]
 pub fn brown(x: &Array1<f64>) -> f64 {
+    assert!(
+        x.len() >= 2,
+        "brown requires at least 2 dimensions, got {}",
+        x.len()
+    );
     let mut sum = 0.0;
     for i in 0..x.len() - 1 {
         let xi = x[i];

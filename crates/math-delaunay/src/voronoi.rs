@@ -33,8 +33,20 @@ impl<'a> Voronoi<'a> {
     /// Create a Voronoi diagram from a Delaunay triangulation and bounds
     /// `[xmin, ymin, xmax, ymax]`.
     ///
-    /// Bounds must be finite and ordered (`xmin < xmax`, `ymin < ymax`).
-    pub fn new(delaunay: &'a Delaunay, [xmin, ymin, xmax, ymax]: [f64; 4]) -> Self {
+    /// **Invalid bounds are sanitized, not rejected** (this crate has no
+    /// error type, and the constructor must keep its signature). This
+    /// runs in all build modes (release included):
+    /// - each non-finite component is replaced with the corresponding
+    ///   edge of the triangulation's point bounding box (or of the unit
+    ///   box `[0, 0, 1, 1]` when there are no finite points);
+    /// - reversed pairs are swapped so `xmin <= xmax`, `ymin <= ymax`;
+    /// - degenerate equal pairs are expanded (`xmax = xmin + 1.0`,
+    ///   `ymax = ymin + 1.0`).
+    ///
+    /// After sanitizing, bounds are always finite and strictly ordered
+    /// (`xmin < xmax`, `ymin < ymax`).
+    pub fn new(delaunay: &'a Delaunay, bounds: [f64; 4]) -> Self {
+        let [xmin, ymin, xmax, ymax] = Self::sanitize_bounds(delaunay, bounds);
         debug_assert!(
             xmin.is_finite()
                 && ymin.is_finite()
@@ -90,6 +102,71 @@ impl<'a> Voronoi<'a> {
         }
     }
 
+    /// Repair caller-supplied bounds into finite, strictly ordered bounds.
+    ///
+    /// Non-finite components fall back to the triangulation's point
+    /// bounding box (finite coordinates only; `Delaunay::new` already
+    /// sanitizes, so this is just the min/max), or to the unit box
+    /// `[0, 0, 1, 1]` when there are no finite points at all.
+    fn sanitize_bounds(delaunay: &Delaunay, [xmin, ymin, xmax, ymax]: [f64; 4]) -> [f64; 4] {
+        let mut fx0 = f64::INFINITY;
+        let mut fy0 = f64::INFINITY;
+        let mut fx1 = f64::NEG_INFINITY;
+        let mut fy1 = f64::NEG_INFINITY;
+        let pts = delaunay.points();
+        for i in (0..pts.len()).step_by(2) {
+            let (x, y) = (pts[i], pts[i + 1]);
+            if !x.is_finite() || !y.is_finite() {
+                continue;
+            }
+            if x < fx0 {
+                fx0 = x;
+            }
+            if x > fx1 {
+                fx1 = x;
+            }
+            if y < fy0 {
+                fy0 = y;
+            }
+            if y > fy1 {
+                fy1 = y;
+            }
+        }
+        if !fx0.is_finite() {
+            // No finite points: fall back to the unit box.
+            fx0 = 0.0;
+            fy0 = 0.0;
+            fx1 = 1.0;
+            fy1 = 1.0;
+        }
+        let (mut xmin, mut ymin, mut xmax, mut ymax) = (xmin, ymin, xmax, ymax);
+        if !xmin.is_finite() {
+            xmin = fx0;
+        }
+        if !ymin.is_finite() {
+            ymin = fy0;
+        }
+        if !xmax.is_finite() {
+            xmax = fx1;
+        }
+        if !ymax.is_finite() {
+            ymax = fy1;
+        }
+        if xmin > xmax {
+            std::mem::swap(&mut xmin, &mut xmax);
+        }
+        if ymin > ymax {
+            std::mem::swap(&mut ymin, &mut ymax);
+        }
+        if xmin >= xmax {
+            xmax = xmin + 1.0;
+        }
+        if ymin >= ymax {
+            ymax = ymin + 1.0;
+        }
+        [xmin, ymin, xmax, ymax]
+    }
+
     /// The Delaunay triangulation this Voronoi diagram was built from.
     pub fn delaunay(&self) -> &Delaunay {
         self.delaunay
@@ -131,6 +208,18 @@ impl<'a> Voronoi<'a> {
 
     /// Get the polygon for Voronoi cell i, clipped to bounds.
     /// Returns coordinates as `Vec<(f64, f64)>`, or None if the cell is degenerate.
+    ///
+    /// Returns `None` (no panic) when `i` is out of bounds
+    /// (`i >= delaunay.len()`).
+    ///
+    /// **Epsilon scale assumptions.** Duplicate-vertex removal compares
+    /// coordinates with tolerance `eps = 1e-9 · max(width, height, 1.0)`,
+    /// i.e. relative to the clipping-box size for boxes at least 1 unit
+    /// across, with an absolute `1e-9` floor for smaller boxes. This assumes the geometry lives
+    /// within ~1e9 of the box scale: vertices closer than `eps` are
+    /// treated as identical, so boxes far below 1 unit still dedupe at
+    /// the `1e-9` floor, and coordinates vastly larger than the box may
+    /// dedupe more aggressively than expected.
     pub fn cell_polygon(&self, i: usize) -> Option<Vec<(f64, f64)>> {
         let clipped = self.clip(i)?;
         if clipped.len() < 4 {
@@ -173,7 +262,13 @@ impl<'a> Voronoi<'a> {
     }
 
     /// Test if point (x, y) is inside cell i.
+    ///
+    /// Returns `false` (no panic) for out-of-bounds `i` or `NaN`
+    /// coordinates.
     pub fn contains(&self, i: usize, x: f64, y: f64) -> bool {
+        if i >= self.delaunay.len() {
+            return false;
+        }
         if x.is_nan() || y.is_nan() {
             return false;
         }
@@ -187,7 +282,11 @@ impl<'a> Voronoi<'a> {
     /// Construct the raw (unclipped) Voronoi cell for point i.
     /// Returns flat coordinates [x0, y0, x1, y1, ...] or None.
     /// Construct raw (unclipped) cell — exposed for debugging.
+    /// Returns `None` when `i` is out of bounds.
     pub(crate) fn cell(&self, i: usize) -> Option<Vec<f64>> {
+        if i >= self.delaunay.len() {
+            return None;
+        }
         let e0 = self.delaunay.inedges[i];
         if e0 == NO_EDGE {
             return None; // coincident point
@@ -589,14 +688,20 @@ impl<'a> Voronoi<'a> {
         if x.is_nan() { None } else { Some([x, y]) }
     }
 
-    /// Characteristic length scale of the bounding box.
+    /// Characteristic length scale of the bounding box:
+    /// `max(width, height)` with a floor of `1.0` so sub-unit boxes
+    /// still get a usable absolute epsilon (see `epsilon`).
     fn bbox_scale(&self) -> f64 {
         let w = (self.xmax - self.xmin).abs();
         let h = (self.ymax - self.ymin).abs();
         w.max(h).max(1.0)
     }
 
-    /// Geometric epsilon relative to the bounding box size.
+    /// Geometric epsilon relative to the bounding box size:
+    /// `1e-9 · bbox_scale`. Used for duplicate-vertex removal in
+    /// `cell_polygon` and for on-edge tests in `edgecode`/`edge`.
+    /// Assumes coordinates within ~1e9 of the box scale; see
+    /// `cell_polygon` for the full scale assumptions.
     fn epsilon(&self) -> f64 {
         1e-9 * self.bbox_scale()
     }

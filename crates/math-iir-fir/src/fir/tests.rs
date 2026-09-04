@@ -476,6 +476,126 @@ mod fir_tests {
     }
 
     #[test]
+    fn test_try_constructors_accept_valid_params() {
+        assert!(Fir::try_new_custom(vec![0.5, 0.5], 48000.0_f64).is_ok());
+        assert!(Fir::try_lowpass(51, 1000.0, 48000.0_f64, WindowType::Hamming, 0.0).is_ok());
+        assert!(Fir::try_highpass(51, 1000.0, 48000.0_f64, WindowType::Hann, 0.0).is_ok());
+        assert!(
+            Fir::try_bandpass(51, 500.0, 2000.0, 48000.0_f64, WindowType::Blackman, 0.0).is_ok()
+        );
+        assert!(Fir::try_bandstop(51, 500.0, 2000.0, 48000.0_f64, WindowType::Kaiser, 5.0).is_ok());
+    }
+
+    #[test]
+    fn test_try_new_custom_rejects_empty_coeffs() {
+        let err = Fir::try_new_custom(Vec::<f64>::new(), 48000.0).unwrap_err();
+        assert_eq!(err, crate::FirError::EmptyCoeffs);
+    }
+
+    #[test]
+    fn test_try_constructors_reject_bad_sample_rate() {
+        let err = Fir::try_new_custom(vec![1.0_f64], 0.0).unwrap_err();
+        assert!(matches!(err, crate::FirError::InvalidSampleRate { .. }));
+        let err = Fir::try_lowpass(51, 1000.0, -48000.0_f64, WindowType::Hamming, 0.0).unwrap_err();
+        assert!(matches!(err, crate::FirError::InvalidSampleRate { .. }));
+    }
+
+    #[test]
+    fn test_try_constructors_reject_zero_taps() {
+        let err = Fir::try_lowpass(0, 1000.0, 48000.0_f64, WindowType::Hamming, 0.0).unwrap_err();
+        assert_eq!(err, crate::FirError::InvalidTaps { n_taps: 0 });
+    }
+
+    #[test]
+    fn test_try_constructors_reject_bad_cutoff() {
+        // At Nyquist and above.
+        let err = Fir::try_lowpass(51, 24000.0, 48000.0_f64, WindowType::Hamming, 0.0).unwrap_err();
+        assert!(matches!(err, crate::FirError::InvalidFrequency { .. }));
+        // Non-positive.
+        let err = Fir::try_highpass(51, 0.0, 48000.0_f64, WindowType::Hann, 0.0).unwrap_err();
+        assert!(matches!(err, crate::FirError::InvalidFrequency { .. }));
+    }
+
+    #[test]
+    fn test_try_constructors_reject_bad_band() {
+        // Inverted edges.
+        let err =
+            Fir::try_bandpass(51, 2000.0, 500.0, 48000.0_f64, WindowType::Hann, 0.0).unwrap_err();
+        assert!(matches!(err, crate::FirError::InvalidBand { .. }));
+        // Edge above Nyquist.
+        let err =
+            Fir::try_bandstop(51, 500.0, 30000.0, 48000.0_f64, WindowType::Hann, 0.0).unwrap_err();
+        assert!(matches!(err, crate::FirError::InvalidBand { .. }));
+        // NaN inputs are rejected, not silently accepted.
+        let err =
+            Fir::try_lowpass(51, f64::NAN, 48000.0_f64, WindowType::Hamming, 0.0).unwrap_err();
+        assert!(matches!(err, crate::FirError::InvalidFrequency { .. }));
+    }
+
+    #[test]
+    #[should_panic(expected = "Fir::new_custom")]
+    fn test_new_custom_panics_on_empty_coeffs() {
+        let _ = Fir::new_custom(Vec::<f64>::new(), 48000.0);
+    }
+
+    #[test]
+    #[should_panic(expected = "Fir::lowpass")]
+    fn test_lowpass_panics_on_zero_taps() {
+        let _ = Fir::lowpass(0, 1000.0, 48000.0_f64, WindowType::Hamming, 0.0);
+    }
+
+    #[test]
+    #[should_panic(expected = "Fir::lowpass")]
+    fn test_lowpass_panics_above_nyquist() {
+        let _ = Fir::lowpass(51, 48000.0, 48000.0_f64, WindowType::Hamming, 0.0);
+    }
+
+    #[test]
+    #[should_panic(expected = "Fir::bandpass")]
+    fn test_bandpass_panics_on_inverted_edges() {
+        let _ = Fir::bandpass(51, 2000.0, 500.0, 48000.0_f64, WindowType::Hann, 0.0);
+    }
+
+    #[test]
+    fn test_np_log_result_into_matches_allocating() {
+        let fir = Fir::lowpass(51, 1000.0_f64, 48000.0, WindowType::Hamming, 0.0);
+        let freqs = array![20.0_f64, 100.0, 1_000.0, 10_000.0, 20_000.0];
+        let expected = fir.np_log_result(&freqs);
+        let mut out = ndarray::Array1::zeros(freqs.len());
+        fir.np_log_result_into(&freqs, &mut out);
+        assert_eq!(out, expected);
+    }
+
+    #[test]
+    fn test_fir_bank_into_matches_allocating() {
+        let lp = Fir::lowpass(31, 1000.0, 48000.0, WindowType::Hamming, 0.0);
+        let hp = Fir::highpass(31, 2000.0, 48000.0, WindowType::Hann, 0.0);
+        let bank = vec![(1.0, lp), (0.5, hp)];
+        let freqs = array![100.0, 1000.0, 5000.0, 10_000.0];
+        let expected = fir_bank_spl(&freqs, &bank);
+        let mut response = ndarray::Array1::zeros(freqs.len());
+        let mut scratch = ndarray::Array1::zeros(freqs.len());
+        fir_bank_spl_into(&freqs, &bank, &mut response, &mut scratch);
+        assert_eq!(response, expected);
+
+        // compute_fir_bank_response_into agrees too.
+        let mut response2 = ndarray::Array1::zeros(freqs.len());
+        let mut scratch2 = ndarray::Array1::zeros(freqs.len());
+        crate::compute_fir_bank_response_into(&freqs, &bank, &mut response2, &mut scratch2);
+        assert_eq!(response2, expected);
+    }
+
+    #[test]
+    fn test_process_block_runs_under_ftz_guard() {
+        use crate::denormals::ScopedFlushToZero;
+        let mut fir = Fir::lowpass(31, 1000.0_f64, 48000.0, WindowType::Hamming, 0.0);
+        let _guard = ScopedFlushToZero::new();
+        let mut block = vec![1.0_f64; 64];
+        fir.process_block(&mut block);
+        assert!(block.iter().all(|v| v.is_finite()));
+    }
+
+    #[test]
     fn test_generate_window_all_types_non_empty() {
         for &wt in &[
             WindowType::Rectangular,

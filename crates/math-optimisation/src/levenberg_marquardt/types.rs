@@ -34,6 +34,14 @@ pub struct LMIntermediate {
 /// Progress callback type for the LM solver.
 pub type LMCallback = Box<dyn FnMut(&LMIntermediate) -> LMCallbackAction>;
 
+/// Analytic Jacobian function for the LM solver.
+///
+/// Maps `x` to the `(n_residuals x n_params)` Jacobian matrix `J[i, j] =
+/// dr_i/dx_j`. When supplied via [`LMConfig::jacobian`], the solver calls it
+/// instead of the built-in central finite differences, saving `2 * n_params`
+/// residual evaluations per iteration and avoiding differencing error.
+pub type JacobianFn = Box<dyn Fn(&Array1<f64>) -> Array2<f64>>;
+
 /// Configuration for the LM solver.
 pub struct LMConfig {
     /// Maximum iterations (default 100).
@@ -46,6 +54,11 @@ pub struct LMConfig {
     pub lambda_init: f64,
     /// Finite-difference step for Jacobian approximation (default 1e-8).
     pub jacobian_epsilon: f64,
+    /// Optional analytic Jacobian. When `Some`, the solver uses it instead of
+    /// central finite differences (and `jacobian_epsilon` is ignored).
+    /// The function must return an `(n_residuals x n_params)` matrix; a shape
+    /// mismatch returns [`LMError::JacobianDimensionMismatch`].
+    pub jacobian: Option<JacobianFn>,
     /// Initial guess (required).
     pub x0: Array1<f64>,
     /// Per-residual weights (optional; default = uniform).
@@ -82,7 +95,9 @@ pub struct LMReport {
 /// # Arguments
 /// * `residual_fn` — returns the residual vector `r(x)`.
 /// * `bounds` — per-parameter `(lower, upper)` pairs.
-/// * `config` — solver configuration (must include `x0`).
+/// * `config` — solver configuration (must include `x0`). Set
+///   [`LMConfig::jacobian`] to supply an analytic Jacobian instead of the
+///   default central finite differences.
 pub fn levenberg_marquardt<F>(
     residual_fn: &F,
     bounds: &[(f64, f64)],
@@ -120,6 +135,7 @@ where
     let mut f_val = weighted_sos(&r, &w);
     let mut lambda = config.lambda_init;
     let eps = config.jacobian_epsilon;
+    let analytic_jacobian = config.jacobian;
 
     let mut success = false;
     let mut message = format!("max iterations ({}) reached", config.maxiter);
@@ -152,8 +168,22 @@ where
             break;
         }
 
-        // --- Compute Jacobian via central finite differences ---
-        let jac = compute_jacobian(residual_fn, &x, &r, n_residuals, eps, &mut nfev)?;
+        // --- Jacobian: analytic hook when supplied, else central finite differences ---
+        let jac = match analytic_jacobian {
+            Some(ref jac_fn) => {
+                let jac = jac_fn(&x);
+                if jac.nrows() != n_residuals || jac.ncols() != n_params {
+                    return Err(LMError::JacobianDimensionMismatch {
+                        expected_rows: n_residuals,
+                        expected_cols: n_params,
+                        got_rows: jac.nrows(),
+                        got_cols: jac.ncols(),
+                    });
+                }
+                jac
+            }
+            None => compute_jacobian(residual_fn, &x, &r, n_residuals, eps, &mut nfev)?,
+        };
 
         // --- Form damped normal equations ---
         // LM step solves: (J^T W J + λ·D) δ = −J^T W r

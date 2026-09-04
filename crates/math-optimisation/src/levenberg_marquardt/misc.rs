@@ -26,10 +26,22 @@ pub(super) fn jacobian_step(eps: f64, x: f64) -> f64 {
 
 /// Solve a dense symmetric positive-definite system Ax = b via Gaussian
 /// elimination with partial pivoting. Returns `None` if the matrix is singular.
+///
+/// The singularity test is scale-aware: the pivot threshold is
+/// `1e-12 * max(1.0, max|A_ij|)`, so a fixed absolute cutoff neither rejects
+/// legitimate tiny-scale systems below unit magnitude nor mistakes pure
+/// roundoff for a usable pivot in large-scale systems.
 pub(super) fn solve_linear_system(a: &Array2<f64>, b: &Array1<f64>) -> Option<Array1<f64>> {
     let n = b.len();
     debug_assert_eq!(a.nrows(), n);
     debug_assert_eq!(a.ncols(), n);
+
+    // Scale-aware pivot threshold derived from the largest entry of `A`.
+    let mut anorm: f64 = 0.0;
+    for v in a.iter() {
+        anorm = anorm.max(v.abs());
+    }
+    let pivot_tol = 1e-12 * anorm.max(1.0);
 
     // Augmented matrix [A | b]
     let mut aug = Array2::zeros((n, n + 1));
@@ -53,7 +65,7 @@ pub(super) fn solve_linear_system(a: &Array2<f64>, b: &Array1<f64>) -> Option<Ar
             }
         }
 
-        if max_val < 1e-12 {
+        if max_val < pivot_tol {
             return None; // Singular
         }
 

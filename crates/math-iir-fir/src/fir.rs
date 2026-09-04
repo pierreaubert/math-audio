@@ -1,5 +1,6 @@
 //! FIR filter implementation with windowing functions
 
+use crate::error::{FirError, FirResult};
 use crate::traits::{FilterFloat, lit};
 use ndarray::Array1;
 use std::fmt;
@@ -58,6 +59,52 @@ pub struct Fir<T: FilterFloat = f64> {
     coeffs_rev: Vec<T>,
 }
 
+/// Release-checked constructor validation helpers (shared by all `try_*`
+/// constructors so debug and release builds reject the same inputs).
+fn check_taps(n_taps: usize) -> FirResult<()> {
+    if n_taps == 0 {
+        return Err(FirError::InvalidTaps { n_taps });
+    }
+    Ok(())
+}
+
+fn check_srate<T: FilterFloat>(srate: T) -> FirResult<()> {
+    if srate.partial_cmp(&T::zero()) != Some(std::cmp::Ordering::Greater) {
+        return Err(FirError::InvalidSampleRate {
+            sample_rate: srate.to_f64().unwrap_or(f64::NAN),
+        });
+    }
+    Ok(())
+}
+
+fn check_cutoff<T: FilterFloat>(cutoff: T, srate: T) -> FirResult<()> {
+    let nyquist = srate / lit(2.0);
+    if !(cutoff > T::zero() && cutoff < nyquist) {
+        return Err(FirError::InvalidFrequency {
+            freq: cutoff.to_f64().unwrap_or(f64::NAN),
+            nyquist: nyquist.to_f64().unwrap_or(f64::NAN),
+        });
+    }
+    Ok(())
+}
+
+fn check_band<T: FilterFloat>(freq_low: T, freq_high: T, srate: T) -> FirResult<()> {
+    let nyquist = srate / lit(2.0);
+    if !(freq_low > T::zero()
+        && freq_low < nyquist
+        && freq_high > T::zero()
+        && freq_high < nyquist
+        && freq_low < freq_high)
+    {
+        return Err(FirError::InvalidBand {
+            freq_low: freq_low.to_f64().unwrap_or(f64::NAN),
+            freq_high: freq_high.to_f64().unwrap_or(f64::NAN),
+            nyquist: nyquist.to_f64().unwrap_or(f64::NAN),
+        });
+    }
+    Ok(())
+}
+
 impl<T: FilterFloat> Fir<T> {
     /// Creates a new FIR filter with custom coefficients.
     ///
@@ -66,16 +113,29 @@ impl<T: FilterFloat> Fir<T> {
     /// * `srate` - Sample rate in Hz
     ///
     /// # Panics
-    /// Panics in debug mode if:
+    /// Panics in all build profiles (validated with [`FirError`]) if:
     /// - `coeffs` is empty
     /// - `srate` is not positive
+    ///
+    /// For a non-panicking variant, see [`Fir::try_new_custom`].
     pub fn new_custom(coeffs: Vec<T>, srate: T) -> Self {
-        debug_assert!(!coeffs.is_empty(), "FIR filter must have at least one tap");
-        debug_assert!(srate > T::zero(), "Sample rate must be positive");
+        Self::try_new_custom(coeffs, srate).expect("Fir::new_custom: invalid parameters")
+    }
+
+    /// Fallible version of [`Fir::new_custom`].
+    ///
+    /// # Errors
+    /// Returns [`FirError::EmptyCoeffs`] if `coeffs` is empty, or
+    /// [`FirError::InvalidSampleRate`] if `srate` is not positive.
+    pub fn try_new_custom(coeffs: Vec<T>, srate: T) -> FirResult<Self> {
+        if coeffs.is_empty() {
+            return Err(FirError::EmptyCoeffs);
+        }
+        check_srate(srate)?;
 
         let n_taps = coeffs.len();
         let symmetric = Self::coeffs_are_symmetric(&coeffs);
-        Fir {
+        Ok(Fir {
             filter_type: FirFilterType::Custom,
             coeffs,
             srate,
@@ -88,7 +148,7 @@ impl<T: FilterFloat> Fir<T> {
             symmetric,
             scratch: Vec::new(),
             coeffs_rev: Vec::new(),
-        }
+        })
     }
 
     /// Creates a lowpass FIR filter using the windowed-sinc method.
@@ -101,24 +161,38 @@ impl<T: FilterFloat> Fir<T> {
     /// * `kaiser_beta` - Beta parameter for Kaiser window (ignored for other windows)
     ///
     /// # Panics
-    /// Panics in debug mode if:
+    /// Panics in all build profiles (validated with [`FirError`]) if:
     /// - `n_taps` is zero
     /// - `srate` is not positive
     /// - `cutoff` is not positive or >= Nyquist frequency (srate/2)
+    ///
+    /// For a non-panicking variant, see [`Fir::try_lowpass`].
     pub fn lowpass(n_taps: usize, cutoff: T, srate: T, window: WindowType, kaiser_beta: T) -> Self {
-        debug_assert!(n_taps > 0, "Number of taps must be positive");
-        debug_assert!(srate > T::zero(), "Sample rate must be positive");
-        debug_assert!(
-            cutoff > T::zero() && cutoff < srate / lit(2.0),
-            "Cutoff frequency must be positive and below Nyquist ({}Hz), got {}Hz",
-            srate / lit::<T>(2.0),
-            cutoff
-        );
+        Self::try_lowpass(n_taps, cutoff, srate, window, kaiser_beta)
+            .expect("Fir::lowpass: invalid parameters")
+    }
+
+    /// Fallible version of [`Fir::lowpass`].
+    ///
+    /// # Errors
+    /// Returns [`FirError::InvalidTaps`] if `n_taps` is zero,
+    /// [`FirError::InvalidSampleRate`] if `srate` is not positive, or
+    /// [`FirError::InvalidFrequency`] if `cutoff` is not in `(0, Nyquist)`.
+    pub fn try_lowpass(
+        n_taps: usize,
+        cutoff: T,
+        srate: T,
+        window: WindowType,
+        kaiser_beta: T,
+    ) -> FirResult<Self> {
+        check_taps(n_taps)?;
+        check_srate(srate)?;
+        check_cutoff(cutoff, srate)?;
 
         let coeffs = design_fir_lowpass(n_taps, cutoff, srate, window, kaiser_beta);
         let n = coeffs.len();
         let symmetric = Self::coeffs_are_symmetric(&coeffs);
-        Fir {
+        Ok(Fir {
             filter_type: FirFilterType::Lowpass,
             coeffs,
             srate,
@@ -131,7 +205,7 @@ impl<T: FilterFloat> Fir<T> {
             symmetric,
             scratch: Vec::new(),
             coeffs_rev: Vec::new(),
-        }
+        })
     }
 
     /// Creates a highpass FIR filter using spectral inversion of a lowpass filter.
@@ -144,10 +218,12 @@ impl<T: FilterFloat> Fir<T> {
     /// * `kaiser_beta` - Beta parameter for Kaiser window (ignored for other windows)
     ///
     /// # Panics
-    /// Panics in debug mode if:
+    /// Panics in all build profiles (validated with [`FirError`]) if:
     /// - `n_taps` is zero
     /// - `srate` is not positive
     /// - `cutoff` is not positive or >= Nyquist frequency (srate/2)
+    ///
+    /// For a non-panicking variant, see [`Fir::try_highpass`].
     pub fn highpass(
         n_taps: usize,
         cutoff: T,
@@ -155,19 +231,31 @@ impl<T: FilterFloat> Fir<T> {
         window: WindowType,
         kaiser_beta: T,
     ) -> Self {
-        debug_assert!(n_taps > 0, "Number of taps must be positive");
-        debug_assert!(srate > T::zero(), "Sample rate must be positive");
-        debug_assert!(
-            cutoff > T::zero() && cutoff < srate / lit(2.0),
-            "Cutoff frequency must be positive and below Nyquist ({}Hz), got {}Hz",
-            srate / lit::<T>(2.0),
-            cutoff
-        );
+        Self::try_highpass(n_taps, cutoff, srate, window, kaiser_beta)
+            .expect("Fir::highpass: invalid parameters")
+    }
+
+    /// Fallible version of [`Fir::highpass`].
+    ///
+    /// # Errors
+    /// Returns [`FirError::InvalidTaps`] if `n_taps` is zero,
+    /// [`FirError::InvalidSampleRate`] if `srate` is not positive, or
+    /// [`FirError::InvalidFrequency`] if `cutoff` is not in `(0, Nyquist)`.
+    pub fn try_highpass(
+        n_taps: usize,
+        cutoff: T,
+        srate: T,
+        window: WindowType,
+        kaiser_beta: T,
+    ) -> FirResult<Self> {
+        check_taps(n_taps)?;
+        check_srate(srate)?;
+        check_cutoff(cutoff, srate)?;
 
         let coeffs = design_fir_highpass(n_taps, cutoff, srate, window, kaiser_beta);
         let n = coeffs.len();
         let symmetric = Self::coeffs_are_symmetric(&coeffs);
-        Fir {
+        Ok(Fir {
             filter_type: FirFilterType::Highpass,
             coeffs,
             srate,
@@ -180,7 +268,7 @@ impl<T: FilterFloat> Fir<T> {
             symmetric,
             scratch: Vec::new(),
             coeffs_rev: Vec::new(),
-        }
+        })
     }
 
     /// Creates a bandpass FIR filter by multiplying two sinc functions.
@@ -194,12 +282,14 @@ impl<T: FilterFloat> Fir<T> {
     /// * `kaiser_beta` - Beta parameter for Kaiser window (ignored for other windows)
     ///
     /// # Panics
-    /// Panics in debug mode if:
+    /// Panics in all build profiles (validated with [`FirError`]) if:
     /// - `n_taps` is zero
     /// - `srate` is not positive
     /// - `freq_low` is not positive or >= Nyquist frequency (srate/2)
     /// - `freq_high` is not positive or >= Nyquist frequency (srate/2)
     /// - `freq_low` >= `freq_high`
+    ///
+    /// For a non-panicking variant, see [`Fir::try_bandpass`].
     pub fn bandpass(
         n_taps: usize,
         freq_low: T,
@@ -208,31 +298,33 @@ impl<T: FilterFloat> Fir<T> {
         window: WindowType,
         kaiser_beta: T,
     ) -> Self {
-        debug_assert!(n_taps > 0, "Number of taps must be positive");
-        debug_assert!(srate > T::zero(), "Sample rate must be positive");
-        debug_assert!(
-            freq_low > T::zero() && freq_low < srate / lit(2.0),
-            "Lower cutoff frequency must be positive and below Nyquist ({}Hz), got {}Hz",
-            srate / lit::<T>(2.0),
-            freq_low
-        );
-        debug_assert!(
-            freq_high > T::zero() && freq_high < srate / lit(2.0),
-            "Upper cutoff frequency must be positive and below Nyquist ({}Hz), got {}Hz",
-            srate / lit::<T>(2.0),
-            freq_high
-        );
-        debug_assert!(
-            freq_low < freq_high,
-            "Lower cutoff frequency ({}Hz) must be less than upper cutoff frequency ({}Hz)",
-            freq_low,
-            freq_high
-        );
+        Self::try_bandpass(n_taps, freq_low, freq_high, srate, window, kaiser_beta)
+            .expect("Fir::bandpass: invalid parameters")
+    }
+
+    /// Fallible version of [`Fir::bandpass`].
+    ///
+    /// # Errors
+    /// Returns [`FirError::InvalidTaps`] if `n_taps` is zero,
+    /// [`FirError::InvalidSampleRate`] if `srate` is not positive, or
+    /// [`FirError::InvalidBand`] if the band edges do not satisfy
+    /// `0 < freq_low < freq_high < Nyquist`.
+    pub fn try_bandpass(
+        n_taps: usize,
+        freq_low: T,
+        freq_high: T,
+        srate: T,
+        window: WindowType,
+        kaiser_beta: T,
+    ) -> FirResult<Self> {
+        check_taps(n_taps)?;
+        check_srate(srate)?;
+        check_band(freq_low, freq_high, srate)?;
 
         let coeffs = design_fir_bandpass(n_taps, freq_low, freq_high, srate, window, kaiser_beta);
         let n = coeffs.len();
         let symmetric = Self::coeffs_are_symmetric(&coeffs);
-        Fir {
+        Ok(Fir {
             filter_type: FirFilterType::Bandpass,
             coeffs,
             srate,
@@ -245,7 +337,7 @@ impl<T: FilterFloat> Fir<T> {
             symmetric,
             scratch: Vec::new(),
             coeffs_rev: Vec::new(),
-        }
+        })
     }
 
     /// Creates a bandstop FIR filter using spectral inversion of a bandpass filter.
@@ -259,12 +351,14 @@ impl<T: FilterFloat> Fir<T> {
     /// * `kaiser_beta` - Beta parameter for Kaiser window (ignored for other windows)
     ///
     /// # Panics
-    /// Panics in debug mode if:
+    /// Panics in all build profiles (validated with [`FirError`]) if:
     /// - `n_taps` is zero
     /// - `srate` is not positive
     /// - `freq_low` is not positive or >= Nyquist frequency (srate/2)
     /// - `freq_high` is not positive or >= Nyquist frequency (srate/2)
     /// - `freq_low` >= `freq_high`
+    ///
+    /// For a non-panicking variant, see [`Fir::try_bandstop`].
     pub fn bandstop(
         n_taps: usize,
         freq_low: T,
@@ -273,31 +367,33 @@ impl<T: FilterFloat> Fir<T> {
         window: WindowType,
         kaiser_beta: T,
     ) -> Self {
-        debug_assert!(n_taps > 0, "Number of taps must be positive");
-        debug_assert!(srate > T::zero(), "Sample rate must be positive");
-        debug_assert!(
-            freq_low > T::zero() && freq_low < srate / lit(2.0),
-            "Lower cutoff frequency must be positive and below Nyquist ({}Hz), got {}Hz",
-            srate / lit::<T>(2.0),
-            freq_low
-        );
-        debug_assert!(
-            freq_high > T::zero() && freq_high < srate / lit(2.0),
-            "Upper cutoff frequency must be positive and below Nyquist ({}Hz), got {}Hz",
-            srate / lit::<T>(2.0),
-            freq_high
-        );
-        debug_assert!(
-            freq_low < freq_high,
-            "Lower cutoff frequency ({}Hz) must be less than upper cutoff frequency ({}Hz)",
-            freq_low,
-            freq_high
-        );
+        Self::try_bandstop(n_taps, freq_low, freq_high, srate, window, kaiser_beta)
+            .expect("Fir::bandstop: invalid parameters")
+    }
+
+    /// Fallible version of [`Fir::bandstop`].
+    ///
+    /// # Errors
+    /// Returns [`FirError::InvalidTaps`] if `n_taps` is zero,
+    /// [`FirError::InvalidSampleRate`] if `srate` is not positive, or
+    /// [`FirError::InvalidBand`] if the band edges do not satisfy
+    /// `0 < freq_low < freq_high < Nyquist`.
+    pub fn try_bandstop(
+        n_taps: usize,
+        freq_low: T,
+        freq_high: T,
+        srate: T,
+        window: WindowType,
+        kaiser_beta: T,
+    ) -> FirResult<Self> {
+        check_taps(n_taps)?;
+        check_srate(srate)?;
+        check_band(freq_low, freq_high, srate)?;
 
         let coeffs = design_fir_bandstop(n_taps, freq_low, freq_high, srate, window, kaiser_beta);
         let n = coeffs.len();
         let symmetric = Self::coeffs_are_symmetric(&coeffs);
-        Fir {
+        Ok(Fir {
             filter_type: FirFilterType::Bandstop,
             coeffs,
             srate,
@@ -310,7 +406,7 @@ impl<T: FilterFloat> Fir<T> {
             symmetric,
             scratch: Vec::new(),
             coeffs_rev: Vec::new(),
-        }
+        })
     }
 
     /// Returns the number of filter taps (coefficients).
@@ -332,6 +428,13 @@ impl<T: FilterFloat> Fir<T> {
     }
 
     /// Processes a single audio sample through the filter.
+    ///
+    /// Denormal handling is caller-owned here: a per-sample FTZ guard would
+    /// cost more than the convolution itself for small tap counts. For hot
+    /// sample loops, wrap the loop in
+    /// [`ScopedFlushToZero`](crate::denormals::ScopedFlushToZero) yourself, or
+    /// prefer [`Fir::process_block`], which enables FTZ for the whole block.
+    /// See the [FTZ policy](crate::denormals) for details.
     pub fn process(&mut self, x: T) -> T {
         let n_taps = self.coeffs.len();
         // Store input sample in circular buffer and its duplicate so the
@@ -375,7 +478,13 @@ impl<T: FilterFloat> Fir<T> {
     }
 
     /// Processes a block of audio samples in-place.
+    ///
+    /// Enables Flush-to-Zero / Denormals-Are-Zero for the duration of the
+    /// block via [`ScopedFlushToZero`](crate::denormals::ScopedFlushToZero)
+    /// (restored on return), so long silent tails cannot stall on denormals.
+    /// See the [FTZ policy](crate::denormals) for details.
     pub fn process_block(&mut self, samples: &mut [T]) {
+        let _ftz = crate::denormals::ScopedFlushToZero::new();
         if self.symmetric {
             self.process_block_symmetric(samples);
         } else {
@@ -1080,33 +1189,39 @@ impl<T: FilterFloat> Fir<T> {
     /// # Performance
     /// This implementation avoids per-tap allocations by using a direct nested loop.
     pub fn np_log_result(&self, freq: &Array1<T>) -> Array1<T> {
-        let n_freqs = freq.len();
+        let mut out = Array1::zeros(freq.len());
+        self.np_log_result_into(freq, &mut out);
+        out
+    }
+
+    /// Vectorized SPL response written into a pre-allocated output buffer.
+    ///
+    /// Performs no allocation: each grid point accumulates its own `(real,
+    /// imag)` pair in registers with the same ascending-tap summation order
+    /// as [`Fir::np_log_result`], so FIR-bank response loops can evaluate
+    /// every filter without allocating in the hot path. See
+    /// [`compute_fir_bank_response_into`](crate::compute_fir_bank_response_into).
+    ///
+    /// # Panics
+    /// Panics in debug builds if `out.len() != freq.len()`.
+    pub fn np_log_result_into(&self, freq: &Array1<T>, out: &mut Array1<T>) {
+        debug_assert_eq!(freq.len(), out.len());
         let two_pi: T = lit::<T>(2.0) * T::PI();
         let omega_base = two_pi / self.srate;
-
-        let mut real: Array1<T> = Array1::zeros(n_freqs);
-        let mut imag: Array1<T> = Array1::zeros(n_freqs);
-
-        for (n, &coeff) in self.coeffs.iter().enumerate() {
-            let n_f: T = -(lit::<T>(n as f64));
-            for i in 0..n_freqs {
-                let phase = n_f * freq[i] * omega_base;
-                real[i] += coeff * phase.cos();
-                imag[i] += coeff * phase.sin();
-            }
-        }
-
-        // Compute magnitude and convert to dB
-        let mut magnitude = Array1::zeros(n_freqs);
         let min_val: T = lit(1.0e-20);
+        let scale: T = lit::<T>(20.0);
 
-        for i in 0..n_freqs {
-            let mag_sq = real[i] * real[i] + imag[i] * imag[i];
-            let mag = mag_sq.sqrt().max(min_val);
-            magnitude[i] = lit::<T>(20.0) * mag.log10();
+        for (i, &f) in freq.iter().enumerate() {
+            let mut real = T::zero();
+            let mut imag = T::zero();
+            for (n, &coeff) in self.coeffs.iter().enumerate() {
+                let phase = -(lit::<T>(n as f64)) * f * omega_base;
+                real += coeff * phase.cos();
+                imag += coeff * phase.sin();
+            }
+            let mag_sq = real * real + imag * imag;
+            out[i] = scale * mag_sq.sqrt().max(min_val).log10();
         }
-
-        magnitude
     }
 }
 
@@ -1143,6 +1258,20 @@ impl<T: FilterFloat> fmt::Display for Fir<T> {
 /// Compute the FIR bank SPL response at given frequencies.
 pub fn fir_bank_spl<T: FilterFloat>(freq: &Array1<T>, fir_bank: &FirBank<T>) -> Array1<T> {
     compute_fir_bank_response(freq, fir_bank)
+}
+
+/// Compute a FIR bank SPL response into caller-owned reusable buffers.
+///
+/// `response` and `filter_scratch` must both have the same length as `freq`.
+/// Mirrors [`peq_spl_into`](crate::peq_spl_into) for IIR banks: no per-filter
+/// allocation in the loop.
+pub fn fir_bank_spl_into<T: FilterFloat>(
+    freq: &Array1<T>,
+    fir_bank: &FirBank<T>,
+    response: &mut Array1<T>,
+    filter_scratch: &mut Array1<T>,
+) {
+    compute_fir_bank_response_into(freq, fir_bank, response, filter_scratch)
 }
 
 /// Calculate the recommended preamp gain to avoid clipping for a FIR bank.

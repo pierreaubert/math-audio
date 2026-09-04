@@ -6,6 +6,11 @@ use ndarray::Array1;
 /// Global minimum: f(x) = 0 at x = (1, 1, ..., 1)
 /// Bounds: x_i in [-10, 10]
 pub fn levy_n13(x: &Array1<f64>) -> f64 {
+    assert!(
+        x.len() == 2,
+        "levy_n13 requires 2 dimensions, got {}",
+        x.len()
+    );
     let w1 = 1.0 + (x[0] - 1.0) / 4.0;
     let w2 = 1.0 + (x[1] - 1.0) / 4.0;
 

@@ -1822,7 +1822,7 @@ checksum = "0ceec5bc11778974d1bcb055b18002eba7f4b3518b6a0081b3af5f21666da9ad"
 
 [[package]]
 name = "math-analog"
-version = "0.5.2"
+version = "0.5.3"
 dependencies = [
  "approx",
  "criterion",
@@ -1838,7 +1838,7 @@ dependencies = [
 
 [[package]]
 name = "math-autodiff"
-version = "0.5.3"
+version = "0.5.4"
 dependencies = [
  "approx",
  "criterion",
@@ -1856,7 +1856,7 @@ dependencies = [
 
 [[package]]
 name = "math-convex-hull"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "criterion",
  "directories",
@@ -1870,7 +1870,7 @@ dependencies = [
 
 [[package]]
 name = "math-delaunay"
-version = "0.5.3"
+version = "0.5.4"
 dependencies = [
  "criterion",
  "delaunator",
@@ -1879,7 +1879,7 @@ dependencies = [
 
 [[package]]
 name = "math-dsp"
-version = "0.5.27"
+version = "0.5.28"
 dependencies = [
  "approx",
  "clap",
@@ -1902,7 +1902,7 @@ dependencies = [
 
 [[package]]
 name = "math-iir-fir"
-version = "0.5.20"
+version = "0.5.21"
 dependencies = [
  "base64 0.22.1",
  "byteorder",
@@ -1919,7 +1919,7 @@ dependencies = [
 
 [[package]]
 name = "math-optimisation"
-version = "0.5.11"
+version = "0.5.13"
 dependencies = [
  "clap",
  "criterion",
@@ -1938,7 +1938,7 @@ dependencies = [
 
 [[package]]
 name = "math-rir"
-version = "0.5.8"
+version = "0.5.9"
 dependencies = [
  "criterion",
  "math-iir-fir",
@@ -1948,7 +1948,7 @@ dependencies = [
 
 [[package]]
 name = "math-test-functions"
-version = "0.5.2"
+version = "0.5.3"
 dependencies = [
  "clap",
  "criterion",

@@ -7,6 +7,11 @@ use ndarray::Array1;
 /// Bounds: x_i in [0, 1]
 /// Reference: Hartman, J.K. (1973). Some experiments in global optimization
 pub fn hartman_4d(x: &Array1<f64>) -> f64 {
+    assert!(
+        x.len() == 4,
+        "hartman_4d requires 4 dimensions, got {}",
+        x.len()
+    );
     // Original Hartmann 4-D parameters from literature
     let a = [
         [10.0, 3.0, 17.0, 3.5],

@@ -6,6 +6,7 @@ use ndarray::Array1;
 /// Global minimum: f(x) = 0 at x = (3, 0.5)
 /// Bounds: x_i in [-4.5, 4.5]
 pub fn beale(x: &Array1<f64>) -> f64 {
+    assert!(x.len() == 2, "beale requires 2 dimensions, got {}", x.len());
     let x1 = x[0];
     let x2 = x[1];
     (1.5 - x1 + x1 * x2).powi(2)

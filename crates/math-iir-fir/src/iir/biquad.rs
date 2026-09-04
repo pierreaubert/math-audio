@@ -555,6 +555,11 @@ impl<T: FilterFloat> Biquad<T> {
     ///
     /// When `use_tdf2` is true, uses Transposed Direct Form II which has
     /// better numerical properties for high-Q narrow filters.
+    ///
+    /// Denormal handling is caller-owned here; see the
+    /// [FTZ policy](crate::denormals). For hot sample loops, wrap the loop in
+    /// [`ScopedFlushToZero`](crate::denormals::ScopedFlushToZero) yourself, or
+    /// prefer [`Biquad::process_block`], which enables FTZ for the whole block.
     pub fn process(&mut self, x: T) -> T {
         if self.use_tdf2 {
             self.process_tdf2(x)
@@ -605,8 +610,13 @@ impl<T: FilterFloat> Biquad<T> {
     /// The runtime `use_tdf2` flag is resolved once per block; the inner loop
     /// is monomorphized for the selected form and contains no per-sample
     /// branch.
+    ///
+    /// Enables Flush-to-Zero / Denormals-Are-Zero for the duration of the
+    /// block via [`ScopedFlushToZero`](crate::denormals::ScopedFlushToZero)
+    /// (restored on return); see the [FTZ policy](crate::denormals).
     #[inline(always)]
     pub fn process_block(&mut self, samples: &mut [T]) {
+        let _ftz = crate::denormals::ScopedFlushToZero::new();
         // AVX2 fast path: on x86_64 with AVX2/FMA, process f64 DF1 blocks four
         // samples at a time in the main loop, then a two-sample tail, then a
         // scalar tail. TDF2 and non-f64 types keep the scalar fallback below.

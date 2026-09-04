@@ -6,6 +6,11 @@ use ndarray::Array1;
 /// Global minimum: f(x) = -3.32237 at complex optimum
 /// Bounds: x_i in [0, 1]
 pub fn hartman_6d(x: &Array1<f64>) -> f64 {
+    assert!(
+        x.len() == 6,
+        "hartman_6d requires 6 dimensions, got {}",
+        x.len()
+    );
     let a = [
         [10.0, 3.0, 17.0, 3.5, 1.7, 8.0],
         [0.05, 10.0, 17.0, 0.1, 8.0, 14.0],

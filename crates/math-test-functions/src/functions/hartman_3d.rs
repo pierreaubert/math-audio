@@ -6,6 +6,11 @@ use ndarray::Array1;
 /// Global minimum: f(x) = -3.86278 at x = (0.114614, 0.555649, 0.852547)
 /// Bounds: x_i in [0, 1]
 pub fn hartman_3d(x: &Array1<f64>) -> f64 {
+    assert!(
+        x.len() == 3,
+        "hartman_3d requires 3 dimensions, got {}",
+        x.len()
+    );
     let a = [
         [3.0, 10.0, 30.0],
         [0.1, 10.0, 35.0],

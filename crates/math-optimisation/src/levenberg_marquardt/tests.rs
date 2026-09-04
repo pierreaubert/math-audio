@@ -254,6 +254,89 @@ fn test_linear_solver_rejects_near_singular() {
 }
 
 #[test]
+fn test_linear_solver_pivot_threshold_scales_with_magnitude() {
+    // Same near-singular pattern at 1e10 scale: elimination leaves a ~1e-5
+    // pivot that a fixed 1e-12 cutoff would wrongly accept. The scale-aware
+    // threshold (1e-12 * 1e10 = 1e-2) must still reject it.
+    let s = 1e10;
+    let a = Array2::from_shape_vec((2, 2), vec![s, s, s, s * (1.0 + 1e-15)]).unwrap();
+    let b = Array1::from(vec![s, s]);
+    assert!(
+        solve_linear_system(&a, &b).is_none(),
+        "large-scale near-singular matrix should be rejected"
+    );
+    // A well-conditioned large-scale system must still solve.
+    let a_ok = Array2::from_shape_vec((2, 2), vec![s, 0.0, 0.0, s]).unwrap();
+    let b_ok = Array1::from(vec![s, s]);
+    let x = solve_linear_system(&a_ok, &b_ok).expect("diagonal system should solve");
+    assert!((x[0] - 1.0).abs() < 1e-9 && (x[1] - 1.0).abs() < 1e-9);
+}
+
+#[test]
+fn test_analytic_jacobian_matches_finite_differences() {
+    // r = [10*(x1 - x0^2), 1 - x0] with exact Jacobian; must converge to
+    // (1, 1) while using far fewer residual evaluations than finite
+    // differences (no 2*n_params FD evals per iteration).
+    let residual = |x: &Array1<f64>| array![10.0 * (x[1] - x[0] * x[0]), 1.0 - x[0]];
+    let analytic = |x: &Array1<f64>| {
+        Array2::from_shape_vec((2, 2), vec![-20.0 * x[0], 10.0, -1.0, 0.0]).unwrap()
+    };
+    let bounds = vec![(-5.0, 5.0); 2];
+
+    let fd_report = levenberg_marquardt(
+        &residual,
+        &bounds,
+        LMConfigBuilder::new()
+            .x0(array![-1.0, 1.0])
+            .maxiter(200)
+            .tol(1e-12)
+            .build(),
+    )
+    .unwrap();
+    let analytic_report = levenberg_marquardt(
+        &residual,
+        &bounds,
+        LMConfigBuilder::new()
+            .x0(array![-1.0, 1.0])
+            .maxiter(200)
+            .tol(1e-12)
+            .jacobian(analytic)
+            .build(),
+    )
+    .unwrap();
+
+    assert!(
+        analytic_report.success,
+        "analytic Jacobian should converge: {}",
+        analytic_report.message
+    );
+    assert!((analytic_report.x[0] - 1.0).abs() < 1e-4);
+    assert!((analytic_report.x[1] - 1.0).abs() < 1e-4);
+    assert!(
+        analytic_report.nfev < fd_report.nfev,
+        "analytic nfev ({}) should beat finite-difference nfev ({})",
+        analytic_report.nfev,
+        fd_report.nfev
+    );
+}
+
+#[test]
+fn test_analytic_jacobian_dimension_mismatch_errors() {
+    let residual = |x: &Array1<f64>| array![x[0] - 1.0, x[0] - 2.0];
+    let bad_jacobian = |_: &Array1<f64>| Array2::zeros((2, 2)); // 1 param, not 2
+    let bounds = vec![(-10.0, 10.0)];
+    let config = LMConfigBuilder::new()
+        .x0(array![0.0])
+        .jacobian(bad_jacobian)
+        .build();
+    let err = levenberg_marquardt(&residual, &bounds, config).unwrap_err();
+    assert!(matches!(
+        err,
+        LMError::JacobianDimensionMismatch { .. }
+    ));
+}
+
+#[test]
 fn test_project_onto_box() {
     let x = Array1::from_vec(vec![-1.0, 5.0, 0.5]);
     let bounds = vec![(0.0, 1.0), (0.0, 1.0), (0.0, 1.0)];

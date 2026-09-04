@@ -15,7 +15,7 @@
 
 use crate::geometry::find_extreme_points;
 use crate::types::{ConvexHull3D, Face, Vertex};
-use crate::{ConvexHullError, EPSILON, Result, compute_relative_epsilon, deduplicate_vertices};
+use crate::{ConvexHullError, Result, compute_relative_epsilon, deduplicate_vertices};
 use rayon::prelude::*;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -35,27 +35,32 @@ struct HullFace {
     furthest_point: Option<usize>, // Track furthest point for O(1) access
     furthest_distance: f64,        // Distance of furthest point
     deleted: bool,                 // Mark as deleted instead of removing
+    epsilon: f64,                  // Scale-aware relative tolerance for visibility
 }
 
 impl HullFace {
-    fn new(v0: usize, v1: usize, v2: usize, vertices: &[Vertex]) -> Self {
+    /// Build a face, returning `None` for degenerate (zero-area) triangles
+    /// instead of falling back to a dummy normal.
+    fn new(v0: usize, v1: usize, v2: usize, vertices: &[Vertex], epsilon: f64) -> Option<Self> {
         let vertices_arr = [v0, v1, v2];
         let p0 = &vertices[v0];
         let p1 = &vertices[v1];
         let p2 = &vertices[v2];
 
-        // Compute normal
+        // Compute normal; reject degenerate zero-area faces.
         let e1 = p1.sub(p0);
         let e2 = p2.sub(p0);
-        let normal = e1
-            .cross(&e2)
-            .try_normalize()
-            .unwrap_or_else(|| Vertex::new(0.0, 0.0, 1.0));
+        let cross = e1.cross(&e2);
+        let mag = cross.magnitude();
+        if mag <= epsilon {
+            return None;
+        }
+        let normal = cross.scale(1.0 / mag);
 
         // Pre-compute plane constant for faster distance calculation
         let d = normal.dot(p0);
 
-        Self {
+        Some(Self {
             vertices: vertices_arr,
             normal,
             d,
@@ -63,7 +68,8 @@ impl HullFace {
             furthest_point: None,
             furthest_distance: 0.0,
             deleted: false,
-        }
+            epsilon,
+        })
     }
 
     /// Fast signed distance from point to plane (positive = outside)
@@ -74,7 +80,7 @@ impl HullFace {
 
     #[inline]
     fn is_visible_from(&self, point: &Vertex) -> bool {
-        self.signed_distance(point) > EPSILON
+        self.signed_distance(point) > self.epsilon
     }
 
     fn assign_point(&mut self, point_idx: usize, distance: f64) {
@@ -203,7 +209,7 @@ pub fn quickhull_3d(vertices: &[Vertex]) -> Result<ConvexHull3D> {
     };
 
     // Build initial hull from simplex
-    let mut hull_faces = create_initial_hull(&initial_simplex, &unique_vertices);
+    let mut hull_faces = create_initial_hull(&initial_simplex, &unique_vertices, relative_eps);
 
     // Track which points are in the initial simplex
     let mut in_simplex = vec![false; unique_vertices.len()];
@@ -265,7 +271,10 @@ pub fn quickhull_3d(vertices: &[Vertex]) -> Result<ConvexHull3D> {
         }
 
         // Find face with furthest outside point
-        let (face_idx, point_idx, _) = match find_face_with_furthest_point(&hull_faces, vertices) {
+        // NOTE: outside-point indices address `unique_vertices` (post-dedup),
+        // so the distance lookup must use `unique_vertices`, not the
+        // pre-dedup `vertices` slice.
+        let (face_idx, point_idx, _) = match find_face_with_furthest_point(&hull_faces, &unique_vertices) {
             Some(result) => result,
             None => break, // No more outside points
         };
@@ -319,8 +328,13 @@ pub fn quickhull_3d(vertices: &[Vertex]) -> Result<ConvexHull3D> {
 
         // Create new faces from horizon edges to the new point
         for edge in &scratch.horizon_edges {
-            // Create face with correct orientation (outward normal)
-            let face1 = HullFace::new(edge.v0, edge.v1, point_idx, &unique_vertices);
+            // Create face with correct orientation (outward normal).
+            // Degenerate zero-area faces are rejected (skipped).
+            let Some(face1) =
+                HullFace::new(edge.v0, edge.v1, point_idx, &unique_vertices, relative_eps)
+            else {
+                continue;
+            };
 
             // Check orientation: normal should point away from interior
             let to_interior = simplex_centroid.sub(&unique_vertices[face1.vertices[0]]);
@@ -328,14 +342,11 @@ pub fn quickhull_3d(vertices: &[Vertex]) -> Result<ConvexHull3D> {
 
             if dot < 0.0 {
                 scratch.new_faces.push(face1);
-            } else {
+            } else if let Some(flipped) =
+                HullFace::new(edge.v1, edge.v0, point_idx, &unique_vertices, relative_eps)
+            {
                 // Flip orientation
-                scratch.new_faces.push(HullFace::new(
-                    edge.v1,
-                    edge.v0,
-                    point_idx,
-                    &unique_vertices,
-                ));
+                scratch.new_faces.push(flipped);
             }
         }
 
@@ -561,16 +572,25 @@ fn find_initial_simplex(vertices: &[Vertex], epsilon: f64) -> Result<[usize; 4]>
 }
 
 /// Create the initial hull from the simplex
-fn create_initial_hull(simplex: &[usize; 4], vertices: &[Vertex]) -> Vec<HullFace> {
+fn create_initial_hull(
+    simplex: &[usize; 4],
+    vertices: &[Vertex],
+    epsilon: f64,
+) -> Vec<HullFace> {
     let [v0, v1, v2, v3] = *simplex;
 
-    // Create 4 faces of the tetrahedron
-    let mut faces = vec![
-        HullFace::new(v0, v1, v2, vertices),
-        HullFace::new(v0, v2, v3, vertices),
-        HullFace::new(v0, v3, v1, vertices),
-        HullFace::new(v1, v3, v2, vertices),
-    ];
+    // Create 4 faces of the tetrahedron, skipping degenerate zero-area faces.
+    // (The initial simplex is validated non-degenerate, so all four are
+    // expected to be present.)
+    let mut faces: Vec<HullFace> = [
+        (v0, v1, v2),
+        (v0, v2, v3),
+        (v0, v3, v1),
+        (v1, v3, v2),
+    ]
+    .into_iter()
+    .filter_map(|(a, b, c)| HullFace::new(a, b, c, vertices, epsilon))
+    .collect();
 
     // Ensure all normals point outward from the centroid
     let centroid = Vertex {

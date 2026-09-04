@@ -9,6 +9,24 @@
 //! architectures use a no-op guard so audio processing code can keep one call
 //! site across targets.
 //!
+//! # FTZ policy
+//!
+//! Denormal (subnormal) floats can stall audio DSP loops by orders of
+//! magnitude. This crate's policy is split by call granularity:
+//!
+//! - **Block entry points own FTZ.** [`Fir::process_block`](crate::Fir::process_block)
+//!   and [`Biquad::process_block`](crate::Biquad::process_block) enable
+//!   [`ScopedFlushToZero`] for the duration of the call (previous MXCSR/FPCR
+//!   state is restored on return). One guard per block amortizes the two
+//!   control-register writes over the whole block.
+//! - **Sample entry points are caller-owned.** [`Fir::process`](crate::Fir::process),
+//!   [`Biquad::process`](crate::Biquad::process), crossover/SVF sample methods,
+//!   and the offline response helpers (`np_log_result`, bank/PEQ SPL functions)
+//!   do **not** touch global FP state: a per-sample guard would cost more than
+//!   the filter math itself, and library code must not flip FP flags under a
+//!   host that manages them. Wrap hot sample loops in [`ScopedFlushToZero`]
+//!   yourself (see below).
+//!
 //! # Usage
 //!
 //! ```rust

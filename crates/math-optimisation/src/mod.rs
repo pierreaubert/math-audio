@@ -90,8 +90,8 @@ pub use error::{DEError, Result};
 pub use external_archive::ExternalArchive;
 pub use isres::{IsresConfig, IsresConstraint, IsresReport, isres};
 pub use levenberg_marquardt::{
-    LMCallbackAction, LMConfig, LMConfigBuilder, LMError, LMIntermediate, LMReport, LMResult,
-    levenberg_marquardt,
+    JacobianFn, LMCallbackAction, LMConfig, LMConfigBuilder, LMError, LMIntermediate, LMReport,
+    LMResult, levenberg_marquardt,
 };
 pub use lshade::LShadeConfig;
 pub use nsga::{NsgaConfig, NsgaReport, NsgaVariant, ParetoSolution, nsga, nsga2, nsga3};

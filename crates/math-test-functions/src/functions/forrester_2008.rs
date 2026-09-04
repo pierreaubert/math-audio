@@ -6,6 +6,11 @@ use ndarray::Array1;
 /// Global minimum: f(x) ≈ -6.02074 at x ≈ 0.757249
 /// Bounds: x in [0, 1]
 pub fn forrester_2008(x: &Array1<f64>) -> f64 {
+    assert!(
+        x.len() == 1,
+        "forrester_2008 requires 1 dimension, got {}",
+        x.len()
+    );
     let x1 = x[0];
     (6.0 * x1 - 2.0).powi(2) * (12.0 * x1 - 4.0).sin()
 }

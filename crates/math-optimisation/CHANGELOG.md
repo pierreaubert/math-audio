@@ -1,3 +1,18 @@
+# 0.5.13
+
+## Improvements
+
+- CMA-ES now uses a lazy eigendecomposition schedule with a reused scratch
+  buffer instead of cloning and factorizing the covariance every generation.
+- Levenberg-Marquardt accepts an analytic Jacobian via `LMConfig::jacobian`
+  (`JacobianFn`) instead of forward finite-differences only.
+- Documented the CMA-ES bound-clipping bias near walls.
+
+## Bug fixes
+
+- `happy_cat` registry entries now point at `happycat` (same landscape);
+  the deprecated duplicate no longer triggers deprecation warnings.
+
 # 0.5.10
 
 ## Bug fixes

@@ -3,6 +3,50 @@
 //! The fitting path is intentionally separate from the realtime dependency
 //! graph.  It allocates FFT workspaces, runs global/local optimization, and
 //! emits immutable coefficients with capture provenance.
+//!
+//! # Capture-fit-validate loop
+//!
+//! 1. **Capture.** Record one or more stimulus/response pairs at a fixed
+//!    sample rate with [`FitCapture::new`]. Keep at least one fully held-out
+//!    record (a different level, frequency set, or programme) and assemble
+//!    the split with [`FitDataset::from_captures`]; validation records are
+//!    never passed to either optimizer. The legacy [`FitDataset::new`]
+//!    tail-split constructor is kept for single-recording callers.
+//! 2. **Fit (DE global start).** [`fit_hammerstein`] minimizes the spectral
+//!    magnitude/phase objective over the training captures with differential
+//!    evolution (`math-optimisation`), using gain bounds `[-2, 2]` and cutoff
+//!    bounds `[0, sample_rate / 2]` per branch, `FitOptions::de_max_iterations`
+//!    / `de_population_size` budget, and `FitOptions::seed` for
+//!    reproducibility.
+//! 3. **Refine (LM bridge).** The DE optimum becomes `x0` for the bounded
+//!    `math-optimisation` Levenberg-Marquardt solver over the *same* residual
+//!    vector (`LMConfigBuilder`: `maxiter = lm_max_iterations`, `tol = 1e-10`,
+//!    `atol = 1e-14`, finite-difference Jacobian `epsilon = 1e-8`). LM
+//!    interpolates Gauss-Newton/gradient-descent steps subject to the same
+//!    bounds; its final `fun` is reported as `lm_objective`.
+//! 4. **Validate.** [`FitQualityReport`] scores time-domain RMS and spectral
+//!    RMS separately on the training captures and on the held-out captures,
+//!    plus sample/capture counts and both optimizer objectives.
+//!
+//! # Numeric acceptance thresholds
+//!
+//! The synthetic round-trip test
+//! (`frozen_coefficients_round_trip_a_synthetic_capture`) pins these gates;
+//! use [`FitQualityReport::meets_acceptance_criteria`] for the same check on
+//! real captures:
+//!
+//! - `fit_rms < 0.01` and `held_out_rms < 0.01` (time domain, unity-scale
+//!   signals). A held-out RMS far above the training RMS means the model
+//!   overfit: add captures, reduce branch orders, or re-tune DE/LM budgets.
+//! - `fit_spectral_rms` finite (and, for a healthy fit, of the same order as
+//!   the training objective per bin).
+//! - Recovered branch gains within `0.15` of the reference and branch
+//!   cutoffs within `1000 Hz` (synthetic-identity check only; for measured
+//!   hardware, provenance + held-out error replace parameter closeness).
+//!
+//! A fit that fails these gates must not be checked in as a hardware model:
+//! keep the coefficients, provenance, and quality report together and
+//! re-capture before claiming the device.
 
 use ndarray::Array1;
 use rustfft::{FftPlanner, num_complex::Complex};
@@ -244,6 +288,11 @@ impl FrozenHammersteinCoefficients {
     }
 }
 
+/// Time-domain RMS acceptance gate for [`FitQualityReport`] (unity-scale signals).
+pub const FIT_RMS_ACCEPTANCE: f32 = 0.01;
+/// Held-out time-domain RMS acceptance gate; see [`FIT_RMS_ACCEPTANCE`].
+pub const HELD_OUT_RMS_ACCEPTANCE: f32 = 0.01;
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct FitQualityReport {
     pub fit_rms: f32,
@@ -256,6 +305,18 @@ pub struct FitQualityReport {
     pub held_out_captures: usize,
     pub de_objective: f64,
     pub lm_objective: f64,
+}
+
+impl FitQualityReport {
+    /// Numeric acceptance gate documented in the module docs: training and
+    /// held-out time-domain RMS below [`FIT_RMS_ACCEPTANCE`] /
+    /// [`HELD_OUT_RMS_ACCEPTANCE`] with finite spectral error.
+    pub fn meets_acceptance_criteria(&self) -> bool {
+        self.fit_rms < FIT_RMS_ACCEPTANCE
+            && self.held_out_rms < HELD_OUT_RMS_ACCEPTANCE
+            && self.fit_spectral_rms.is_finite()
+            && self.held_out_spectral_rms.is_finite()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -657,8 +718,13 @@ mod tests {
         let report = fit_hammerstein(&dataset, &options).unwrap();
         assert_eq!(report.coefficients.branches().len(), 2);
         assert_ne!(report.coefficients.provenance().capture_hash, 0);
-        assert!(report.quality.fit_rms < 0.01, "{:?}", report.quality);
-        assert!(report.quality.held_out_rms < 0.01, "{:?}", report.quality);
+        assert!(report.quality.fit_rms < FIT_RMS_ACCEPTANCE, "{:?}", report.quality);
+        assert!(
+            report.quality.held_out_rms < HELD_OUT_RMS_ACCEPTANCE,
+            "{:?}",
+            report.quality
+        );
+        assert!(report.quality.meets_acceptance_criteria(), "{:?}", report.quality);
         assert!(report.quality.fit_spectral_rms.is_finite());
         assert_eq!(report.quality.held_out_captures, 1);
         assert_eq!(report.quality.held_out_samples, 512);

@@ -148,6 +148,18 @@ impl StatefulControls {
 
 /// A bounded stylized tape-memory model, not a tape-machine emulation.
 ///
+/// # Oversampling guidance
+///
+/// This model contains no internal resampler: `prepare` builds state for the
+/// exact `ProcessSpec::sample_rate` it is given, and `reset`/`process_*` run
+/// at that rate. Hosts processing driven material (high `drive_db`,
+/// hot input peaks, bright programme) should wrap the model in an external
+/// 2x/4x oversampler — prepare and process the model at the oversampled rate
+/// and report the wrapper latency exactly once. Oversampling is optional for
+/// gentle settings but recommended before claiming reduced aliasing; the
+/// crate's `analysis::compare_alias_reference` helper provides the 2x/4x
+/// aliasing-proxy measurement path.
+///
 /// The documented target is a slow operating-point memory:
 ///
 /// ```text
@@ -520,6 +532,18 @@ impl TapeChannelState {
 }
 
 /// A bounded stylized transformer-flux model, not a transformer emulation.
+///
+/// # Oversampling guidance
+///
+/// This model contains no internal resampler: `prepare` builds state for the
+/// exact `ProcessSpec::sample_rate` it is given, and `reset`/`process_*` run
+/// at that rate. Hosts processing driven material (high `drive_db`, hot
+/// input peaks, bright programme) should wrap the model in an external 2x/4x
+/// oversampler — prepare and process the model at the oversampled rate and
+/// report the wrapper latency exactly once. Oversampling is optional for
+/// gentle settings but recommended before claiming reduced aliasing; the
+/// crate's `analysis::compare_alias_reference` helper provides the 2x/4x
+/// aliasing-proxy measurement path.
 ///
 /// The stylized target uses a leaky flux state and a saturating magnetization
 /// branch.  `Flux` mode replaces the old direct clamped state update with a

@@ -1,3 +1,13 @@
+# 0.5.4
+
+## Fixes
+
+- `Voronoi::new` now sanitizes non-finite/unordered bounds in release builds
+  instead of relying on a `debug_assert`.
+- `find`/`step`/`circumcenter` are bounds-checked (or document their panics);
+  `step` no longer indexes `inedges` before the empty-set guard.
+- Documented `cell_polygon` epsilon scale assumptions for large coordinates.
+
 # 0.5.3
 
 ## Fixes

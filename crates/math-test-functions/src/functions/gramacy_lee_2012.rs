@@ -7,6 +7,11 @@ use ndarray::Array1;
 /// Global minimum: f(x) ≈ -0.869011134989500 at x ≈ 0.548563444114526
 /// Bounds: x in [0.5, 2.5]
 pub fn gramacy_lee_2012(x: &Array1<f64>) -> f64 {
+    assert!(
+        x.len() == 1,
+        "gramacy_lee_2012 requires 1 dimension, got {}",
+        x.len()
+    );
     let x1 = x[0];
     let pi = std::f64::consts::PI;
     if x1 == 0.0 {

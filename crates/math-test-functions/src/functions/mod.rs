@@ -157,6 +157,7 @@ pub use gramacy_lee_2012::gramacy_lee_2012;
 pub use gramacy_lee_function::gramacy_lee_function;
 pub use griewank::griewank;
 pub use griewank2::griewank2;
+#[allow(deprecated)]
 pub use happy_cat::happy_cat;
 pub use happycat::happycat;
 pub use hartman_3d::hartman_3d;

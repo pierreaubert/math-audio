@@ -6,6 +6,7 @@ use ndarray::Array1;
 /// Global minimum: f(x) = -1 at x = (π, π)
 /// Bounds: x_i in [-100, 100]
 pub fn easom(x: &Array1<f64>) -> f64 {
+    assert!(x.len() == 2, "easom requires 2 dimensions, got {}", x.len());
     let x1 = x[0];
     let x2 = x[1];
     -x1.cos()

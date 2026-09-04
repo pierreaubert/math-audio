@@ -1,6 +1,6 @@
 [package]
 name = "math-test-functions"
-version = "0.5.2"
+version = "0.5.3"
 description = "A collection of non linear functions for testing optimisation algorithms"
 edition = { workspace = true }
 keywords.workspace = true

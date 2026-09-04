@@ -6,6 +6,11 @@ use ndarray::Array1;
 /// Global minimum: f(x) = 0 at x = (0, 0)
 /// Bounds: x_i in [-5, 5]
 pub fn three_hump_camel(x: &Array1<f64>) -> f64 {
+    assert!(
+        x.len() == 2,
+        "three_hump_camel requires 2 dimensions, got {}",
+        x.len()
+    );
     let x1 = x[0];
     let x2 = x[1];
     2.0 * x1.powi(2) - 1.05 * x1.powi(4) + x1.powi(6) / 6.0 + x1 * x2 + x2.powi(2)

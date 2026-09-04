@@ -267,7 +267,7 @@ impl FunctionRegistry {
         );
         functions.insert(
             "happy_cat".to_string(),
-            happy_cat as fn(&Array1<f64>) -> f64,
+            happycat as fn(&Array1<f64>) -> f64,
         );
         functions.insert(
             "hartman_3d".to_string(),

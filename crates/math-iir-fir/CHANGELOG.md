@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `FirError` and fallible `Fir::try_*` constructors; the infallible
+  constructors now panic via `expect` in all build profiles instead of
+  `debug_assert`-only validation.
+
+### Changed
+- Filter-bank evaluation uses the buffer-reusing `np_log_result_into` path.
+- `Biquad::process_block` now enables FTZ/DAZ for the block duration;
+  per-sample `process` documents caller-owned denormal handling
+  (see the FTZ policy in `denormals`).
+
 ## [0.5.16] - 2026-07-10
 
 ### Fixed

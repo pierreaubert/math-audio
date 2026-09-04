@@ -14,6 +14,10 @@ thread_local! {
 }
 
 /// Response of a cascade of SOS sections.
+///
+/// The `dh_db`/`dh_da` full Jacobian fields are retained for compatibility but
+/// considered legacy; new code should use the VJP-backed module backward
+/// passes instead of constructing this type.
 #[derive(Debug, Clone)]
 pub struct SosResponse {
     /// H(f) shape (M, `N_out`, `N_in`)
@@ -166,6 +170,10 @@ where
 ///
 /// Returns an error if the coefficient tensors have incompatible shapes, the
 /// tap axis is not length three, or `nfft` is zero.
+#[deprecated(
+    since = "0.5.3",
+    note = "materializes the full O(M·K·3·N_out·N_in) Jacobian; prefer the VJP-backed module backward passes (SosFilter, Biquad), which compute the identical gradient without the intermediate"
+)]
 pub fn sos_response(
     b: &Array4<Complex<f64>>,
     a: &Array4<Complex<f64>>,
@@ -661,6 +669,10 @@ pub(crate) fn sos_frequency_response_with_basis(
 ///
 /// Returns `AutodiffError` if `b` and `a` have different shapes or if `nfft`
 /// is zero.
+#[deprecated(
+    since = "0.5.3",
+    note = "materializes the full O(M·K·3·N_out·N_in) Jacobian; prefer the VJP-backed module backward passes (SosFilter, Biquad), which compute the identical gradient without the intermediate"
+)]
 #[allow(clippy::type_complexity)]
 pub fn sos_frequency_response_jacobian(
     b: &Array4<Complex<f64>>,
@@ -727,6 +739,10 @@ pub fn sos_frequency_response_parallel(
 ///
 /// Returns `AutodiffError` if `b` and `a` have different shapes, if the
 /// second axis is not `3`, or if `nfft` is zero.
+#[deprecated(
+    since = "0.5.3",
+    note = "materializes the full O(M·K·3·N) Jacobian; prefer the VJP-backed module backward passes (SosFilter, Biquad/ParallelBiquad), which compute the identical gradient without the intermediate"
+)]
 #[allow(clippy::type_complexity)]
 pub fn sos_frequency_response_jacobian_parallel(
     b: &Array3<Complex<f64>>,

@@ -6,5 +6,8 @@ use ndarray::Array1;
 /// Global minimum: f(x) = 0 at x = (0, 0, ..., 0)
 /// Bounds: x_i in [-100, 100]
 pub fn bent_cigar(x: &Array1<f64>) -> f64 {
+    if x.is_empty() {
+        return 0.0;
+    }
     x[0].powi(2) + 1e6 * x.iter().skip(1).map(|&xi| xi.powi(2)).sum::<f64>()
 }

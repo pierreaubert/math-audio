@@ -6,6 +6,11 @@ use ndarray::Array1;
 /// Global minimum: f(x) = 0.397887 at x = (-π, 12.275), (π, 2.275), (9.42478, 2.475)
 /// Bounds: x1 in [-5, 10], x2 in [0, 15]
 pub fn branin(x: &Array1<f64>) -> f64 {
+    assert!(
+        x.len() == 2,
+        "branin requires 2 dimensions, got {}",
+        x.len()
+    );
     let x1 = x[0];
     let x2 = x[1];
     let a = 1.0;

@@ -35,4 +35,19 @@ pub enum LMError {
     /// The Jacobian-derived system is singular (QR rank-deficient).
     #[error("singular Jacobian — cannot compute step")]
     SingularJacobian,
+
+    /// Analytic Jacobian returned a matrix with the wrong shape.
+    #[error(
+        "analytic Jacobian dimension mismatch: expected {expected_rows}x{expected_cols}, got {got_rows}x{got_cols}"
+    )]
+    JacobianDimensionMismatch {
+        /// Expected number of rows (residual count).
+        expected_rows: usize,
+        /// Expected number of columns (parameter count).
+        expected_cols: usize,
+        /// Returned number of rows.
+        got_rows: usize,
+        /// Returned number of columns.
+        got_cols: usize,
+    },
 }

@@ -4,6 +4,11 @@ use ndarray::Array1;
 
 /// De Jong F5 (Shekel's foxholes) function - 2D
 pub fn dejong_f5_foxholes(x: &Array1<f64>) -> f64 {
+    assert!(
+        x.len() == 2,
+        "dejong_f5_foxholes requires 2 dimensions, got {}",
+        x.len()
+    );
     let x1 = x[0];
     let x2 = x[1];
 

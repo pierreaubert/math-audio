@@ -6,6 +6,7 @@ use ndarray::Array1;
 /// Global minimum: f(x) = 0 at x = (0, 0, ..., 0)
 /// Bounds: x_i in [-10, 10]
 pub fn pinter(x: &Array1<f64>) -> f64 {
+    assert!(!x.is_empty(), "pinter requires at least 1 dimension, got 0");
     let n = x.len();
     let mut sum1 = 0.0;
     let mut sum2 = 0.0;

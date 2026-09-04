@@ -110,6 +110,126 @@ fn raw_to_gain_db_derivative(gain_raw: f64) -> f64 {
     }
 }
 
+/// Validate a raw PEQ parameter tensor and return `(n_sections, n_channels)`.
+///
+/// Expects shape `(n_sections, 3, n_channels)` for `[fc_raw, q_raw, gain_raw]`.
+fn validate_prior_param(param: &ArrayD<f64>) -> Result<(usize, usize), AutodiffError> {
+    let shape = param.shape();
+    if shape.len() != 3 || shape[1] != 3 {
+        return Err(AutodiffError::Message(format!(
+            "PEQ prior: expected shape (n_sections, 3, n_channels), got {shape:?}"
+        )));
+    }
+    if shape[0] == 0 || shape[2] == 0 {
+        return Err(AutodiffError::Message(
+            "PEQ prior: n_sections and n_channels must be greater than 0".to_string(),
+        ));
+    }
+    Ok((shape[0], shape[2]))
+}
+
+/// Smoothness prior over raw PEQ gains.
+///
+/// Mean squared difference of `gain_raw` between adjacent sections, averaged
+/// over channels: `sum_ch sum_{k>0} (g[k] - g[k-1])^2 / (C * (K - 1))`.
+/// Penalizes jagged cascades where neighboring sections fight each other. A
+/// single section has no neighbor and returns `0.0`.
+///
+/// # Errors
+///
+/// Returns an error if `param` does not have shape
+/// `(n_sections, 3, n_channels)`.
+pub fn peq_smoothness_penalty(param: &ArrayD<f64>) -> Result<f64, AutodiffError> {
+    let (n_sections, n_channels) = validate_prior_param(param)?;
+    if n_sections < 2 {
+        return Ok(0.0);
+    }
+    let mut sum = 0.0;
+    for ch in 0..n_channels {
+        for k in 1..n_sections {
+            let diff = param[[k, 2, ch]] - param[[k - 1, 2, ch]];
+            sum += diff * diff;
+        }
+    }
+    Ok(sum / (n_channels * (n_sections - 1)) as f64)
+}
+
+/// Gradient of [`peq_smoothness_penalty`] w.r.t. the raw parameter tensor.
+///
+/// Only the `gain_raw` row is non-zero.
+///
+/// # Errors
+///
+/// Same conditions as [`peq_smoothness_penalty`].
+pub fn peq_smoothness_penalty_backward(param: &ArrayD<f64>) -> Result<ArrayD<f64>, AutodiffError> {
+    let (n_sections, n_channels) = validate_prior_param(param)?;
+    let mut grad = ArrayD::zeros(param.raw_dim());
+    if n_sections < 2 {
+        return Ok(grad);
+    }
+    let denom = (n_channels * (n_sections - 1)) as f64;
+    for ch in 0..n_channels {
+        for k in 0..n_sections {
+            let mut g = 0.0;
+            if k > 0 {
+                g += param[[k, 2, ch]] - param[[k - 1, 2, ch]];
+            }
+            if k + 1 < n_sections {
+                g -= param[[k + 1, 2, ch]] - param[[k, 2, ch]];
+            }
+            grad[[k, 2, ch]] = 2.0 * g / denom;
+        }
+    }
+    Ok(grad)
+}
+
+/// Sparsity prior over raw PEQ gains.
+///
+/// Mean absolute `gain_raw` over sections and channels. Encourages solutions
+/// that use few active bands.
+///
+/// # Errors
+///
+/// Returns an error if `param` does not have shape
+/// `(n_sections, 3, n_channels)`.
+pub fn peq_sparsity_penalty(param: &ArrayD<f64>) -> Result<f64, AutodiffError> {
+    let (n_sections, n_channels) = validate_prior_param(param)?;
+    let mut sum = 0.0;
+    for k in 0..n_sections {
+        for ch in 0..n_channels {
+            sum += param[[k, 2, ch]].abs();
+        }
+    }
+    Ok(sum / (n_sections * n_channels) as f64)
+}
+
+/// Subgradient of [`peq_sparsity_penalty`] w.r.t. the raw parameter tensor.
+///
+/// `sign(gain_raw) / (K * C)` on the gain row (0 at exactly zero), zero
+/// elsewhere.
+///
+/// # Errors
+///
+/// Same conditions as [`peq_sparsity_penalty`].
+pub fn peq_sparsity_penalty_backward(param: &ArrayD<f64>) -> Result<ArrayD<f64>, AutodiffError> {
+    let (n_sections, n_channels) = validate_prior_param(param)?;
+    let mut grad = ArrayD::zeros(param.raw_dim());
+    let denom = (n_sections * n_channels) as f64;
+    for k in 0..n_sections {
+        for ch in 0..n_channels {
+            let g = param[[k, 2, ch]];
+            grad[[k, 2, ch]] = if g > 0.0 {
+                1.0 / denom
+            } else if g < 0.0 {
+                -1.0 / denom
+            } else {
+                0.0
+            };
+        }
+    }
+    Ok(grad)
+}
+
 /// Compute normalized RBJ peaking or shelving coefficients.
 fn compute_peq_coeffs(
     fc: f64,

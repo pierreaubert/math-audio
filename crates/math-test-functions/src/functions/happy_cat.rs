@@ -2,13 +2,13 @@
 
 use ndarray::Array1;
 
-/// Happy Cat function - recent benchmark with interesting landscape
-/// Global minimum: f(x) = 0 at x = (±1, ±1, ..., ±1)
-/// Bounds: x_i in [-2, 2]
+/// Deprecated duplicate of [`happycat`](super::happycat::happycat).
+///
+/// The previous body used `((s-n).powi(2)).powf(0.25)` (= `|s-n|^0.5`),
+/// which disagrees with the reference definition
+/// `f(x) = |sum(x_i^2) - n|^0.25 + (0.5*sum(x_i^2) + sum(x_i))/n + 0.5`.
+/// Kept for backwards compatibility; delegates to [`happycat`](super::happycat::happycat).
+#[deprecated(note = "duplicate of `happycat` with a corrected exponent; use `happycat` instead")]
 pub fn happy_cat(x: &Array1<f64>) -> f64 {
-    let n = x.len() as f64;
-    let sum_squares: f64 = x.iter().map(|&xi| xi.powi(2)).sum();
-    let sum_x: f64 = x.iter().sum();
-
-    ((sum_squares - n).powi(2)).powf(0.25) + (0.5 * sum_squares + sum_x) / n + 0.5
+    super::happycat::happycat(x)
 }

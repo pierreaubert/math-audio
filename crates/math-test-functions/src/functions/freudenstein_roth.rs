@@ -6,6 +6,11 @@ use ndarray::Array1;
 /// Global minimum: f(x) = 0 at x = (5, 4)
 /// Bounds: x_i in [-10, 10]
 pub fn freudenstein_roth(x: &Array1<f64>) -> f64 {
+    assert!(
+        x.len() == 2,
+        "freudenstein_roth requires 2 dimensions, got {}",
+        x.len()
+    );
     let x1 = x[0];
     let x2 = x[1];
     (-13.0 + x1 + ((5.0 - x2) * x2 - 2.0) * x2).powi(2)

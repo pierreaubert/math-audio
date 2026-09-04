@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- `true_peak`: `peak` is now a running maximum over all processed samples
+  instead of the last window; documented the Catmull-Rom path as approximate
+  and the `ebur128` FIR table as canonical.
+- `fdn`: saturation reporting for the ±4.0 safety clamp (plus a
+  unitary-matrix validation helper) instead of silently masking instability.
+
 ## [0.5.26] - 2026-07-10
 
 ### Fixed

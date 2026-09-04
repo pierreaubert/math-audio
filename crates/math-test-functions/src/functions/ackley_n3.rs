@@ -6,6 +6,11 @@ use ndarray::Array1;
 /// Global minimum: f(x) ≈ -195.6 at complex optimum
 /// Bounds: x_i in [-32, 32]
 pub fn ackley_n3(x: &Array1<f64>) -> f64 {
+    assert!(
+        x.len() == 2,
+        "ackley_n3 requires 2 dimensions, got {}",
+        x.len()
+    );
     let x1 = x[0];
     let x2 = x[1];
     -200.0 * (-0.02 * (x1.powi(2) + x2.powi(2)).sqrt()).exp()

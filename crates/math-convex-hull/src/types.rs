@@ -169,11 +169,24 @@ impl Face {
     }
 
     /// Check if a point is visible from this face
+    ///
+    /// Uses a scale-aware relative tolerance derived from `vertices`
+    /// (see [`crate::compute_relative_epsilon`]).
     pub fn is_visible_from(&self, point: &Vertex, vertices: &[Vertex]) -> bool {
+        self.is_visible_from_with_epsilon(point, vertices, crate::compute_relative_epsilon(vertices))
+    }
+
+    /// Check if a point is visible from this face with an explicit tolerance.
+    pub fn is_visible_from_with_epsilon(
+        &self,
+        point: &Vertex,
+        vertices: &[Vertex],
+        epsilon: f64,
+    ) -> bool {
         let v0 = &vertices[self.v0];
         let normal = self.normal(vertices);
         let to_point = point.sub(v0);
-        normal.dot(&to_point) > 1e-10
+        normal.dot(&to_point) > epsilon
     }
 }
 

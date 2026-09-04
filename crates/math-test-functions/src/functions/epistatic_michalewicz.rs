@@ -7,6 +7,10 @@ use ndarray::Array1;
 /// Bounds: x_i in [0, π]
 pub fn epistatic_michalewicz(x: &Array1<f64>) -> f64 {
     let m = 10.0; // Steepness parameter
+    assert!(
+        !x.is_empty(),
+        "epistatic_michalewicz requires at least 1 dimension, got 0"
+    );
     let n = x.len();
 
     // Add epistatic (interaction) terms

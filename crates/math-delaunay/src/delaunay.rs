@@ -44,7 +44,19 @@ impl Delaunay {
     }
 
     /// Create from flat coordinates [x0, y0, x1, y1, ...].
+    ///
+    /// **Non-finite input.** This crate has no error type, so invalid
+    /// coordinates are sanitized instead of rejected: each non-finite
+    /// component (`NaN`, `+∞`, `-∞`) is replaced with `0.0` before
+    /// triangulation. This runs in all build modes (release included).
+    /// Point count and indices are preserved, so index-based queries
+    /// (`point`, `neighbors`, `find`, `step`, Voronoi cells) stay
+    /// aligned with the input positions.
     pub fn new(points: Vec<f64>) -> Self {
+        let points: Vec<f64> = points
+            .into_iter()
+            .map(|c| if c.is_finite() { c } else { 0.0 })
+            .collect();
         let n = points.len() / 2;
         let del_points: Vec<Point> = (0..n)
             .map(|i| Point {
@@ -237,8 +249,15 @@ impl Delaunay {
     /// fast and exact for the common "near previous query" workflow, but
     /// queries outside the hull, or adversarial start vertices, are not a
     /// global nearest-neighbor guarantee.
+    ///
+    /// Returns `delaunator::EMPTY` (no panic) when the query contains
+    /// `NaN`, when the triangulation is empty, or when `start` is out of
+    /// bounds (`start >= len()`).
     pub fn find(&self, x: f64, y: f64, start: usize) -> usize {
         if x.is_nan() || y.is_nan() {
+            return NO_EDGE;
+        }
+        if start >= self.len() {
             return NO_EDGE;
         }
         let mut i = start;
@@ -256,8 +275,18 @@ impl Delaunay {
         i
     }
 
+    /// Advance one greedy-descent step from point `i` toward `(x, y)`.
+    ///
+    /// Returns `delaunator::EMPTY` (no panic) when `i` is out of bounds
+    /// (`i >= len()`, which includes the empty triangulation). The
+    /// bounds check runs before any indexing of the internal buffers.
+    /// A valid `i` with no incoming half-edge (coincident point) falls
+    /// back to `(i + 1) % len()`, matching the previous behavior.
     pub fn step(&self, i: usize, x: f64, y: f64) -> usize {
-        if self.inedges[i] == NO_EDGE || self.points.is_empty() {
+        if i >= self.len() {
+            return NO_EDGE;
+        }
+        if self.inedges[i] == NO_EDGE {
             return (i + 1) % self.len();
         }
         let mut c = i;
@@ -297,7 +326,20 @@ impl Delaunay {
         c
     }
 
+    /// Circumcenter of triangle `t` (index into `triangles()` / 3).
+    ///
+    /// # Panics
+    ///
+    /// Panics if `t` is out of bounds (`t >= triangles().len() / 3`).
+    /// Unlike [`Delaunay::find`] / [`Delaunay::step`] there is no
+    /// sentinel return value for a point pair, so an invalid triangle
+    /// index is a caller bug.
     pub fn circumcenter(&self, t: usize) -> (f64, f64) {
+        assert!(
+            t < self.triangles.len() / 3,
+            "circumcenter triangle index {t} out of bounds ({} triangles)",
+            self.triangles.len() / 3
+        );
         let i = t * 3;
         let t1 = self.triangles[i] * 2;
         let t2 = self.triangles[i + 1] * 2;

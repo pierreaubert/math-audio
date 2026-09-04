@@ -1,8 +1,9 @@
+use super::types::JacobianFn;
 use super::types::LMCallback;
 use super::types::LMCallbackAction;
 use super::types::LMConfig;
 use super::types::LMIntermediate;
-use ndarray::Array1;
+use ndarray::{Array1, Array2};
 
 /// Fluent builder for [`LMConfig`].
 pub struct LMConfigBuilder {
@@ -11,6 +12,7 @@ pub struct LMConfigBuilder {
     pub(super) atol: f64,
     pub(super) lambda_init: f64,
     pub(super) jacobian_epsilon: f64,
+    pub(super) jacobian: Option<JacobianFn>,
     pub(super) x0: Option<Array1<f64>>,
     pub(super) weights: Option<Array1<f64>>,
     pub(super) disp: bool,
@@ -26,6 +28,7 @@ impl LMConfigBuilder {
             atol: 1e-14,
             lambda_init: 1.0,
             jacobian_epsilon: 1e-8,
+            jacobian: None,
             x0: None,
             weights: None,
             disp: false,
@@ -69,6 +72,18 @@ impl LMConfigBuilder {
         self
     }
 
+    /// Analytic Jacobian `J[i, j] = dr_i/dx_j` as an
+    /// `(n_residuals x n_params)` matrix. When set, the solver skips central
+    /// finite differences (saving `2 * n_params` residual evaluations per
+    /// iteration); `jacobian_epsilon` is then ignored.
+    pub fn jacobian<F>(mut self, f: F) -> Self
+    where
+        F: Fn(&Array1<f64>) -> Array2<f64> + 'static,
+    {
+        self.jacobian = Some(Box::new(f));
+        self
+    }
+
     /// Per-residual weights.
     pub fn weights(mut self, w: Array1<f64>) -> Self {
         self.weights = Some(w);
@@ -95,6 +110,7 @@ impl LMConfigBuilder {
             atol: self.atol,
             lambda_init: self.lambda_init,
             jacobian_epsilon: self.jacobian_epsilon,
+            jacobian: self.jacobian,
             x0: self.x0.expect("LMConfigBuilder: x0 is required"),
             weights: self.weights,
             disp: self.disp,

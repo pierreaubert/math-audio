@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `fitting`: documented capture-fit-validate loop with numeric acceptance
+  thresholds (`FIT_RMS_ACCEPTANCE`, `FitQualityReport::meets_acceptance_criteria`).
+- `stateful`: oversampling guidance in model API docs (when to run 2x/4x,
+  latency reporting, prepared-capture time constants).
+
+### Tests
+- Pinned `ControlSmoother` reconfiguration across sample rates.
+
 ## [0.5.2] - 2026-08-18
 
 ### Added

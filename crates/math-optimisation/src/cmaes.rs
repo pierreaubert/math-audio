@@ -126,6 +126,12 @@ impl std::fmt::Debug for CmaEsReport {
 ///
 /// The objective receives parameters in the original coordinate system. Bounds
 /// are handled by clipping sampled normalised points before evaluation.
+///
+/// Note — clipping bound bias: probability mass sampled outside the box piles
+/// up exactly on the boundary, so the adapted mean and the reported best point
+/// can hug a bound even when the unconstrained optimum lies beyond it. Treat
+/// boundary-hugging results as a hint to widen the bounds rather than as proof
+/// that the optimum is on the bound.
 pub fn cma_es<F>(f: &F, mut config: CmaEsConfig) -> Result<CmaEsReport>
 where
     F: Fn(&Array1<f64>) -> f64 + Sync,
@@ -188,6 +194,14 @@ where
     let mut b = DMatrix::<f64>::identity(n, n);
     let mut d = DVector::<f64>::from_element(n, 1.0);
     let mut invsqrt_c = DMatrix::<f64>::identity(n, n);
+    // Scratch buffer reused for the eigendecomposition so `covariance` is
+    // never cloned per generation (only `copy_from` into existing storage).
+    let mut eig_work = DMatrix::<f64>::zeros(n, n);
+    // Lazy eigendecomposition schedule: the O(n^3) factorisation is refreshed
+    // every `eig_gap` generations and the cached (B, D, C^{-1/2}) factors are
+    // reused in between. Small problems refresh every generation.
+    let eig_gap = (n / 4).clamp(1, 10);
+    let mut gens_since_eig = eig_gap;
     let mut pc = DVector::<f64>::zeros(n);
     let mut ps = DVector::<f64>::zeros(n);
 
@@ -356,20 +370,31 @@ where
         sigma *= ((cs / damps) * (norm_ps / chi_n - 1.0)).exp();
         sigma = sigma.clamp(1e-14, 10.0);
 
-        // Eigen-decomposition of the updated covariance matrix.
-        let eig = SymmetricEigen::new(covariance.clone());
-        b = eig.eigenvectors;
-        d = eig.eigenvalues.map(|v| v.max(1e-30).sqrt());
+        // Lazily refresh the eigen-decomposition of the updated covariance
+        // matrix, reusing the cached (B, D, C^{-1/2}) factors on the
+        // generations in between. The factorisation moves out of the reused
+        // `eig_work` scratch buffer (refilled via `copy_from`, no per-generation
+        // clone of `covariance`); the placeholder left behind is correctly
+        // sized so the next refresh copies without reallocating.
+        gens_since_eig += 1;
+        if gens_since_eig >= eig_gap {
+            gens_since_eig = 0;
+            eig_work.copy_from(&covariance);
+            let eig =
+                SymmetricEigen::new(std::mem::replace(&mut eig_work, DMatrix::zeros(n, n)));
+            b = eig.eigenvectors;
+            d = eig.eigenvalues.map(|v| v.max(1e-30).sqrt());
 
-        // Recompute C^{-1/2} = B * diag(1/d) * B^T without materialising the
-        // intermediate diagonal matrix.
-        for j in 0..n {
-            for k in 0..n {
-                let mut sum = 0.0;
-                for l in 0..n {
-                    sum += b[(j, l)] * b[(k, l)] / d[l].max(1e-30);
+            // Recompute C^{-1/2} = B * diag(1/d) * B^T without materialising the
+            // intermediate diagonal matrix.
+            for j in 0..n {
+                for k in 0..n {
+                    let mut sum = 0.0;
+                    for l in 0..n {
+                        sum += b[(j, l)] * b[(k, l)] / d[l].max(1e-30);
+                    }
+                    invsqrt_c[(j, k)] = sum;
                 }
-                invsqrt_c[(j, k)] = sum;
             }
         }
 

@@ -806,6 +806,70 @@ fn test_neighbors_hull_walk_wraps() {
     }
 }
 
+/// P1: `Delaunay::new` sanitizes non-finite coordinates (release-safe).
+/// Each NaN/±inf component becomes 0.0; count and indices are preserved.
+#[test]
+fn test_new_sanitizes_nonfinite_coordinates() {
+    let d = Delaunay::from_points(&[
+        (0.0, 0.0),
+        (f64::NAN, 1.0),
+        (f64::INFINITY, f64::NEG_INFINITY),
+        (1.0, f64::NAN),
+    ]);
+    assert_eq!(d.len(), 4, "point count must be preserved");
+    for &c in d.points() {
+        assert!(c.is_finite(), "stored coordinates must be finite, got {c}");
+    }
+    assert_eq!(d.point(1), (0.0, 1.0));
+    assert_eq!(d.point(2), (0.0, 0.0));
+}
+
+/// P2: `find` with an out-of-bounds start returns EMPTY instead of panicking.
+#[test]
+fn test_find_out_of_bounds_start_returns_empty() {
+    let d = Delaunay::from_points(&[(0.0, 0.0), (1.0, 0.0), (0.5, 1.0)]);
+    assert_eq!(d.find(0.5, 0.5, d.len()), delaunator::EMPTY);
+    assert_eq!(d.find(0.5, 0.5, usize::MAX), delaunator::EMPTY);
+}
+
+/// P2: `find` with a NaN query returns EMPTY instead of panicking.
+#[test]
+fn test_find_nan_query_returns_empty() {
+    let d = Delaunay::from_points(&[(0.0, 0.0), (1.0, 0.0), (0.5, 1.0)]);
+    assert_eq!(d.find(f64::NAN, 0.5, 0), delaunator::EMPTY);
+    assert_eq!(d.find(0.5, f64::NAN, 0), delaunator::EMPTY);
+}
+
+/// P2: `step` checks bounds before indexing `inedges` (the old code
+/// indexed `inedges[i]` before the `is_empty` guard).
+#[test]
+fn test_step_out_of_bounds_returns_empty() {
+    let d = Delaunay::from_points(&[(0.0, 0.0), (1.0, 0.0), (0.5, 1.0)]);
+    assert_eq!(d.step(d.len(), 0.5, 0.5), delaunator::EMPTY);
+    assert_eq!(d.step(usize::MAX, 0.5, 0.5), delaunator::EMPTY);
+    // Valid indices still step normally.
+    assert!(d.step(0, 0.5, 0.5) < d.len());
+}
+
+/// P2: `step`/`find` on an empty triangulation return EMPTY (no panic,
+/// no modulo-by-zero).
+#[test]
+fn test_step_find_on_empty_returns_empty() {
+    let d = Delaunay::new(vec![]);
+    assert!(d.is_empty());
+    assert_eq!(d.step(0, 0.5, 0.5), delaunator::EMPTY);
+    assert_eq!(d.find(0.5, 0.5, 0), delaunator::EMPTY);
+}
+
+/// P2: `circumcenter` with an out-of-bounds triangle index panics with a
+/// clear message (documented contract — no sentinel exists for (f64, f64)).
+#[test]
+#[should_panic(expected = "out of bounds")]
+fn test_circumcenter_out_of_bounds_panics() {
+    let d = Delaunay::from_points(&[(0.0, 0.0), (1.0, 0.0), (0.5, 1.0)]);
+    let _ = d.circumcenter(d.triangles().len() / 3);
+}
+
 #[test]
 fn test_neighbors_empty_for_out_of_range() {
     let d = Delaunay::from_points(&[(0.0, 0.0), (1.0, 0.0), (0.5, 1.0)]);

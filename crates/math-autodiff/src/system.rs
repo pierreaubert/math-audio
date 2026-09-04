@@ -118,12 +118,18 @@ impl Series {
 
 impl DiffModule<f64> for Series {
     fn forward(&self, input: &DiffTensor<f64>) -> Result<DiffTensor<f64>, AutodiffError> {
-        let mut x = input.clone();
+        // The first module reads `input` directly (no initial clone) and each
+        // subsequent output is moved into `intermediates` via `mem::replace`,
+        // so only the final output shared with the caller needs a clone to
+        // warm the forward cache. A warm cache lets `backward` skip its
+        // recompute path on the very first step.
         let mut intermediates = Vec::with_capacity(self.modules.len());
-        for module in &self.modules {
-            x = module.forward(&x)?;
-            intermediates.push(x.clone());
+        let mut x = self.modules[0].forward(input)?;
+        for module in self.modules.iter().skip(1) {
+            let y = module.forward(&x)?;
+            intermediates.push(std::mem::replace(&mut x, y));
         }
+        intermediates.push(x.clone());
         let input_fingerprint = tensor_fingerprint(input);
         let output_fingerprint = tensor_fingerprint(&x);
         let parameter_fingerprint = parameter_fingerprint(&self.modules);
@@ -142,21 +148,32 @@ impl DiffModule<f64> for Series {
         output: &DiffTensor<f64>,
         grad_output: &DiffTensor<f64>,
     ) -> Result<DiffTensor<f64>, AutodiffError> {
+        let current_parameter_fingerprint = parameter_fingerprint(&self.modules);
         let cache = self.forward_cache.borrow_mut().take();
         let intermediates = cache
             .filter(|cache| {
                 cache.input_fingerprint == tensor_fingerprint(input)
                     && cache.output_fingerprint == tensor_fingerprint(output)
-                    && cache.parameter_fingerprint == parameter_fingerprint(&self.modules)
+                    && cache.parameter_fingerprint == current_parameter_fingerprint
             })
             .map_or_else(Vec::new, |cache| cache.intermediates);
         let intermediates = if intermediates.is_empty() {
+            // Cold cache (e.g. `backward` without a preceding `forward`):
+            // recompute, then re-warm the cache so a repeated `backward`
+            // does not pay the recompute again.
             let mut recomputed = Vec::with_capacity(self.modules.len());
-            let mut x = input.clone();
-            for module in &self.modules {
-                x = module.forward(&x)?;
-                recomputed.push(x.clone());
+            let mut x = self.modules[0].forward(input)?;
+            for module in self.modules.iter().skip(1) {
+                let y = module.forward(&x)?;
+                recomputed.push(std::mem::replace(&mut x, y));
             }
+            recomputed.push(x.clone());
+            *self.forward_cache.borrow_mut() = Some(SeriesCache {
+                input_fingerprint: tensor_fingerprint(input),
+                output_fingerprint: tensor_fingerprint(&x),
+                parameter_fingerprint: current_parameter_fingerprint,
+                intermediates: recomputed.clone(),
+            });
             recomputed
         } else {
             intermediates
@@ -244,6 +261,22 @@ impl std::fmt::Debug for Parallel {
     }
 }
 
+fn parallel_parameter_fingerprint(
+    branch_a: &dyn DiffModule<f64>,
+    branch_b: &dyn DiffModule<f64>,
+) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    for branch in [branch_a, branch_b] {
+        for parameter in branch.parameters() {
+            parameter.shape().hash(&mut hasher);
+            for &value in parameter {
+                value.to_bits().hash(&mut hasher);
+            }
+        }
+    }
+    hasher.finish()
+}
+
 impl Parallel {
     /// Create a new parallel combiner from two branches.
     ///
@@ -298,19 +331,15 @@ impl DiffModule<f64> for Parallel {
         let out_a = self.branch_a.forward(input)?;
         let out_b = self.branch_b.forward(input)?;
         let output = DiffTensor::from_array(&out_a.data + &out_b.data);
-        let mut hasher = DefaultHasher::new();
-        for branch in [&self.branch_a, &self.branch_b] {
-            for parameter in branch.parameters() {
-                parameter.shape().hash(&mut hasher);
-                for &value in parameter {
-                    value.to_bits().hash(&mut hasher);
-                }
-            }
-        }
+        // Branch outputs move into the cache (no clones); a warm cache lets
+        // `backward` skip its recompute path on the very first step.
         *self.forward_cache.borrow_mut() = Some(ParallelCache {
             input_fingerprint: tensor_fingerprint(input),
             output_fingerprint: tensor_fingerprint(&output),
-            parameter_fingerprint: hasher.finish(),
+            parameter_fingerprint: parallel_parameter_fingerprint(
+                self.branch_a.as_ref(),
+                self.branch_b.as_ref(),
+            ),
             output_a: out_a,
             output_b: out_b,
         });
@@ -323,16 +352,8 @@ impl DiffModule<f64> for Parallel {
         output: &DiffTensor<f64>,
         grad_output: &DiffTensor<f64>,
     ) -> Result<DiffTensor<f64>, AutodiffError> {
-        let mut hasher = DefaultHasher::new();
-        for branch in [&self.branch_a, &self.branch_b] {
-            for parameter in branch.parameters() {
-                parameter.shape().hash(&mut hasher);
-                for &value in parameter {
-                    value.to_bits().hash(&mut hasher);
-                }
-            }
-        }
-        let parameter_fingerprint = hasher.finish();
+        let parameter_fingerprint =
+            parallel_parameter_fingerprint(self.branch_a.as_ref(), self.branch_b.as_ref());
         let cache = self.forward_cache.borrow_mut().take();
         let cached_outputs = cache
             .filter(|cache| {
@@ -341,9 +362,21 @@ impl DiffModule<f64> for Parallel {
                     && cache.parameter_fingerprint == parameter_fingerprint
             })
             .map(|cache| (cache.output_a, cache.output_b));
-        let (out_a, out_b) = match cached_outputs {
-            Some(outputs) => outputs,
-            None => (self.branch_a.forward(input)?, self.branch_b.forward(input)?),
+        let (out_a, out_b) = if let Some(outputs) = cached_outputs {
+            outputs
+        } else {
+            // Cold cache: recompute, then re-warm so a repeated `backward`
+            // does not pay the recompute again.
+            let out_a = self.branch_a.forward(input)?;
+            let out_b = self.branch_b.forward(input)?;
+            *self.forward_cache.borrow_mut() = Some(ParallelCache {
+                input_fingerprint: tensor_fingerprint(input),
+                output_fingerprint: tensor_fingerprint(output),
+                parameter_fingerprint,
+                output_a: out_a.clone(),
+                output_b: out_b.clone(),
+            });
+            (out_a, out_b)
         };
         let grad_input_a = self.branch_a.backward(input, &out_a, grad_output)?;
         let grad_input_b = self.branch_b.backward(input, &out_b, grad_output)?;

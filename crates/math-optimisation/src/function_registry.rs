@@ -102,7 +102,7 @@ impl FunctionRegistry {
         );
         functions.insert("katsuura".to_string(), katsuura as TestFunction);
         functions.insert("happycat".to_string(), happycat as TestFunction);
-        functions.insert("happy_cat".to_string(), happy_cat as TestFunction);
+        functions.insert("happy_cat".to_string(), happycat as TestFunction);
 
         // Alpine functions
         functions.insert("alpine_n1".to_string(), alpine_n1 as TestFunction);

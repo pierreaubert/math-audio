@@ -1,6 +1,14 @@
 // ============================================================================
 // True Peak Detector — 4x oversampled peak detection (ITU-R BS.1770-4 inspired)
 // ============================================================================
+//
+// Canonical-path note: this type is the canonical lightweight single-channel
+// true-peak detector for ad-hoc peak metering. The FIR polyphase detector at
+// `crate::ebur128` (see `ebur128/true_peak_detector.rs`) is a separate,
+// private implementation tied to BS.1770 loudness-gated measurement and remains
+// canonical for that path. The two are intentionally not unified into one type:
+// use this detector for standalone metering, and the `ebur128` measurement for
+// loudness-integrated true-peak readouts.
 
 /// A true peak detector that uses 4x oversampling via Catmull-Rom interpolation
 /// to detect inter-sample peaks.
@@ -8,11 +16,17 @@
 /// Standard peak detection misses peaks that occur between samples. This computes
 /// 3 sub-sample interpolation points between each pair of consecutive samples
 /// to catch inter-sample peaks that exceed the sample values.
+///
+/// `peak` is a running maximum over all samples processed since construction
+/// (or the last [`TruePeakDetector::reset`]): each call to [`process_linear`]
+/// returns the peak of the current interpolation window only, while
+/// [`peak_linear`][Self::peak_linear] / [`peak_db`][Self::peak_db] report the
+/// running maximum. Call [`reset`][Self::reset] to start a new measurement.
 #[derive(Debug, Clone)]
 pub struct TruePeakDetector {
     /// Previous samples: [x[n-2], x[n-1]]
     prev: [f32; 2],
-    /// Current true peak (linear, not dB).
+    /// Running-maximum true peak (linear, not dB) since construction/reset.
     peak: f32,
 }
 
@@ -41,7 +55,10 @@ impl TruePeakDetector {
         }
     }
 
-    /// Process one sample and return the true peak as linear amplitude.
+    /// Process one sample and return the current-window true peak as linear
+    /// amplitude. The return value covers only the interpolation window ending
+    /// at `sample`; the running maximum is accumulated in `peak` and observed
+    /// via [`peak_linear`][Self::peak_linear] / [`peak_db`][Self::peak_db].
     /// This is the primary processing method that advances internal state.
     #[inline]
     pub fn process_linear(&mut self, sample: f32) -> f32 {
@@ -61,11 +78,14 @@ impl TruePeakDetector {
 
         self.prev[0] = self.prev[1];
         self.prev[1] = sample;
-        self.peak = max_abs;
+        // Running maximum: retain the largest window peak seen so far so the
+        // stored peak never drops when the signal gets quieter. The return
+        // value above still reports only the current window.
+        self.peak = self.peak.max(max_abs);
         max_abs
     }
 
-    /// Get the last computed true peak in dB.
+    /// Get the running-maximum true peak in dB since construction/reset.
     #[inline]
     pub fn peak_db(&self) -> f32 {
         if self.peak < 1e-12 {
@@ -75,12 +95,14 @@ impl TruePeakDetector {
         }
     }
 
-    /// Get the last computed true peak as linear amplitude.
+    /// Get the running-maximum true peak as linear amplitude
+    /// since construction/reset.
     #[inline]
     pub fn peak_linear(&self) -> f32 {
         self.peak
     }
 
+    /// Clear sample history and the running-maximum peak.
     pub fn reset(&mut self) {
         self.prev = [0.0; 2];
         self.peak = 0.0;
@@ -145,6 +167,24 @@ mod tests {
         tp.process(0.8);
         tp.process(0.0);
         assert!(tp.peak_linear() >= 0.79, "peak: {}", tp.peak_linear());
+    }
+
+    #[test]
+    fn test_peak_is_running_max() {
+        let mut tp = TruePeakDetector::new();
+        tp.process(1.0);
+        let held = tp.peak_linear();
+        assert!(held >= 0.99, "peak: {}", held);
+        // Quiet input: the per-window return drops (after the 1.0 sample
+        // leaves the two-sample window) but the stored peak holds.
+        tp.process_linear(0.0);
+        let window = tp.process_linear(0.0);
+        assert!(window < held, "window {window} should drop below held {held}");
+        assert!(
+            (tp.peak_linear() - held).abs() < 1e-6,
+            "running peak should hold at {held}, got {}",
+            tp.peak_linear()
+        );
     }
 
     #[test]

@@ -331,6 +331,57 @@ mod tests {
     }
 
     #[test]
+    fn per_band_metrics_match_direct_filtered_analysis() {
+        // The per-band dispatcher must report the same ISO metrics as
+        // filtering each band by hand and running the broadband analysis.
+        use crate::metrics::analyze_iso3382;
+
+        fn decay_rir(sample_rate: f64, t60_s: f64, duration_s: f64) -> Vec<f32> {
+            let n = (duration_s * sample_rate) as usize;
+            let alpha = std::f64::consts::LN_10 * 6.0 / (2.0 * t60_s);
+            let mut rir = vec![0.0f32; n];
+            rir[0] = 1.0;
+            let mut state: u64 = 0x1234_5678_9ABC_DEF0;
+            for (i, sample) in rir.iter_mut().enumerate().skip(1) {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                let noise = ((state >> 32) as i32 as f64) / (i32::MAX as f64);
+                let t = i as f64 / sample_rate;
+                *sample = (noise * (-alpha * t).exp()) as f32;
+            }
+            rir
+        }
+
+        fn same(a: f64, b: f64) -> bool {
+            a == b || (a.is_nan() && b.is_nan())
+        }
+
+        let sr = 48000.0;
+        let rir = decay_rir(sr, 0.6, 2.0);
+        let bands = [500.0, 1000.0, 2000.0];
+        let results = analyze_iso3382_bands(&rir, sr, &bands, BandWidth::Octave, 4);
+        assert_eq!(results.len(), bands.len());
+        for (fc, m) in &results {
+            let filtered = bandpass(&rir, *fc, BandWidth::Octave, sr, 4);
+            let direct = analyze_iso3382(&filtered, sr);
+            assert!(
+                same(m.edt_s, direct.edt_s)
+                    && same(m.t20_s, direct.t20_s)
+                    && same(m.t30_s, direct.t30_s)
+                    && same(m.c50_db, direct.c50_db)
+                    && same(m.c80_db, direct.c80_db)
+                    && same(m.d50, direct.d50)
+                    && same(m.ts_s, direct.ts_s)
+                    && same(m.edt_r2, direct.edt_r2)
+                    && same(m.t20_r2, direct.t20_r2)
+                    && same(m.t30_r2, direct.t30_r2),
+                "band {fc} Hz diverged from direct analysis"
+            );
+        }
+    }
+
+    #[test]
     fn analyze_octaves_runs_on_impulse() {
         // Dirac impulse → no decay; metrics will be NaN/short but we
         // verify the dispatch doesn't panic and returns one entry per

@@ -34,6 +34,12 @@ pub struct Fdn {
     output_gains: Vec<[f32; 2]>,
     /// Pre-allocated scratch for reading delay line outputs before feedback
     scratch: Vec<f32>,
+    /// Latch set when the ±4.0 output safety clamp engages. Sticky until
+    /// cleared with [`reset`][Self::reset] or [`clear_saturation`][Self::clear_saturation];
+    /// a set flag means the tail was clamped (possible instability), not clean.
+    saturated: bool,
+    /// Number of `process_stereo` calls in which the clamp engaged.
+    saturated_count: u64,
 }
 
 impl Fdn {
@@ -71,6 +77,8 @@ impl Fdn {
             input_gains,
             output_gains,
             scratch: vec![0.0; num_lines],
+            saturated: false,
+            saturated_count: 0,
         }
     }
 
@@ -159,7 +167,55 @@ impl Fdn {
         // Safety clamp: ±4 gives ~24 dB of headroom above unity, which is
         // enough for dense late reverb while preventing runaway feedback from
         // producing non-finite output if the FDN matrix becomes unstable.
-        (out_l.clamp(-4.0, 4.0), out_r.clamp(-4.0, 4.0))
+        // Latch the saturation flag (and count) when the clamp engages so
+        // callers can detect instability instead of it being masked silently.
+        let clamped_l = out_l.clamp(-4.0, 4.0);
+        let clamped_r = out_r.clamp(-4.0, 4.0);
+        if clamped_l != out_l || clamped_r != out_r {
+            self.saturated = true;
+            self.saturated_count += 1;
+        }
+        (clamped_l, clamped_r)
+    }
+
+    /// Whether the output safety clamp has engaged since construction, the
+    /// last [`reset`][Self::reset], or the last
+    /// [`clear_saturation`][Self::clear_saturation]. A `true` value signals
+    /// the tail was clamped (possible instability), not clean output.
+    pub fn saturated(&self) -> bool {
+        self.saturated
+    }
+
+    /// Number of `process_stereo` calls in which the safety clamp engaged.
+    pub fn saturated_count(&self) -> u64 {
+        self.saturated_count
+    }
+
+    /// Clear the saturation latch and counter without touching audio state.
+    pub fn clear_saturation(&mut self) {
+        self.saturated = false;
+        self.saturated_count = 0;
+    }
+
+    /// Check that the feedback matrix is unitary (orthonormal rows, i.e.
+    /// `M * M^T == I` within `tol`). A non-unitary matrix changes loop energy
+    /// and can drive the network unstable; use this after any external matrix
+    /// edit to validate before processing.
+    pub fn is_feedback_matrix_unitary(&self, tol: f32) -> bool {
+        let n = self.num_lines;
+        for i in 0..n {
+            for j in 0..n {
+                let mut dot = 0.0;
+                for k in 0..n {
+                    dot += self.feedback_matrix[i * n + k] * self.feedback_matrix[j * n + k];
+                }
+                let expected = if i == j { 1.0 } else { 0.0 };
+                if (dot - expected).abs() > tol {
+                    return false;
+                }
+            }
+        }
+        true
     }
 
     /// Reset all delay line state.
@@ -169,6 +225,8 @@ impl Fdn {
         }
         self.write_positions.fill(0);
         self.absorption_state.fill(0.0);
+        self.saturated = false;
+        self.saturated_count = 0;
     }
 }
 
@@ -400,6 +458,40 @@ mod tests {
             );
             assert!(l.abs() < 5.0 && r.abs() < 5.0, "Output too large: {l}, {r}");
         }
+    }
+
+    #[test]
+    fn test_fdn_saturation_flag_and_unitary_helper() {
+        let mut fdn = Fdn::new(8, 48000);
+        // Fresh FDN: no saturation, and the default Hadamard matrix is unitary.
+        assert!(!fdn.saturated());
+        assert_eq!(fdn.saturated_count(), 0);
+        assert!(fdn.is_feedback_matrix_unitary(1e-5));
+
+        // Drive hard enough to engage the ±4.0 clamp.
+        let mut hit = false;
+        for _ in 0..4096 {
+            fdn.process_stereo(10.0, 10.0);
+            if fdn.saturated() {
+                hit = true;
+                break;
+            }
+        }
+        assert!(hit, "saturation flag never engaged under hot input");
+        assert!(fdn.saturated_count() > 0);
+
+        // Clearing the latch preserves audio state handling; reset clears too.
+        fdn.clear_saturation();
+        assert!(!fdn.saturated());
+        assert_eq!(fdn.saturated_count(), 0);
+
+        // A scaled (non-unitary) matrix must fail validation.
+        let mut scaled = Fdn::new(4, 48000);
+        assert!(scaled.is_feedback_matrix_unitary(1e-5));
+        for v in &mut scaled.feedback_matrix {
+            *v *= 2.0;
+        }
+        assert!(!scaled.is_feedback_matrix_unitary(1e-5));
     }
 
     #[test]

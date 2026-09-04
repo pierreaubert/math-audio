@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- Noise cutoff now uses Lundeby-style iterative refinement with a pre-fit
+  SNR gate (15 dB) instead of the ±20 ms Chu approximation, so T30 on
+  noisy/short RIRs no longer fits noise.
+- `linear_fit_indexed` centers the time base per fit window to reduce
+  subtractive cancellation in late windows.
+
+### Added
+- Per-band ISO 3382 metrics wired through the `bands` filterbank
+  (octave/third-octave with per-band fit quality).
+
 ## [0.5.6] - 2026-05-30
 
 ### Added

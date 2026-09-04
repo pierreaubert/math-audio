@@ -6,6 +6,11 @@ use ndarray::Array1;
 /// Global minima: f(x) = 0 at x = (3, 2), (-2.805118, 3.131312), (-3.779310, -3.283186), (3.584428, -1.848126)
 /// Bounds: x_i in [-5, 5]
 pub fn himmelblau(x: &Array1<f64>) -> f64 {
+    assert!(
+        x.len() == 2,
+        "himmelblau requires 2 dimensions, got {}",
+        x.len()
+    );
     let x1 = x[0];
     let x2 = x[1];
     (x1.powi(2) + x2 - 11.0).powi(2) + (x1 + x2.powi(2) - 7.0).powi(2)

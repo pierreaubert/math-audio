@@ -6,6 +6,7 @@ use ndarray::Array1;
 /// Global minimum: f(x) = 0 at x = (1, 3)
 /// Bounds: x_i in [-10, 10]
 pub fn booth(x: &Array1<f64>) -> f64 {
+    assert!(x.len() == 2, "booth requires 2 dimensions, got {}", x.len());
     let x1 = x[0];
     let x2 = x[1];
     (x1 + 2.0 * x2 - 7.0).powi(2) + (2.0 * x1 + x2 - 5.0).powi(2)

@@ -6,6 +6,11 @@ use ndarray::Array1;
 /// Global minimum: f(x) = 3 at x = (0, -1)
 /// Bounds: x_i in [-2, 2]
 pub fn goldstein_price(x: &Array1<f64>) -> f64 {
+    assert!(
+        x.len() == 2,
+        "goldstein_price requires 2 dimensions, got {}",
+        x.len()
+    );
     let x1 = x[0];
     let x2 = x[1];
     let term1 = 1.0

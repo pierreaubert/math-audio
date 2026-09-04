@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `loss`: Bark/ERB weighting helpers (`bark_weights`, `erb_weights`,
+  `bark_weighted_loss`, `erb_weighted_loss`), spectral-convergence,
+  log-magnitude, and multi-scale spectral losses with VJP backward passes.
+
+### Changed
+- `Series`/`Parallel` warm the forward cache to avoid first-step
+  recompute plus per-module clones.
+
+### Deprecated
+- The public `Array5` full-Jacobian response API (`sos_frequency_response_jacobian*`);
+  `SosFilter::backward` uses the O(K·M) VJP path.
+
 ## [0.5.2] - 2026-08-18
 
 ### Fixed

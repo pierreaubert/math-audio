@@ -1,3 +1,6 @@
+// The full-Jacobian API under test is deprecated but must keep working.
+#![allow(deprecated)]
+
 use approx::assert_abs_diff_eq;
 use math_audio_autodiff::iir::response::{
     sos_frequency_response, sos_frequency_response_jacobian,
