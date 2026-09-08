@@ -7,7 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.22] - 2026-09-08
+
 ### Added
+- Shared `Crossover` API with selectable Butterworth, Linkwitz–Riley, and
+  cascaded Bessel families at orders 2 and 4, plus fourth-order Neville–Thiele
+  with notch parameter 0.5. Supports `f32` and `f64`, independent channel state,
+  allocation-free sample/frame processing, frequency updates, and state reset.
+- Documented crossover normalization and summing polarity, including the
+  approximately 1.37 dB summation dip of fourth-order cascaded Bessel and the
+  stopband notches of Neville–Thiele. Existing crossover APIs remain available.
 - `FirError` and fallible `Fir::try_*` constructors; the infallible
   constructors now panic via `expect` in all build profiles instead of
   `debug_assert`-only validation.

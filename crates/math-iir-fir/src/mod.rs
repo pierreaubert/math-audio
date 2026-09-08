@@ -15,7 +15,8 @@
 //! - **Biquad IIR filters**: Peak, Lowpass, Highpass, Lowshelf, Highshelf, Bandpass, Notch
 //! - **SVF filters**: Zero-delay feedback topology for artifact-free parameter changes
 //! - **FIR filters**: Windowed sinc filters with various window types
-//! - **Crossovers**: Linkwitz-Riley IIR and linear-phase FIR crossovers
+//! - **Crossovers**: Butterworth, Linkwitz–Riley, cascaded Bessel, Neville–Thiele,
+//!   and linear-phase FIR crossovers
 //! - **Offline filtering**: Zero-phase `filtfilt` for analysis (no phase distortion)
 //! - **Frequency response computation**: For both IIR and FIR filters
 //! - **Multiple output formats**: APO, RME, AU Preset
@@ -39,6 +40,7 @@
 #![warn(missing_docs)]
 
 // Module declarations
+pub mod crossover;
 pub mod denormals;
 mod error;
 mod traits;
@@ -94,6 +96,7 @@ pub use phase_smooth::{interpolate_phase_complex, smooth_phase_via_group_delay, 
 pub use svf::{SvfFilter, SvfFilterType};
 
 // Re-export crossover types
+pub use crossover::{Crossover, CrossoverFamily, CrossoverOrder};
 pub use fir_crossover::{DEFAULT_FIR_CROSSOVER_TAPS, FirCrossover, MultibandFirCrossover};
 pub use lr4_crossover::{CROSSOVER_PRESETS, Lr4Crossover, MultibandLr4Crossover};
 pub use lr8_crossover::{Lr8Crossover, MultibandLr8Crossover};
