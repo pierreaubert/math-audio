@@ -265,10 +265,7 @@ impl FunctionRegistry {
             "freudenstein_roth".to_string(),
             freudenstein_roth as fn(&Array1<f64>) -> f64,
         );
-        functions.insert(
-            "happy_cat".to_string(),
-            happycat as fn(&Array1<f64>) -> f64,
-        );
+        functions.insert("happy_cat".to_string(), happycat as fn(&Array1<f64>) -> f64);
         functions.insert(
             "hartman_3d".to_string(),
             hartman_3d as fn(&Array1<f64>) -> f64,

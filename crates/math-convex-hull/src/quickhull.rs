@@ -274,10 +274,11 @@ pub fn quickhull_3d(vertices: &[Vertex]) -> Result<ConvexHull3D> {
         // NOTE: outside-point indices address `unique_vertices` (post-dedup),
         // so the distance lookup must use `unique_vertices`, not the
         // pre-dedup `vertices` slice.
-        let (face_idx, point_idx, _) = match find_face_with_furthest_point(&hull_faces, &unique_vertices) {
-            Some(result) => result,
-            None => break, // No more outside points
-        };
+        let (face_idx, point_idx, _) =
+            match find_face_with_furthest_point(&hull_faces, &unique_vertices) {
+                Some(result) => result,
+                None => break, // No more outside points
+            };
 
         let point = unique_vertices[point_idx];
 
@@ -572,25 +573,16 @@ fn find_initial_simplex(vertices: &[Vertex], epsilon: f64) -> Result<[usize; 4]>
 }
 
 /// Create the initial hull from the simplex
-fn create_initial_hull(
-    simplex: &[usize; 4],
-    vertices: &[Vertex],
-    epsilon: f64,
-) -> Vec<HullFace> {
+fn create_initial_hull(simplex: &[usize; 4], vertices: &[Vertex], epsilon: f64) -> Vec<HullFace> {
     let [v0, v1, v2, v3] = *simplex;
 
     // Create 4 faces of the tetrahedron, skipping degenerate zero-area faces.
     // (The initial simplex is validated non-degenerate, so all four are
     // expected to be present.)
-    let mut faces: Vec<HullFace> = [
-        (v0, v1, v2),
-        (v0, v2, v3),
-        (v0, v3, v1),
-        (v1, v3, v2),
-    ]
-    .into_iter()
-    .filter_map(|(a, b, c)| HullFace::new(a, b, c, vertices, epsilon))
-    .collect();
+    let mut faces: Vec<HullFace> = [(v0, v1, v2), (v0, v2, v3), (v0, v3, v1), (v1, v3, v2)]
+        .into_iter()
+        .filter_map(|(a, b, c)| HullFace::new(a, b, c, vertices, epsilon))
+        .collect();
 
     // Ensure all normals point outward from the centroid
     let centroid = Vertex {

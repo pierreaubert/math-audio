@@ -495,7 +495,11 @@ fn test_voronoi_new_sanitizes_nonfinite_bounds() {
     let v = d.voronoi([f64::NAN, f64::NEG_INFINITY, 10.0, f64::NAN]);
     let [xmin, ymin, xmax, ymax] = v.bounds();
     assert!(xmin.is_finite() && ymin.is_finite() && xmax.is_finite() && ymax.is_finite());
-    assert!(xmin < xmax && ymin < ymax, "bounds must be ordered, got {:?}", v.bounds());
+    assert!(
+        xmin < xmax && ymin < ymax,
+        "bounds must be ordered, got {:?}",
+        v.bounds()
+    );
     // Finite components are kept, non-finite ones fall back to the points bbox.
     assert_eq!(xmax, 10.0);
     assert_eq!(xmin, 0.0);
@@ -521,7 +525,11 @@ fn test_voronoi_new_expands_degenerate_bounds() {
     let d = Delaunay::from_points(&points);
     let v = d.voronoi([5.0, 0.0, 5.0, 10.0]);
     let [xmin, ymin, xmax, ymax] = v.bounds();
-    assert!(xmin < xmax && ymin < ymax, "bounds must be strictly ordered, got {:?}", v.bounds());
+    assert!(
+        xmin < xmax && ymin < ymax,
+        "bounds must be strictly ordered, got {:?}",
+        v.bounds()
+    );
     assert_eq!((xmin, ymin), (5.0, 0.0));
 }
 
@@ -555,8 +563,14 @@ fn test_bbox_scale_floor_for_subunit_box() {
     let points = vec![(0.0, 0.0), (1e-6, 0.0), (0.0, 1e-6)];
     let d = Delaunay::from_points(&points);
     let v = d.voronoi([0.0, 0.0, 1e-6, 1e-6]);
-    assert!((v.bbox_scale() - 1.0).abs() < 1e-12, "sub-unit box must floor at 1.0");
-    assert!((v.epsilon() - 1e-9).abs() < 1e-18, "epsilon must floor at absolute 1e-9");
+    assert!(
+        (v.bbox_scale() - 1.0).abs() < 1e-12,
+        "sub-unit box must floor at 1.0"
+    );
+    assert!(
+        (v.epsilon() - 1e-9).abs() < 1e-18,
+        "epsilon must floor at absolute 1e-9"
+    );
 }
 
 #[test]

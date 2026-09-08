@@ -179,7 +179,10 @@ mod tests {
         // leaves the two-sample window) but the stored peak holds.
         tp.process_linear(0.0);
         let window = tp.process_linear(0.0);
-        assert!(window < held, "window {window} should drop below held {held}");
+        assert!(
+            window < held,
+            "window {window} should drop below held {held}"
+        );
         assert!(
             (tp.peak_linear() - held).abs() < 1e-6,
             "running peak should hold at {held}, got {}",

@@ -380,8 +380,7 @@ where
         if gens_since_eig >= eig_gap {
             gens_since_eig = 0;
             eig_work.copy_from(&covariance);
-            let eig =
-                SymmetricEigen::new(std::mem::replace(&mut eig_work, DMatrix::zeros(n, n)));
+            let eig = SymmetricEigen::new(std::mem::replace(&mut eig_work, DMatrix::zeros(n, n)));
             b = eig.eigenvectors;
             d = eig.eigenvalues.map(|v| v.max(1e-30).sqrt());
 

@@ -330,10 +330,7 @@ fn test_analytic_jacobian_dimension_mismatch_errors() {
         .jacobian(bad_jacobian)
         .build();
     let err = levenberg_marquardt(&residual, &bounds, config).unwrap_err();
-    assert!(matches!(
-        err,
-        LMError::JacobianDimensionMismatch { .. }
-    ));
+    assert!(matches!(err, LMError::JacobianDimensionMismatch { .. }));
 }
 
 #[test]

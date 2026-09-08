@@ -718,13 +718,21 @@ mod tests {
         let report = fit_hammerstein(&dataset, &options).unwrap();
         assert_eq!(report.coefficients.branches().len(), 2);
         assert_ne!(report.coefficients.provenance().capture_hash, 0);
-        assert!(report.quality.fit_rms < FIT_RMS_ACCEPTANCE, "{:?}", report.quality);
+        assert!(
+            report.quality.fit_rms < FIT_RMS_ACCEPTANCE,
+            "{:?}",
+            report.quality
+        );
         assert!(
             report.quality.held_out_rms < HELD_OUT_RMS_ACCEPTANCE,
             "{:?}",
             report.quality
         );
-        assert!(report.quality.meets_acceptance_criteria(), "{:?}", report.quality);
+        assert!(
+            report.quality.meets_acceptance_criteria(),
+            "{:?}",
+            report.quality
+        );
         assert!(report.quality.fit_spectral_rms.is_finite());
         assert_eq!(report.quality.held_out_captures, 1);
         assert_eq!(report.quality.held_out_samples, 512);

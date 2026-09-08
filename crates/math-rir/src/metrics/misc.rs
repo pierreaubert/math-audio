@@ -154,7 +154,7 @@ pub fn estimate_noise_cutoff(rir: &[f32], start_sample: usize) -> usize {
     // definition. A non-positive floor disables the crossing (a running
     // mean can never drop below zero), reproducing the Chu fallback.
     let crossing = |noise_e: f64| -> usize {
-        if !(noise_e > 0.0) || !noise_e.is_finite() {
+        if noise_e <= 0.0 || !noise_e.is_finite() {
             return tail_start;
         }
         let threshold = noise_e * 10.0;
@@ -187,7 +187,10 @@ pub fn estimate_noise_cutoff(rir: &[f32], start_sample: usize) -> usize {
             }
         }
         let snr_db = 10.0 * (peak / noise_e).log10();
-        if !(snr_db >= 15.0) {
+        if snr_db
+            .partial_cmp(&15.0)
+            .is_none_or(|ordering| ordering.is_lt())
+        {
             return start_sample;
         }
 
@@ -203,7 +206,7 @@ pub fn estimate_noise_cutoff(rir: &[f32], start_sample: usize) -> usize {
                 return cutoff;
             }
             let refined = mean_sq(rir, past_tail..n);
-            if !(refined > 0.0) || !refined.is_finite() {
+            if refined <= 0.0 || !refined.is_finite() {
                 return cutoff;
             }
             if (refined - noise_e).abs() <= 0.01 * noise_e {

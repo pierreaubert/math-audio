@@ -116,16 +116,16 @@ pub fn analyze_wav_buffer(
         }
     }
 
-    if !config.subwoofer {
-        if let Some(room_slope_db) = config.room_slope_db {
-            apply_room_slope(
-                &mut interp_mag,
-                &log_freqs,
-                config.min_freq,
-                config.max_freq,
-                room_slope_db,
-            );
-        }
+    if !config.subwoofer
+        && let Some(room_slope_db) = config.room_slope_db
+    {
+        apply_room_slope(
+            &mut interp_mag,
+            &log_freqs,
+            config.min_freq,
+            config.max_freq,
+            room_slope_db,
+        );
     }
 
     Ok(WavAnalysisOutput {
