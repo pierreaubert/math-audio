@@ -1,3 +1,15 @@
+# 0.5.14
+
+## Bug fixes
+
+- Differential evolution now uses its seeded RNG when replacing entries in a full
+  external archive, removing an unseeded random draw from L-SHADE runs.
+- Added `ExternalArchive::add_with_rng` while retaining the existing `add` API.
+
+## Tests
+
+- Added deterministic archive-replacement and zero-capacity RNG-state regressions.
+
 # 0.5.13
 
 ## Improvements

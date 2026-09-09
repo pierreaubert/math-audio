@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.23] - 2026-09-09
+
+### Fixed
+
+- Kirkeby correction now uses the original frequency coordinates for correction-band
+  transitions instead of scratch-buffer values overwritten during minimum-phase extraction.
+- Minimum-phase extraction now mirrors the DC-to-Nyquist log-magnitude spectrum
+  into an even periodic spectrum and uses its exact transform length. A common
+  measurement/target SPL calibration offset no longer introduces spurious phase.
+- Added regressions for common SPL calibration invariance and all-pass excess-phase
+  correction. These fixes do not establish end-to-end hybrid correction quality.
+
 ## [0.5.22] - 2026-09-08
 
 ### Added

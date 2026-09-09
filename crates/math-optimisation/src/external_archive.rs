@@ -33,10 +33,14 @@ impl ExternalArchive {
     /// Add a solution to the archive
     /// If archive is full, removes a random solution
     pub fn add(&mut self, solution: Array1<f64>) {
+        self.add_with_rng(solution, &mut rand::rng());
+    }
+
+    /// Add using the caller's RNG, including replacement when full.
+    pub fn add_with_rng<R: rand::Rng + ?Sized>(&mut self, solution: Array1<f64>, rng: &mut R) {
         if self.solutions.len() < self.max_size {
             self.solutions.push(solution);
         } else if self.max_size > 0 {
-            let mut rng = rand::rng();
             let idx = rng.random_range(0..self.max_size);
             self.solutions[idx] = solution;
         }
@@ -96,6 +100,37 @@ impl ExternalArchive {
 mod tests {
     use super::*;
     use ndarray::array;
+
+    #[test]
+    fn seeded_archive_replacement_uses_only_the_supplied_rng() {
+        use rand::SeedableRng;
+        let mut archive_rng = rand::rngs::StdRng::seed_from_u64(123);
+        let mut expected_rng = rand::rngs::StdRng::seed_from_u64(123);
+        let mut archive = ExternalArchive::new(2);
+        let mut expected = Vec::new();
+        for index in 0..32 {
+            let solution = array![index as f64];
+            archive.add_with_rng(solution.clone(), &mut archive_rng);
+            if expected.len() < 2 {
+                expected.push(solution);
+            } else {
+                let replaced = expected_rng.random_range(0..2);
+                expected[replaced] = solution;
+            }
+            assert_eq!(archive.solutions, expected);
+        }
+    }
+
+    #[test]
+    fn seeded_zero_capacity_archive_is_empty_and_does_not_draw() {
+        use rand::SeedableRng;
+        let mut rng = rand::rngs::StdRng::seed_from_u64(321);
+        let mut untouched = rand::rngs::StdRng::seed_from_u64(321);
+        let mut archive = ExternalArchive::new(0);
+        archive.add_with_rng(array![1.0], &mut rng);
+        assert!(archive.is_empty());
+        assert_eq!(rng.random::<u64>(), untouched.random::<u64>());
+    }
 
     #[test]
     fn test_archive_basic() {

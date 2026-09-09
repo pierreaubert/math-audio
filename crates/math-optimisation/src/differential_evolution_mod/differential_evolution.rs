@@ -747,7 +747,7 @@ where
                         && *trial_energy < energies[i]
                         && let Ok(mut arch) = archive.write()
                     {
-                        arch.add(pop.row(i).to_owned());
+                        arch.add_with_rng(pop.row(i).to_owned(), &mut rng);
                     }
                     pop.row_mut(i).assign(&trials_buf.row(i));
                     energies[i] = *trial_energy;

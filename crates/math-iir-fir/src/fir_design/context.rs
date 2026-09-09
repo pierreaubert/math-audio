@@ -249,7 +249,7 @@ impl FirDesignContext {
         let beta = 1.0 / (2.0 * max_boost_linear);
 
         for i in 0..num_bins {
-            let f = self.real_buf[i];
+            let f = linear_freqs[i];
             let rel_mag = 10.0_f64.powf((meas_spl_interp[i] - target_spl_interp[i]) / 20.0);
 
             let width = kirkeby_transition_width(sample_rate, fft_len, min_freq, max_freq);
@@ -376,17 +376,23 @@ impl FirDesignContext {
     /// Compute minimum phase from magnitude response using Hilbert transform.
     fn compute_minimum_phase_from_magnitude(&mut self, magnitude_db: &[f64]) -> Vec<f64> {
         let n = magnitude_db.len();
-        if n == 0 {
-            return Vec::new();
+        if n <= 1 {
+            return vec![0.0; n];
         }
 
-        for (i, &db) in magnitude_db.iter().enumerate() {
-            self.real_buf[i] = db / 20.0 * 10.0_f64.ln();
+        // The input spans DC through Nyquist. Mirror the interior bins to
+        // complete the even, periodic log-magnitude spectrum of a real filter.
+        // Zero padding this one-sided spectrum invents a discontinuity and
+        // turns a constant calibration offset into spurious minimum phase.
+        let mut ln_mag: Vec<f64> = magnitude_db
+            .iter()
+            .map(|db| db / 20.0 * 10.0_f64.ln())
+            .collect();
+        for i in (1..n - 1).rev() {
+            ln_mag.push(ln_mag[i]);
         }
-        let ln_mag: Vec<f64> = self.real_buf[..n].to_vec();
-
         let phase_rad = self.hilbert_transform(&ln_mag);
-        phase_rad.iter().map(|&p| -p).collect()
+        phase_rad[..n].iter().map(|&p| -p).collect()
     }
 
     /// Compute the Hilbert transform of a signal using FFT.
@@ -396,7 +402,7 @@ impl FirDesignContext {
             return Vec::new();
         }
 
-        let n_fft = n.next_power_of_two().max(n * 2);
+        let n_fft = n;
         self.ensure_capacity(n_fft, n, 0);
         self.complex_buf[..n_fft].fill(Complex64::zero());
 
