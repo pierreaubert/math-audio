@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- RoomEQ report primitives (`req-math-audio-report.md`): `rir_early_late`
+  (envelope-peak detector, 120 Hz lowpass subwoofer reference, 20 ms
+  early/late split, fixed-centre 1/3-octave SPL), `rir_waterfall` (STFT
+  decay grid over −5…500 ms with 60 ms resonance picking and per-resonance
+  decay times), and `rir_wavelet` (3-cycle Morlet CWT heatmap, −30…0 dB).
+
 ### Fixed
 - `true_peak`: `peak` is now a running maximum over all processed samples
   instead of the last window; documented the Catmull-Rom path as approximate

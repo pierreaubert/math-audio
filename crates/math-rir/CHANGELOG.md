@@ -14,9 +14,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `linear_fit_indexed` centers the time base per fit window to reduce
   subtractive cancellation in late windows.
 
+### Fixed
+- `report::early_reflection_table` now measures envelope-peak prominence
+  topographically (expand left to higher ground, valley is the minimum
+  over that interval, 3 ms horizon). A fixed narrow valley both missed
+  merged reflections and admitted smoothing-ripple crests on decay tails.
+
 ### Added
 - Per-band ISO 3382 metrics wired through the `bands` filterbank
   (octave/third-octave with per-band fit quality).
+- `report` module with RoomEQ report primitives (`req-math-audio-report.md`):
+  `reflection_table` (1–8 kHz bandpass → envelope/peak picking < 15 ms
+  post-direct with gain vs direct, time→distance at c = 343 m/s, first-dip
+  frequency, and comb ripple) and `t60_batch` (batched octave-band T60 over
+  63 Hz–16 kHz with T30→T20→EDT fit policy and per-band validity flags
+  including a B·T60 ≥ 8 filter-ring guard).
 
 ## [0.5.6] - 2026-05-30
 

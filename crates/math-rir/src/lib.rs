@@ -68,6 +68,7 @@ mod config;
 mod detection;
 pub mod metrics;
 mod mixing_time;
+pub mod report;
 mod segmentation;
 mod types;
 
