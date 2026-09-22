@@ -1,0 +1,28 @@
+[package]
+name = "math-qa"
+version = "0.1.1"
+edition = { workspace = true }
+authors = { workspace = true }
+description = "Quality assurance suite: Wolfram Engine cross-validation for math-audio"
+license = { workspace = true }
+repository = { workspace = true }
+keywords = ["qa", "validation", "audio", "wolfram"]
+categories = ["science", "development-tools::testing"]
+
+[lib]
+name = "math_qa"
+path = "src/lib.rs"
+
+[dependencies]
+math-dsp = { workspace = true }
+math-iir-fir = { workspace = true }
+math-rir = { workspace = true }
+math-test-functions = { workspace = true }
+num-complex = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }
+rustfft = { workspace = true }
+
+[dev-dependencies]
+ndarray = { workspace = true }

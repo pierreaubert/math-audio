@@ -9,6 +9,7 @@ members = [
     "crates/math-rir",
     "crates/math-test-functions",
     "crates/math-autodiff",
+    "crates/math-qa",
 ]
 resolver = "3"
 

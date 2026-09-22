@@ -1,0 +1,1 @@
+{"schema_version":1,"case":"math-qa.third-octave-spl.v1","sample_rate_hz":4.8e4,"tones_hz":[1.0e3,2.0e3],"tone_amps":[1.0,0.5],"peak_band_hz":1.0e3,"peak_band_db":0.0,"second_band_hz":2.0e3,"second_band_db":-6.020599913279624,"neighbor_ceiling_db":-2.5e1}

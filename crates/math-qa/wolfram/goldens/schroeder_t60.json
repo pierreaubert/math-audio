@@ -1,0 +1,1 @@
+{"schema_version":1,"case":"math-qa.schroeder-t60.v1","sample_rate_hz":4.8e4,"planted_t60_s":0.5,"fit_range_db":[-5.0,-3.5e1],"t60_s":0.5000000000000007,"slope_db_per_s":-1.1999999999999984e2,"probe_times_s":[0.0,0.1,0.25,0.5],"probe_db":[0.0,-1.2000000000000012e1,-3.0e1,-6.0e1]}

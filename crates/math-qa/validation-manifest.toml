@@ -1,0 +1,86 @@
+# math-qa validation manifest: every release-grade Wolfram comparison.
+#
+# Only manifest-listed cases may support accuracy claims. Each case needs
+# a `.wls` oracle, a checked-in golden (produced with `just qa-goldens`),
+# and a `tests/` comparison target below.
+
+[[case]]
+id = "math-qa.biquad-response.v1"
+owner = "math-iir-fir"
+script = "biquad_response.wls"
+golden = "biquad_response.json"
+test = "wolfram_biquad_response"
+tolerance = "complex relative error <= 1e-9"
+tier = "smoke"
+
+[[case]]
+id = "math-qa.fft-peak.v1"
+owner = "math-dsp"
+script = "fft_peak.wls"
+golden = "fft_peak.json"
+test = "wolfram_fft_peak"
+tolerance = "peak relative error <= 1e-6, off-peak bins <= 0.05 absolute"
+tier = "smoke"
+
+[[case]]
+id = "math-qa.schroeder-t60.v1"
+owner = "math-rir"
+script = "schroeder_t60.wls"
+golden = "schroeder_t60.json"
+test = "wolfram_schroeder_t60"
+tolerance = "T30 relative error <= 1e-4, curve points <= 1e-6 dB absolute"
+tier = "smoke"
+
+[[case]]
+id = "math-qa.comb-first-dip.v1"
+owner = "math-rir"
+script = "comb_first_dip.wls"
+golden = "comb_first_dip.json"
+test = "wolfram_comb_first_dip"
+tolerance = "per-entry oracle tolerance: 5e-3 at 2 ms, 1e-5 above (bandpass-ring overlap)"
+tier = "smoke"
+
+[[case]]
+id = "math-qa.third-octave-spl.v1"
+owner = "math-dsp"
+script = "third_octave_spl.wls"
+golden = "third_octave_spl.json"
+test = "wolfram_third_octave_spl"
+tolerance = "peak band exact, 2 kHz band within 0.3 dB, neighbors <= -25 dB"
+tier = "smoke"
+
+[[case]]
+id = "math-qa.waterfall-spots.v1"
+owner = "math-dsp"
+script = "waterfall_spots.wls"
+golden = "waterfall_spots.json"
+test = "wolfram_waterfall_spots"
+tolerance = "spot dB differences within 1e-3 dB"
+tier = "deep"
+
+[[case]]
+id = "math-qa.morlet-spots.v1"
+owner = "math-dsp"
+script = "morlet_spots.wls"
+golden = "morlet_spots.json"
+test = "wolfram_morlet_spots"
+tolerance = "spot dB differences within 1e-3 dB"
+tier = "deep"
+
+[[case]]
+id = "math-qa.svf-response.v1"
+owner = "math-iir-fir"
+script = "svf_response.wls"
+golden = "svf_response.json"
+test = "wolfram_svf_response"
+tolerance = "complex relative error <= 1e-6"
+tier = "smoke"
+
+[[case]]
+id = "math-qa.test-functions.v1"
+owner = "math-test-functions"
+script = "test_functions.wls"
+golden = "test_functions.json"
+test = "wolfram_test_functions"
+tolerance = "relative error <= 1e-12 (1e-9 absolute at zeros)"
+tier = "smoke"

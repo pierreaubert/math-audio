@@ -3,6 +3,8 @@
 #	  cargo install just
 # ----------------------------------------------------------------------
 
+cargo := `if command -v mbx >/dev/null 2>&1; then echo mbx; else echo cargo; fi`
+
 import 'builds/cross.just'
 
 default:
@@ -13,11 +15,11 @@ default:
 # ----------------------------------------------------------------------
 
 test:
-	cargo check --workspace --all-targets
-	cargo test --workspace --lib --release
+	{{cargo}} check --workspace --all-targets
+	{{cargo}} test --workspace --lib --release
 
 ntest:
-	cargo nextest run --release --no-fail-fast --workspace --lib
+	{{cargo}} nextest run --release --no-fail-fast --workspace --lib
 
 # ----------------------------------------------------------------------
 # FORMAT & LINT
@@ -26,11 +28,11 @@ ntest:
 alias format := fmt
 
 fmt:
-	cargo fmt --all
+	{{cargo}} fmt --all
 
 
 lint:
-	cargo clippy --all --features plotly -- -D warnings
+	{{cargo}} clippy --all --features plotly -- -D warnings
 
 
 # ----------------------------------------------------------------------
@@ -40,15 +42,15 @@ lint:
 alias build := prod
 
 prod: prod-workspace
-	cargo build --release --bin plot-functions -p math-test-functions --features plotly
-	cargo build --release --bin plot-de -p math-optimisation --features plotly
-	cargo build --release --bin run-de -p math-optimisation
-	cargo build --release --bin wav2csv -p math-dsp
-	cargo build --release --bin simd-fuzzer -p math-dsp
-	cargo build --release --bin benchmark-convergence -p math-optimisation
+	{{cargo}} build --release --bin plot-functions -p math-test-functions --features plotly
+	{{cargo}} build --release --bin plot-de -p math-optimisation --features plotly
+	{{cargo}} build --release --bin run-de -p math-optimisation
+	{{cargo}} build --release --bin wav2csv -p math-dsp
+	{{cargo}} build --release --bin simd-fuzzer -p math-dsp
+	{{cargo}} build --release --bin benchmark-convergence -p math-optimisation
 
 prod-workspace:
-	cargo build --release --workspace
+	{{cargo}} build --release --workspace
 
 # ----------------------------------------------------------------------
 # BENCH
@@ -57,15 +59,15 @@ prod-workspace:
 bench: bench-math
 
 bench-math:
-	cargo run --release --bin filter_bench -p math-iir-fir
-	cargo bench -p math-autodiff --bench biquad_bench
+	{{cargo}} run --release --bin filter_bench -p math-iir-fir
+	{{cargo}} bench -p math-autodiff --bench biquad_bench
 
 # ----------------------------------------------------------------------
 # CLEAN
 # ----------------------------------------------------------------------
 
 clean:
-	cargo clean
+	{{cargo}} clean
 	rm -f *.log *.wav *.json TAGS
 	find . -name '*~' -exec rm {} \; -print
 	find . -name 'Cargo.lock' -exec rm {} \; -print
@@ -75,7 +77,7 @@ clean:
 # ----------------------------------------------------------------------
 
 dev:
-	cargo build --workspace
+	{{cargo}} build --workspace
 
 # ----------------------------------------------------------------------
 # UPDATE
@@ -85,7 +87,7 @@ update: update-rust update-pre-commit
 
 update-rust:
 	rustup update
-	cargo update
+	{{cargo}} update
 
 update-pre-commit:
 	pre-commit autoupdate
@@ -99,30 +101,30 @@ examples: examples-math
 examples-math: examples-autodiff examples-iir examples-optimisation examples-testfunctions
 
 examples-autodiff:
-	cargo run --release --example biquad_match -p math-autodiff
-	cargo run --release --example fdn_direct_match -p math-autodiff
-	cargo run --release --example fdn_match -p math-autodiff
-	cargo run --release --example geq_match -p math-autodiff
-	cargo run --release --example peq_match -p math-autodiff
-	cargo run --release --example svf_match -p math-autodiff
+	{{cargo}} run --release --example biquad_match -p math-autodiff
+	{{cargo}} run --release --example fdn_direct_match -p math-autodiff
+	{{cargo}} run --release --example fdn_match -p math-autodiff
+	{{cargo}} run --release --example geq_match -p math-autodiff
+	{{cargo}} run --release --example peq_match -p math-autodiff
+	{{cargo}} run --release --example svf_match -p math-autodiff
 
 examples-iir:
-	cargo run --release --example format_demo -p math-iir-fir
-	cargo run --release --example format_rme_room_demo -p math-iir-fir
-	cargo run --release --example readme_example -p math-iir-fir
-	cargo run --release --example fir_example -p math-iir-fir
-	cargo run --release --example peq_loudness_compensation -p math-iir-fir
+	{{cargo}} run --release --example format_demo -p math-iir-fir
+	{{cargo}} run --release --example format_rme_room_demo -p math-iir-fir
+	{{cargo}} run --release --example readme_example -p math-iir-fir
+	{{cargo}} run --release --example fir_example -p math-iir-fir
+	{{cargo}} run --release --example peq_loudness_compensation -p math-iir-fir
 
 examples-optimisation:
-	cargo run --release --example optde_basic -p math-optimisation
-	cargo run --release --example optde_adaptive_demo -p math-optimisation
-	cargo run --release --example optde_linear_constraints -p math-optimisation
-	cargo run --release --example optde_nonlinear_constraints -p math-optimisation
-	cargo run --release --example optde_parallel -p math-optimisation
+	{{cargo}} run --release --example optde_basic -p math-optimisation
+	{{cargo}} run --release --example optde_adaptive_demo -p math-optimisation
+	{{cargo}} run --release --example optde_linear_constraints -p math-optimisation
+	{{cargo}} run --release --example optde_nonlinear_constraints -p math-optimisation
+	{{cargo}} run --release --example optde_parallel -p math-optimisation
 
 examples-testfunctions:
-	cargo run --release --example test_hartman_4d -p math-test-functions
-	cargo run --release --example test_new_sfu_functions -p math-test-functions
+	{{cargo}} run --release --example test_hartman_4d -p math-test-functions
+	{{cargo}} run --release --example test_new_sfu_functions -p math-test-functions
 
 # ----------------------------------------------------------------------
 # Install rustup
@@ -134,6 +136,7 @@ install-rustup:
 	./scripts/install-rustup -y
 	~/.cargo/bin/rustup default stable
 	~/.cargo/bin/cargo install just
+	~/.cargo/bin/cargo install mbx
 	~/.cargo/bin/cargo install cargo-wizard
 	~/.cargo/bin/cargo install cargo-llvm-cov
 	~/.cargo/bin/cargo install cargo-bininstall
@@ -220,6 +223,7 @@ publish-math:
 	cd crates/math-delaunay && cargo publish
 	cd crates/math-convex-hull && cargo publish
 	cd crates/math-autodiff && cargo publish
+	cd crates/math-analog && cargo publish
 
 # ----------------------------------------------------------------------
 # QA
@@ -238,6 +242,7 @@ qa_cov_iir_fir := "80"
 qa_cov_optimisation := "62"
 qa_cov_rir := "94"
 qa_cov_test_functions := "90"
+qa_cov_math_qa := "90"
 
 # plotly's askama templates fail to compile when the cargo registry path
 # traverses a symlinked ~/.cargo; use the canonical path everywhere.
@@ -247,70 +252,96 @@ export CARGO_HOME := env_var_or_default("CARGO_HOME", canonicalize(home_director
 [private]
 _qa crate threshold:
 	echo "==================== QA: {{crate}} ===================="
-	cargo fmt -p {{crate}} -- --check
-	cargo clippy -p {{crate}} --all-targets -- -D warnings
-	cargo test -p {{crate}} --lib --release
-	cargo test -p {{crate}} --tests --release
-	cargo test -p {{crate}} --doc
-	cargo bench -p {{crate}} --no-run
-	cargo llvm-cov -p {{crate}} --summary-only --release --fail-under-lines {{threshold}}
+	{{cargo}} fmt -p {{crate}} -- --check
+	{{cargo}} clippy -p {{crate}} --all-targets -- -D warnings
+	{{cargo}} test -p {{crate}} --lib --release
+	{{cargo}} test -p {{crate}} --tests --release
+	{{cargo}} test -p {{crate}} --doc
+	{{cargo}} bench -p {{crate}} --no-run
+	{{cargo}} llvm-cov -p {{crate}} --summary-only --release --fail-under-lines {{threshold}}
 
 qa-convex-hull: (_qa "math-convex-hull" qa_cov_convex_hull)
 
 qa-delaunay: (_qa "math-delaunay" qa_cov_delaunay)
 
 qa-rir: (_qa "math-rir" qa_cov_rir)
-	cargo bench -p math-rir --bench iso3382 -- --quick
+	{{cargo}} bench -p math-rir --bench iso3382 -- --quick
 
 qa-test-functions: (_qa "math-test-functions" qa_cov_test_functions) examples-testfunctions
-	cargo run --release -p math-test-functions --example test_additional_functions
-	cargo run --release -p math-test-functions --example test_gramacy_lee
-	cargo run --release -p math-test-functions --example find_hartman_4d_min
-	cargo build --release --bin plot-functions -p math-test-functions --features plotly
-	cargo bench -p math-test-functions --bench eval -- --quick
+	{{cargo}} run --release -p math-test-functions --example test_additional_functions
+	{{cargo}} run --release -p math-test-functions --example test_gramacy_lee
+	{{cargo}} run --release -p math-test-functions --example find_hartman_4d_min
+	{{cargo}} build --release --bin plot-functions -p math-test-functions --features plotly
+	{{cargo}} bench -p math-test-functions --bench eval -- --quick
 
 qa-iir-fir: (_qa "math-iir-fir" qa_cov_iir_fir) examples-iir
-	cargo build --release --bin filter_bench -p math-iir-fir
-	cargo bench -p math-iir-fir --bench biquad_bench -- --quick
-	cargo bench -p math-iir-fir --bench response_bench -- --quick
-	cargo bench -p math-iir-fir --bench fir_design_bench -- --quick
+	{{cargo}} build --release --bin filter_bench -p math-iir-fir
+	{{cargo}} bench -p math-iir-fir --bench biquad_bench -- --quick
+	{{cargo}} bench -p math-iir-fir --bench response_bench -- --quick
+	{{cargo}} bench -p math-iir-fir --bench fir_design_bench -- --quick
 
 qa-optimisation: (_qa "math-optimisation" qa_cov_optimisation) examples-optimisation
-	cargo build --release --bin run-de -p math-optimisation
-	cargo build --release --bin benchmark-convergence -p math-optimisation
-	cargo build --release --bin plot-de -p math-optimisation --features plotly
-	cargo bench -p math-optimisation --bench de_bench -- --quick
-	cargo bench -p math-optimisation --bench cmaes_bench -- --quick
+	{{cargo}} build --release --bin run-de -p math-optimisation
+	{{cargo}} build --release --bin benchmark-convergence -p math-optimisation
+	{{cargo}} build --release --bin plot-de -p math-optimisation --features plotly
+	{{cargo}} bench -p math-optimisation --bench de_bench -- --quick
+	{{cargo}} bench -p math-optimisation --bench cmaes_bench -- --quick
 
 qa-autodiff: (_qa "math-autodiff" qa_cov_autodiff) examples-autodiff
-	cargo bench -p math-autodiff --bench biquad_bench -- --quick
+	{{cargo}} bench -p math-autodiff --bench biquad_bench -- --quick
 
 qa-dsp: (_qa "math-dsp" qa_cov_dsp)
-	cargo run --release --bin simd-fuzzer -p math-dsp
-	cargo build --release --bin wav2csv -p math-dsp
-	if [ "$(uname -m)" = "x86_64" ]; then RUSTFLAGS="-C target-feature=+avx2" cargo check -p math-dsp --all-targets && RUSTFLAGS="-C target-feature=+avx2" cargo test -p math-dsp; else echo "Skipping AVX2 pass (not x86_64)"; fi
-	cargo bench -p math-dsp --bench welch_spectrum -- --quick
-	cargo bench -p math-dsp --bench audio_features -- --quick
+	{{cargo}} run --release --bin simd-fuzzer -p math-dsp
+	{{cargo}} build --release --bin wav2csv -p math-dsp
+	if [ "$(uname -m)" = "x86_64" ]; then RUSTFLAGS="-C target-feature=+avx2" {{cargo}} check -p math-dsp --all-targets && RUSTFLAGS="-C target-feature=+avx2" {{cargo}} test -p math-dsp; else echo "Skipping AVX2 pass (not x86_64)"; fi
+	{{cargo}} bench -p math-dsp --bench welch_spectrum -- --quick
+	{{cargo}} bench -p math-dsp --bench audio_features -- --quick
 
 qa-analog: (_qa "math-analog" qa_cov_analog)
-	cargo run --release -p math-analog --example analysis_report
-	cargo run --release -p math-analog --example alias_reference_report
-	cargo run --release -p math-analog --example console_preamp_report
-	cargo run --release -p math-analog --example model_matrix_report
-	cargo run --release -p math-analog --example fitting_report --features fitting
-	cargo bench -p math-analog --bench harmonics -- --quick
+	{{cargo}} run --release -p math-analog --example analysis_report
+	{{cargo}} run --release -p math-analog --example alias_reference_report
+	{{cargo}} run --release -p math-analog --example console_preamp_report
+	{{cargo}} run --release -p math-analog --example model_matrix_report
+	{{cargo}} run --release -p math-analog --example fitting_report --features fitting
+	{{cargo}} bench -p math-analog --bench harmonics -- --quick
 
 alias qa-math := qa
 
-qa: qa-analog qa-autodiff qa-convex-hull qa-delaunay qa-dsp qa-iir-fir qa-optimisation qa-rir qa-test-functions
-	cargo clippy --all --features plotly -- -D warnings
-	cargo llvm-cov --summary-only --release --fail-under-lines 90
+qa: qa-analog qa-autodiff qa-convex-hull qa-delaunay qa-dsp qa-iir-fir qa-optimisation qa-rir qa-test-functions qa-mathqa
+	{{cargo}} clippy --all --features plotly -- -D warnings
+	{{cargo}} llvm-cov --summary-only --release --fail-under-lines 90
 
-# ----------------------------------------------------------------------
-# POST
-# ----------------------------------------------------------------------
+# math-qa has no benches, so it gets a dedicated recipe instead of _qa.
+qa-mathqa:
+	echo "==================== QA: math-qa ===================="
+	{{cargo}} fmt -p math-qa -- --check
+	{{cargo}} clippy -p math-qa --all-targets -- -D warnings
+	{{cargo}} test -p math-qa --lib --release
+	{{cargo}} test -p math-qa --tests --release
+	{{cargo}} test -p math-qa --doc
+	{{cargo}} llvm-cov -p math-qa --summary-only --release --fail-under-lines {{qa_cov_math_qa}}
 
-post-install:
-	$HOME/.cargo/bin/rustup default stable
-	$HOME/.cargo/bin/cargo install just
-	$HOME/.cargo/bin/cargo check
+# Smoke tier: contract + fast engine comparisons (skips without goldens).
+qa-mathqa-smoke:
+	{{cargo}} test -p math-qa --release --test qa_contract --test wolfram_biquad_response --test wolfram_fft_peak --test wolfram_schroeder_t60 --test wolfram_comb_first_dip --test wolfram_third_octave_spl --test wolfram_svf_response --test wolfram_test_functions
+
+# Deep tier: direct-summation spot comparisons (engine-heavy goldens).
+qa-mathqa-deep:
+	{{cargo}} test -p math-qa --release --test wolfram_waterfall_spots --test wolfram_morlet_spots
+
+# Regenerate engine-blessed goldens (needs an activated Wolfram Engine:
+# WOLFRAMSCRIPT=wolframscript just qa-goldens).
+qa-goldens:
+	#!/usr/bin/env bash
+	set -euo pipefail
+	mkdir -p crates/math-qa/wolfram/goldens
+	engine="${WOLFRAMSCRIPT:-wolframscript}"
+	kernel_default="/Applications/Wolfram Engine.app/Contents/Resources/Wolfram Player.app/Contents/MacOS/WolframKernel"
+	if [ -z "${WolframKernel:-}" ] && [ -f "$kernel_default" ]; then export WolframKernel="$kernel_default"; fi
+	for script in crates/math-qa/wolfram/*.wls; do
+		base="$(basename "$script" .wls)"
+		echo "--- $base"
+		"$engine" -file "$script" | tail -n 1 > "crates/math-qa/wolfram/goldens/$base.json"
+	done
+	{{cargo}} test -p math-qa --release --test qa_contract
+

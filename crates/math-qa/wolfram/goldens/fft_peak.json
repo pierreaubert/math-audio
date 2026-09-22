@@ -1,0 +1,1 @@
+{"schema_version":1,"case":"math-qa.fft-peak.v1","sample_rate_hz":4.8e4,"tone_hz":1.0e3,"n_samples":48000,"normalization":"unnormalized-forward","peak_bin":1000,"peak_mag":2.4000000000000007e4,"mirror_mag":2.4000000000000007e4,"off_bins":[999,1001,2000],"off_mags":[1.7385660737427102e-9,1.733208752939176e-9,1.7025805972363085e-11]}
