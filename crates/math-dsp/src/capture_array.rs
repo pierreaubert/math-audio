@@ -240,37 +240,73 @@ pub struct DoaEstimate {
     pub rms_residual_samples: f64,
     /// Residual-based confidence in [0, 1] (`1/(1+rms)`).
     pub confidence: f64,
-    /// True for flat arrays: elevation sign is ambiguous (mirrored source
-    /// above/below fits equally well).
+    /// True for planar geometry: directions mirrored across the array plane
+    /// fit equally well. The returned direction is only one representative.
     pub elevation_ambiguous: bool,
 }
 
-/// Solve a symmetric 3×3 system by Cramer; `None` when singular
-/// (collinear/coincident array for the given pairs).
-fn solve_3x3(a: &[[f64; 3]; 3], b: &[f64; 3]) -> Option<[f64; 3]> {
-    let det = a[0][0] * (a[1][1] * a[2][2] - a[1][2] * a[2][1])
-        - a[0][1] * (a[1][0] * a[2][2] - a[1][2] * a[2][0])
-        + a[0][2] * (a[1][0] * a[2][1] - a[1][1] * a[2][0]);
-    if !det.is_finite() || det.abs() < 1e-12 {
-        return None;
+/// Solve in the measured geometric subspace without inventing a third baseline.
+fn solve_direction(a: &[[f64; 3]; 3], b: &[f64; 3]) -> Result<([f64; 3], bool), String> {
+    if a.iter().flatten().chain(b).any(|value| !value.is_finite()) {
+        return Err("estimate_doa_ls: non-finite normal equations".into());
     }
-    let mut x = [0.0; 3];
-    for col in 0..3 {
-        let mut m = *a;
-        for row in 0..3 {
-            m[row][col] = b[row];
+    let matrix = nalgebra::Matrix3::from_fn(|row, col| a[row][col]);
+    let eigen = matrix
+        .try_symmetric_eigen(f64::EPSILON, 128)
+        .ok_or("estimate_doa_ls: geometry decomposition did not converge")?;
+    let largest = eigen.eigenvalues.max();
+    if !largest.is_finite() || largest <= 0.0 {
+        return Err("estimate_doa_ls: coincident geometry".into());
+    }
+    // Numerical rank only: callers must additionally consider survey errors
+    // relative to the smallest baseline. This is not an acoustic confidence.
+    let tolerance = largest * 1e-10;
+    let target = nalgebra::Vector3::from_column_slice(b);
+    let mut solution = nalgebra::Vector3::zeros();
+    let mut normal = nalgebra::Vector3::zeros();
+    let mut rank = 0;
+    for index in 0..3 {
+        let axis = eigen.eigenvectors.column(index);
+        let value = eigen.eigenvalues[index];
+        if value > tolerance {
+            solution += axis * (axis.dot(&target) / value);
+            rank += 1;
+        } else {
+            normal = axis.into_owned();
         }
-        x[col] = (m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1])
-            - m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0])
-            + m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0]))
-            / det;
     }
-    Some(x)
+    if rank < 2 {
+        return Err("estimate_doa_ls: collinear geometry cannot identify a direction".into());
+    }
+    let planar = rank == 2;
+    if planar {
+        let squared = solution.norm_squared();
+        if !squared.is_finite() || squared > 1.0 + 1e-8 {
+            return Err(
+                "estimate_doa_ls: planar delays are incompatible with a unit direction".into(),
+            );
+        }
+        // Choose one deterministic representative of the mirror pair. Never
+        // interpret this choice as resolving which side of the array is real.
+        let axis = (0..3)
+            .max_by(|&a, &b| normal[a].abs().total_cmp(&normal[b].abs()))
+            .ok_or("estimate_doa_ls: missing plane normal")?;
+        if normal[axis] < 0.0 {
+            normal = -normal;
+        }
+        solution += normal * (1.0 - squared).max(0.0).sqrt();
+    }
+    let norm = solution.norm();
+    if !norm.is_finite() || norm <= 0.0 {
+        return Err("estimate_doa_ls: degenerate solution".into());
+    }
+    solution /= norm;
+    Ok(([solution[0], solution[1], solution[2]], planar))
 }
 
 /// C5: direction-of-arrival by TDOA multilateration (least squares).
 ///
-/// Minimises Σ(τ_ab − (p_b − p_a)·u/c·sr)² over unconstrained `u`, then
+/// Minimises Σ(τ_ab − (p_a − p_b)·u/c·sr)² over unconstrained `u`, then
 /// normalises. Chosen over delay-and-sum because it is closed-form,
 /// exact in free field, and its residual directly feeds confidence;
 /// [`delay_and_sum_power`] remains available for scoring candidate
@@ -282,8 +318,8 @@ fn solve_3x3(a: &[[f64; 3]; 3], b: &[f64; 3]) -> Option<[f64; 3]> {
 /// calibration keep to [`DEFAULT_DOA_BAND_LO_HZ`]–[`DEFAULT_DOA_BAND_HI_HZ`].
 /// Aperture-vs-wavelength: below ~λ/2 aperture the array is directionally
 /// flat (0.12 m aperture → useful above ~1.4 kHz); above ~λ/1 spacing,
-/// spatial aliasing mirrors the estimate — both regimes read as low
-/// `confidence`, never as a wrong certain direction.
+/// spatial aliasing mirrors the estimate — the caller must reject unsupported bands. Residual-based
+/// `confidence` alone cannot detect aliasing or poor angular resolution.
 pub fn estimate_doa_ls(array: &MicArray, pairs: &[PairDelay]) -> Result<DoaEstimate, String> {
     if array.len() < 3 {
         return Err("estimate_doa_ls: need at least 3 microphones".to_string());
@@ -315,20 +351,13 @@ pub fn estimate_doa_ls(array: &MicArray, pairs: &[PairDelay]) -> Result<DoaEstim
             }
         }
     }
-    let u = solve_3x3(&ata, &atb)
-        .ok_or_else(|| "estimate_doa_ls: singular system (collinear array?)".to_string())?;
-    let norm = (u[0] * u[0] + u[1] * u[1] + u[2] * u[2]).sqrt();
-    if !norm.is_finite() || norm <= 0.0 {
-        return Err("estimate_doa_ls: degenerate solution".to_string());
-    }
-    let direction = [u[0] / norm, u[1] / norm, u[2] / norm];
+    let (direction, elevation_ambiguous) = solve_direction(&ata, &atb)?;
     let mut rms = 0.0;
     for pair in pairs {
         let resid = pair.delay_samples - predicted_delay(array, &direction, pair.a, pair.b)?;
         rms += resid * resid;
     }
     rms = (rms / pairs.len() as f64).sqrt();
-    let elevation_ambiguous = array.is_coplanar(1e-3);
     Ok(DoaEstimate {
         direction,
         azimuth_deg: direction[1].atan2(direction[0]).to_degrees(),
@@ -445,6 +474,54 @@ mod tests {
     }
 
     #[test]
+    fn planar_array_preserves_mirror_ambiguity_in_any_orientation() {
+        for positions in [
+            vec![[0.0, 0.0, 0.0], [0.12, 0.0, 0.0], [0.0, 0.12, 0.0]],
+            vec![
+                [0.0, 0.0, 0.0],
+                [0.12, 0.0, 0.0],
+                [0.0, 0.12, 0.12],
+                [0.12, 0.12, 0.12],
+            ],
+        ] {
+            let array = MicArray::new(positions, 48_000.0).unwrap();
+            let source = dir_from_az_el(30.0, 60.0);
+            let pairs = exact_pairs(&array, &source);
+            let estimate = estimate_doa_ls(&array, &pairs).unwrap();
+            assert!(estimate.elevation_ambiguous);
+            assert!(estimate.rms_residual_samples < 1e-9);
+            assert!((estimate.direction.iter().map(|x| x * x).sum::<f64>() - 1.0).abs() < 1e-12);
+            assert!(
+                tdoa_residuals(&array, &estimate.direction, &pairs)
+                    .unwrap()
+                    .iter()
+                    .all(|residual| residual.abs() < 1e-9)
+            );
+        }
+    }
+
+    #[test]
+    fn planar_broadside_is_ambiguous_and_impossible_delays_are_rejected() {
+        let array = MicArray::new(
+            vec![[0.0, 0.0, 0.0], [0.12, 0.0, 0.0], [0.0, 0.12, 0.0]],
+            48_000.0,
+        )
+        .unwrap();
+        let pairs = exact_pairs(&array, &[0.0, 0.0, -1.0]);
+        let estimate = estimate_doa_ls(&array, &pairs).unwrap();
+        assert!(estimate.elevation_ambiguous);
+        assert!((estimate.direction[2].abs() - 1.0).abs() < 1e-12);
+        let impossible: Vec<_> = pairs
+            .into_iter()
+            .map(|mut pair| {
+                pair.delay_samples = 1000.0;
+                pair
+            })
+            .collect();
+        assert!(estimate_doa_ls(&array, &impossible).is_err());
+    }
+
+    #[test]
     fn doa_recovers_known_direction() {
         let array = test_array();
         let dir = dir_from_az_el(30.0, 10.0);
@@ -463,6 +540,33 @@ mod tests {
         assert!(est.rms_residual_samples < 1e-9);
         assert!((est.confidence - 1.0).abs() < 1e-9);
         assert!(!est.elevation_ambiguous);
+    }
+
+    #[test]
+    fn doa_recovers_known_direction_across_sample_rates() {
+        let positions = vec![
+            [0.0, 0.0, 0.0],
+            [0.12, 0.0, 0.0],
+            [0.0, 0.12, 0.0],
+            [0.0, 0.0, 0.12],
+        ];
+        for sr in [6_000.0, 12_000.0, 44_100.0, 48_000.0, 88_200.0, 96_000.0] {
+            let array = MicArray::new(positions.clone(), sr).expect("test array");
+            let dir = dir_from_az_el(30.0, 10.0);
+            let pairs = exact_pairs(&array, &dir);
+            let est = estimate_doa_ls(&array, &pairs).expect("ls solves");
+            assert!(
+                (est.azimuth_deg - 30.0).abs() < 0.5,
+                "az {} at {sr} Hz",
+                est.azimuth_deg
+            );
+            assert!(
+                (est.elevation_deg - 10.0).abs() < 0.5,
+                "el {} at {sr} Hz",
+                est.elevation_deg
+            );
+            assert!(est.rms_residual_samples < 1e-9);
+        }
     }
 
     #[test]

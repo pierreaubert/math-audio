@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- Capture QA oracles go multi-rate (schema 2): `capture_tdoa.wls` and
+  `capture_array.wls` emit one C1/C4/C5/C6/C3 block per rate (6, 12,
+  44.1, 48, 88.2, 96 kHz) with rate-scaled bands and tones; comparison
+  tests loop over every rate entry. C2 stays single-entry: pure
+  sample-domain arithmetic with no rate input.
+
 ## [0.1.2] - 2026-09-22
 
 ### Added

@@ -19,6 +19,8 @@ thread_local! {
 mod analyze;
 pub mod analyzer;
 mod apply;
+mod capture_quality;
+mod common_clock;
 mod compute;
 mod estimate;
 mod interpolate;
@@ -36,6 +38,8 @@ mod write;
 
 pub use analyze::*;
 pub use analyzer::*;
+pub use capture_quality::*;
+pub use common_clock::*;
 pub use compute::*;
 pub use estimate::*;
 pub use measurement::*;

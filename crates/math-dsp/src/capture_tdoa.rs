@@ -459,6 +459,46 @@ mod tests {
     }
 
     #[test]
+    fn tdoa_and_uncertainty_hold_across_sample_rates() {
+        // 48 kHz and 44.1 kHz families plus cheap-device rates. Chirp
+        // and analysis band scale with the rate (chirp sr/96..sr/4,
+        // band sr/24..sr/6: at 48 kHz exactly the documented defaults).
+        for sr in [6_000.0, 12_000.0, 44_100.0, 48_000.0, 88_200.0, 96_000.0] {
+            let config = TdoaConfig {
+                sample_rate_hz: sr,
+                band_lo_hz: sr / 24.0,
+                band_hi_hz: sr / 6.0,
+                ..TdoaConfig::default()
+            };
+            let reference =
+                gen_log_sweep((sr / 96.0) as f32, (sr / 4.0) as f32, 0.9, sr as u32, 0.25);
+            let recorded = fractional_delay_fir(&reference, 37.25);
+            let est = estimate_chirp_tdoa(&reference, &recorded, &config);
+            assert!(est.valid, "C1 invalid at {sr} Hz");
+            assert!(
+                (est.offset_samples - 37.25).abs() < 0.05,
+                "C1 offset {} at {sr} Hz",
+                est.offset_samples
+            );
+            // C4 end-to-end at rate over a 10 s sweep: the same estimate
+            // anchors both chirps, skew valid by construction.
+            let skew = ClockSkew {
+                offset_samples: est.offset_samples,
+                skew_ppm: 5.0,
+                valid: true,
+                low_confidence: false,
+                inconsistent_spacing: false,
+            };
+            let bound =
+                post_correction_uncertainty_us(&est, &est, &skew, 10.0 * sr, 10.0 * sr, &config);
+            assert!(
+                bound.is_finite() && bound > 0.0,
+                "C4 bound {bound} at {sr} Hz"
+            );
+        }
+    }
+
+    #[test]
     fn tdoa_rejects_pure_noise() {
         let config = TdoaConfig::default();
         let reference = gen_log_sweep(500.0, 12_000.0, 0.9, 48_000, 1.0);

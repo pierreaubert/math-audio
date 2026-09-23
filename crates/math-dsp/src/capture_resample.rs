@@ -234,6 +234,32 @@ mod tests {
     }
 
     #[test]
+    fn identity_and_round_trip_hold_across_sample_rates() {
+        // The correction is sample-domain, but the signals live in real
+        // time: cheap-device, 44.1 kHz-family and 96 kHz clocks.
+        for sr in [6_000.0, 44_100.0, 96_000.0] {
+            let hi_hz = 20_000.0f64.min(0.4 * sr);
+            let sweep = gen_log_sweep(20.0, hi_hz as f32, 0.9, sr as u32, 1.0);
+            let out = resample_to_common_clock(&sweep, &valid_skew(0.0, 0.0), sweep.len())
+                .expect("valid skew resamples");
+            let rms = middle_rms(&sweep, &out, sweep.len() - RESAMPLE_TAPS * 2);
+            assert!(rms < 0.01, "identity rms {rms} at {sr} Hz");
+        }
+        // Full drift round-trip at 44.1 kHz: 500-sample lag, 5 ppm fast.
+        let stimulus = gen_log_sweep(20.0, 17_640.0, 0.9, 44_100, 2.0);
+        let noise = gen_white_noise_seeded(0.005, 44_100, 2.0, 0x4410);
+        let mic: Vec<f32> = apply_drift_oracle(&stimulus, 500.0, 5.0)
+            .iter()
+            .zip(noise.iter())
+            .map(|(s, n)| s + n)
+            .collect();
+        let fixed = resample_to_common_clock(&mic, &valid_skew(500.0, 5.0), stimulus.len())
+            .expect("valid skew resamples");
+        let rms = middle_rms(&stimulus, &fixed, mic.len() - 700);
+        assert!(rms < 0.02, "round-trip rms {rms} at 44100 Hz");
+    }
+
+    #[test]
     fn invalid_skew_refuses() {
         let sweep = gen_log_sweep(20.0, 20_000.0, 0.9, 48_000, 0.1);
         let bad = ClockSkew {

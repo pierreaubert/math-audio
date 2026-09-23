@@ -1,10 +1,11 @@
 //! Wolfram cross-check: C5 DOA, C6 geometry, C3 resampler.
 //!
-//! Oracle: `wolfram/capture_array.wls`. C5 compares the Rust Cramer LS
-//! solver against the engine's LinearSolve; C6 compares residuals and
-//! scale calibration; C3 compares the Rust polyphase table against the
-//! engine's direct textbook windowed-sinc interpolation of a closed-form
-//! two-tone signal.
+//! Oracle: `wolfram/capture_array.wls` (schema 2: one C5/C6/C3 block per
+//! sample rate across the 48 kHz family, the 44.1 kHz family and
+//! cheap-device rates). C5 compares the Rust Cramer LS solver against the
+//! engine's LinearSolve; C6 compares residuals and scale calibration; C3
+//! compares the Rust polyphase table against the engine's direct textbook
+//! windowed-sinc interpolation of a closed-form two-tone signal.
 
 use math_audio_dsp::capture_array::{
     MicArray, PairDelay, calibrate_geometry_scale, check_geometry, estimate_doa_ls,
@@ -16,7 +17,7 @@ use math_qa::{QaResult, assert_close, assert_close_abs, emit_result, provenance,
 const CASE: &str = "capture_array";
 const CASE_ID: &str = "math-qa.capture-array.v1";
 
-fn test_array() -> MicArray {
+fn test_array(sample_rate_hz: f64) -> MicArray {
     MicArray::new(
         vec![
             [0.0, 0.0, 0.0],
@@ -24,12 +25,12 @@ fn test_array() -> MicArray {
             [0.0, 0.12, 0.0],
             [0.0, 0.0, 0.12],
         ],
-        48_000.0,
+        sample_rate_hz,
     )
     .expect("test array")
 }
 
-fn exact_pairs(array: &MicArray, dir: &[f64; 3]) -> Vec<PairDelay> {
+fn exact_pairs(array: &MicArray, sample_rate_hz: f64, dir: &[f64; 3]) -> Vec<PairDelay> {
     // Plane-wave delays from the documented convention (mic closer to the
     // source leads): delay_b_a = −((pb − pa)·dir)/c·sr.
     let mut pairs = Vec::new();
@@ -42,7 +43,8 @@ fn exact_pairs(array: &MicArray, dir: &[f64; 3]) -> Vec<PairDelay> {
             pairs.push(PairDelay {
                 a,
                 b,
-                delay_samples: -dot / 343.0 * 48_000.0,
+                delay_samples: -dot / math_audio_dsp::capture_array::SPEED_OF_SOUND_M_S
+                    * sample_rate_hz,
             });
         }
     }
@@ -62,18 +64,20 @@ fn wolfram_capture_array() {
     assert_eq!(ref_json["case"], CASE_ID);
     let mut max_err = 0.0f64;
     let mut max_tol = 0.0f64;
-    let array = test_array();
 
     // C5: engine solved the same exact-delay LS problem independently.
     let c5: Vec<serde_json::Value> =
         serde_json::from_value(ref_json["c5_entries"].clone()).unwrap();
+    assert!(!c5.is_empty());
     for entry in &c5 {
+        let sr: f64 = serde_json::from_value(entry["sample_rate_hz"].clone()).unwrap();
+        let array = test_array(sr);
         let az: f64 = serde_json::from_value(entry["azimuth_deg"].clone()).unwrap();
         let el: f64 = serde_json::from_value(entry["elevation_deg"].clone()).unwrap();
         let tol: f64 = serde_json::from_value(entry["angle_tolerance_deg"].clone()).unwrap();
         let res_tol: f64 = serde_json::from_value(entry["residual_tolerance"].clone()).unwrap();
         max_tol = max_tol.max(tol);
-        let pairs = exact_pairs(&array, &dir_of(az, el));
+        let pairs = exact_pairs(&array, sr, &dir_of(az, el));
         let est = estimate_doa_ls(&array, &pairs).expect("ls solves");
         let exp_az: f64 = serde_json::from_value(entry["est_azimuth_deg"].clone()).unwrap();
         let exp_el: f64 = serde_json::from_value(entry["est_elevation_deg"].clone()).unwrap();
@@ -83,48 +87,66 @@ fn wolfram_capture_array() {
             (est.elevation_deg, exp_el, "C5 elevation"),
         ] {
             let err = (actual - expected).abs();
-            assert_close_abs(actual, expected, tol, &format!("{what} at az={az} el={el}"));
+            assert_close_abs(
+                actual,
+                expected,
+                tol,
+                &format!("{what} at {sr} Hz az={az} el={el}"),
+            );
             max_err = max_err.max(err / tol);
         }
         assert_close_abs(est.rms_residual_samples, exp_res, res_tol, "C5 residual");
     }
 
-    // C6: scale calibration against the engine value.
-    let c6 = &ref_json["c6"];
-    let big_positions: Vec<[f64; 3]> = (0..array.len())
-        .map(|i| {
-            let p = array.position(i).unwrap();
-            [p[0] * 1.03, p[1] * 1.03, p[2] * 1.03]
-        })
-        .collect();
-    let big = MicArray::new(big_positions, 48_000.0).unwrap();
-    let dir = dir_of(30.0, 10.0);
-    let pairs = exact_pairs(&big, &dir);
-    let (scale, rms) = calibrate_geometry_scale(&array, &dir, &pairs).expect("calibrates");
-    let exp_scale: f64 = serde_json::from_value(c6["scale_factor"].clone()).unwrap();
-    let tol: f64 = serde_json::from_value(c6["scale_tolerance"].clone()).unwrap();
-    let err = math_qa::rel_error(scale, exp_scale);
-    assert_close(scale, exp_scale, tol, "C6 scale");
-    max_err = max_err.max(err);
-    let exp_rms: f64 = serde_json::from_value(c6["scale_rms_samples"].clone()).unwrap();
-    assert_close_abs(rms, exp_rms, 1e-9, "C6 scale rms");
-    // Declared geometry vs scaled measurements (worst residual 0.43 per
-    // the oracle) must fail loudly at tol 0.1 — and exact pairs must pass.
-    let exact = exact_pairs(&array, &dir);
-    assert!(check_geometry(&array, &dir, &exact, 0.1).is_ok());
-    let err = check_geometry(&array, &dir, &pairs, 0.1).expect_err("must fail loudly");
-    assert!(err.contains("re-measure tape"), "{err}");
+    // C6: scale calibration against the engine value, per rate. The
+    // oracle's worst-residual figure sets the loud-failure threshold:
+    // exact pairs pass well below it, 3 % tape error fails above half it.
+    let c6: Vec<serde_json::Value> =
+        serde_json::from_value(ref_json["c6_entries"].clone()).unwrap();
+    assert!(!c6.is_empty());
+    for block in &c6 {
+        let sr: f64 = serde_json::from_value(block["sample_rate_hz"].clone()).unwrap();
+        let array = test_array(sr);
+        let big_positions: Vec<[f64; 3]> = (0..array.len())
+            .map(|i| {
+                let p = array.position(i).unwrap();
+                [p[0] * 1.03, p[1] * 1.03, p[2] * 1.03]
+            })
+            .collect();
+        let big = MicArray::new(big_positions, sr).unwrap();
+        let dir = dir_of(30.0, 10.0);
+        let pairs = exact_pairs(&big, sr, &dir);
+        let (scale, rms) = calibrate_geometry_scale(&array, &dir, &pairs).expect("calibrates");
+        let exp_scale: f64 = serde_json::from_value(block["scale_factor"].clone()).unwrap();
+        let tol: f64 = serde_json::from_value(block["scale_tolerance"].clone()).unwrap();
+        let err = math_qa::rel_error(scale, exp_scale);
+        assert_close(scale, exp_scale, tol, &format!("C6 scale at {sr} Hz"));
+        max_err = max_err.max(err);
+        let exp_rms: f64 = serde_json::from_value(block["scale_rms_samples"].clone()).unwrap();
+        assert_close_abs(rms, exp_rms, 1e-9, "C6 scale rms");
+        let max_res: f64 =
+            serde_json::from_value(block["max_residual_vs_true_samples"].clone()).unwrap();
+        let exact = exact_pairs(&array, sr, &dir);
+        assert!(check_geometry(&array, &dir, &exact, max_res / 4.0).is_ok());
+        let err =
+            check_geometry(&array, &dir, &pairs, max_res / 2.0).expect_err("must fail loudly");
+        assert!(err.contains("re-measure tape"), "{err}");
+    }
 
-    // C3: closed-form two-tone signal, engine interpolated directly.
-    let sr = 48_000.0;
-    let tone = |n: f64| {
-        (2.0 * std::f64::consts::PI * 440.0 * n / sr).sin()
-            + 0.5 * (2.0 * std::f64::consts::PI * 2900.0 * n / sr + 1.0).sin()
-    };
-    let mic: Vec<f32> = (0..2000).map(|n| tone(n as f64) as f32).collect();
+    // C3: closed-form two-tone signal (frequencies scale with the rate,
+    // same relative band everywhere); engine interpolated directly.
     let c3: Vec<serde_json::Value> =
         serde_json::from_value(ref_json["c3_entries"].clone()).unwrap();
+    assert!(!c3.is_empty());
     for entry in &c3 {
+        let sr: f64 = serde_json::from_value(entry["sample_rate_hz"].clone()).unwrap();
+        let fa: f64 = serde_json::from_value(entry["tone_lo_hz"].clone()).unwrap();
+        let fb: f64 = serde_json::from_value(entry["tone_hi_hz"].clone()).unwrap();
+        let tone = |n: f64| {
+            (2.0 * std::f64::consts::PI * fa * n / sr).sin()
+                + 0.5 * (2.0 * std::f64::consts::PI * fb * n / sr + 1.0).sin()
+        };
+        let mic: Vec<f32> = (0..2000).map(|n| tone(n as f64) as f32).collect();
         let m: usize = serde_json::from_value(entry["index"].clone()).unwrap();
         let frac: f64 = serde_json::from_value(entry["offset_samples"].clone()).unwrap();
         let expected: f64 = serde_json::from_value(entry["value"].clone()).unwrap();
@@ -143,7 +165,7 @@ fn wolfram_capture_array() {
             out[m] as f64,
             expected,
             tol,
-            &format!("C3 value at {m}+{frac}"),
+            &format!("C3 value at {sr} Hz {m}+{frac}"),
         );
         max_err = max_err.max(err / tol);
     }
