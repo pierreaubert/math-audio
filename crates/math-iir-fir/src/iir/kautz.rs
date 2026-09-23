@@ -25,11 +25,15 @@
 //! system is solved with modified Gram-Schmidt QR on `[Φ; sqrt(λ) I]`, avoiding
 //! the condition-number squaring of normal equations for closely spaced poles.
 
+mod correction;
+mod correction_fit;
 mod kautz_filter;
 mod kautz_section;
 mod misc;
 #[cfg(test)]
 mod tests;
 
+pub use correction::*;
+pub use correction_fit::*;
 pub use kautz_filter::*;
 pub use kautz_section::*;

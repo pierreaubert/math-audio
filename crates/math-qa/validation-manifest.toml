@@ -84,3 +84,12 @@ golden = "test_functions.json"
 test = "wolfram_test_functions"
 tolerance = "relative error <= 1e-12 (1e-9 absolute at zeros)"
 tier = "smoke"
+
+[[case]]
+id = "math-qa.kautz-correction.v1"
+owner = "math-iir-fir"
+script = "kautz_correction.wls"
+golden = "kautz_correction.json"
+test = "wolfram_kautz_correction"
+tolerance = "complex relative error <= 1e-9 (impulse DTFT <= 1e-6)"
+tier = "smoke"

@@ -581,7 +581,7 @@ mod peq_tests {
 
         compute_peq_response_into(&freqs, &Peq::new(), 48000.0, &mut response, &mut scratch);
 
-        assert_eq!(response, Array1::zeros(freqs.len()));
+        assert_eq!(response, Array1::<f64>::zeros(freqs.len()));
     }
 
     #[test]

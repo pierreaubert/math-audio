@@ -8,6 +8,12 @@ pub mod warped_biquad;
 
 pub use biquad::{Biquad, BiquadCoefficients, BiquadFilterType, Peq};
 pub use biquad_bank::BiquadBank;
+pub use kautz::{
+    BandLimit, FitConfig, FitDiagnostics, FitStatus, FitWeights, GuardGrid, GuardReport,
+    KAUTZ_CORRECTION_FORMAT, KautzBankSpec, KautzCorrection, KautzError, KautzResult,
+    KautzSectionSpec, MAX_POLE_RADIUS, MAX_SUPPORTED_RATE_HZ, MIN_Q_FACTOR, MIN_SUPPORTED_RATE_HZ,
+    NormalizationPolicy, check_bounds, fit_correction, parse_bank_spec,
+};
 pub use kautz::{KautzFilter, KautzSection};
 pub use peq::{
     FilterRow, compute_peq_response, compute_peq_response_into, peq_allpass,

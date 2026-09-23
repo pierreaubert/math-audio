@@ -258,7 +258,12 @@ _qa crate threshold:
 	{{cargo}} test -p {{crate}} --tests --release
 	{{cargo}} test -p {{crate}} --doc
 	{{cargo}} bench -p {{crate}} --no-run
-	{{cargo}} llvm-cov -p {{crate}} --summary-only --release --fail-under-lines {{threshold}}
+	# Skip sysroot/registry rows: toolchain noise, never the measured code.
+	# NOTE: llvm-cov still prints "N functions have mismatched data" on
+	# multi-binary merges (unit + integration + doc builds of one crate).
+	# Upstream artifact, no suppression flag exists; the totals it reports
+	# are stable across clean rebuilds, so the gate below stays trustworthy.
+	{{cargo}} llvm-cov -p {{crate}} --summary-only --release --fail-under-lines {{threshold}} --ignore-filename-regex 'rustlib/src/rust|registry/src'
 
 qa-convex-hull: (_qa "math-convex-hull" qa_cov_convex_hull)
 
@@ -309,7 +314,7 @@ alias qa-math := qa
 
 qa: qa-analog qa-autodiff qa-convex-hull qa-delaunay qa-dsp qa-iir-fir qa-optimisation qa-rir qa-test-functions qa-mathqa
 	{{cargo}} clippy --all --features plotly -- -D warnings
-	{{cargo}} llvm-cov --summary-only --release --fail-under-lines 90
+	{{cargo}} llvm-cov --summary-only --release --fail-under-lines 90 --ignore-filename-regex 'rustlib/src/rust|registry/src'
 
 # math-qa has no benches, so it gets a dedicated recipe instead of _qa.
 qa-mathqa:
@@ -319,11 +324,11 @@ qa-mathqa:
 	{{cargo}} test -p math-qa --lib --release
 	{{cargo}} test -p math-qa --tests --release
 	{{cargo}} test -p math-qa --doc
-	{{cargo}} llvm-cov -p math-qa --summary-only --release --fail-under-lines {{qa_cov_math_qa}}
+	{{cargo}} llvm-cov -p math-qa --summary-only --release --fail-under-lines {{qa_cov_math_qa}} --ignore-filename-regex 'rustlib/src/rust|registry/src'
 
 # Smoke tier: contract + fast engine comparisons (skips without goldens).
 qa-mathqa-smoke:
-	{{cargo}} test -p math-qa --release --test qa_contract --test wolfram_biquad_response --test wolfram_fft_peak --test wolfram_schroeder_t60 --test wolfram_comb_first_dip --test wolfram_third_octave_spl --test wolfram_svf_response --test wolfram_test_functions
+	{{cargo}} test -p math-qa --release --test qa_contract --test wolfram_biquad_response --test wolfram_fft_peak --test wolfram_schroeder_t60 --test wolfram_comb_first_dip --test wolfram_third_octave_spl --test wolfram_svf_response --test wolfram_test_functions --test wolfram_kautz_correction
 
 # Deep tier: direct-summation spot comparisons (engine-heavy goldens).
 qa-mathqa-deep:

@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Faithful Kautz room correction (`req-math-audio-kautz.md`):
+  `KautzCorrection` dry-plus-bank model (`H = 1 + Σ g·B`, signed linear
+  gains, strength scaling, bypass, allocation-free sample/block
+  processing, validated rate rebuild) with the legacy bank-only API
+  untouched; checked Gauss-Newton fitting (`fit_correction`) against the
+  realized complex magnitude with log-equal weighting, normalization
+  policy, composite boost/cut/neutrality/band guards, before/after
+  objective and absolute-error diagnostics with honest termination
+  statuses; versioned plugin-bank
+  spec (`kautz-correction-v1`) with legacy field aliases and structured
+  refusal. Limits documented by test: magnitude-only fitting can settle
+  in phase-flipped local minima; sampled guards do not certify the
+  continuum.
+
 ## [0.5.23] - 2026-09-09
 
 ### Fixed

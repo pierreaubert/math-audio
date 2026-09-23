@@ -66,8 +66,12 @@ pub use error::{FirError, FirResult, IirError, Result};
 
 // Re-export IIR types and functions
 pub use iir::{
-    Biquad, BiquadBank, BiquadCoefficients, BiquadFilterType, FilterRow, KautzFilter, KautzSection,
-    Peq, WarpedBiquad, bark_lambda, compute_peq_response, compute_peq_response_into, peq_allpass,
+    BandLimit, Biquad, BiquadBank, BiquadCoefficients, BiquadFilterType, FilterRow, FitConfig,
+    FitDiagnostics, FitStatus, FitWeights, GuardGrid, GuardReport, KAUTZ_CORRECTION_FORMAT,
+    KautzBankSpec, KautzCorrection, KautzError, KautzFilter, KautzResult, KautzSection,
+    KautzSectionSpec, MAX_POLE_RADIUS, MAX_SUPPORTED_RATE_HZ, MIN_Q_FACTOR, MIN_SUPPORTED_RATE_HZ,
+    NormalizationPolicy, Peq, WarpedBiquad, bark_lambda, check_bounds, compute_peq_response,
+    compute_peq_response_into, fit_correction, parse_bank_spec, peq_allpass,
     peq_butterworth_highpass, peq_butterworth_lowpass, peq_butterworth_q, peq_equal,
     peq_format_apo, peq_format_aupreset, peq_format_camilladsp, peq_format_easyeffects,
     peq_format_pipewire, peq_format_rme_channel, peq_format_rme_room, peq_format_roon,

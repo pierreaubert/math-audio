@@ -124,4 +124,4 @@ jobs:
           key: ${{ runner.os }}-cargo-coverage-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Run coverage gate
-        run: cargo llvm-cov --summary-only --release --fail-under-lines 90
+        run: cargo llvm-cov --summary-only --release --fail-under-lines 90 --ignore-filename-regex 'rustlib/src/rust|registry/src'
