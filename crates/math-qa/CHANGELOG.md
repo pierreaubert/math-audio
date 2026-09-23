@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.2] - 2026-09-22
+
+### Added
+- Capture QA cases (`req-math-audio-capture.md`): `capture_tdoa.wls`
+  (direct-summation C1 offsets, C2 skew arithmetic, C4 bound evaluation)
+  and `capture_array.wls` (LinearSolve C5 DOA, C6 scale calibration,
+  direct textbook C3 interpolation) with checked-in engine goldens and
+  `wolfram_capture_tdoa` / `wolfram_capture_array` comparison tests.
+
 ## [0.1.1] - 2026-09-22
 
 ### Added

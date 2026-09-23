@@ -22,6 +22,9 @@ pub mod analysis;
 pub mod audio_features;
 pub mod binaural_loudness;
 pub mod binaural_matrix;
+pub mod capture_array;
+pub mod capture_resample;
+pub mod capture_tdoa;
 pub mod ebur128;
 pub mod esprit;
 pub mod fast_math;
@@ -97,6 +100,20 @@ pub use signals::{
     prepare_signal_for_playback_channels, replicate_mono, try_gen_log_sweep,
 };
 
+pub use capture_array::{
+    DEFAULT_DOA_BAND_HI_HZ, DEFAULT_DOA_BAND_LO_HZ, DoaEstimate, MicArray, PairDelay,
+    SPEED_OF_SOUND_M_S, calibrate_geometry_scale, check_geometry, delay_and_sum_power,
+    estimate_doa_ls, pairwise_tdoas_vs_first, tdoa_residuals,
+};
+pub use capture_resample::{
+    RESAMPLE_KAISER_BETA, RESAMPLE_PASSBAND_HZ, RESAMPLE_PHASES, RESAMPLE_TAPS,
+    resample_to_common_clock,
+};
+pub use capture_tdoa::{
+    ClockSkew, MAX_PLAUSIBLE_SKEW_PPM, MIN_TDOA_CONFIDENCE_DB, TIMING_CHIRP_HI_HZ,
+    TIMING_CHIRP_LO_HZ, TdoaConfig, TdoaEstimate, TdoaWeighting, estimate_chirp_tdoa,
+    estimate_clock_skew, post_correction_uncertainty_us, validate_drift_series,
+};
 pub use replaygain::{
     ReplayGainAnalyzer, ReplayGainInfo, ReplayGainTrackData, compute_album_gain,
     compute_album_gain_pooled,

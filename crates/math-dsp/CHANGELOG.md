@@ -8,6 +8,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Drift-correction + array primitives (`req-math-audio-capture.md`):
+  `capture_tdoa` (C1 band-limited GCC chirp TDOA with matched/PHAT
+  weighting and parabolic interpolation; C2 two-point clock skew with
+  validity flags and multi-chirp drift-series check; C4 CRB-form
+  post-correction uncertainty in microseconds, infinite when
+  uncomputable), `capture_resample` (C3 256-phase polyphase common-clock
+  resampler applying offset + skew with exact IR time origin),
+  `capture_array` (C5 LS TDOA-multilateration DOA with delay-and-sum
+  scoring; C6 geometry container, loud TDOA-vs-tape check, scale
+  self-calibration).
 - RoomEQ report primitives (`req-math-audio-report.md`): `rir_early_late`
   (envelope-peak detector, 120 Hz lowpass subwoofer reference, 20 ms
   early/late split, fixed-centre 1/3-octave SPL), `rir_waterfall` (STFT
