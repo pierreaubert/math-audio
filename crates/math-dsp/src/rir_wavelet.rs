@@ -11,9 +11,11 @@
 //!   (`σ = cycles / 2πf`, kernel half-length `2σ`).
 //! - Centre grid: log-spaced [`WAVELET_FREQS_PER_OCTAVE`]-per-octave from
 //!   [`WAVELET_FMIN_HZ`] to [`WAVELET_FMAX_HZ`] (clamped to Nyquist).
-//! - Normalisation: each kernel has unit energy; magnitudes are scaled so
-//!   a full-scale sine at the centre frequency reads 0 dB, matching the
-//!   feat-report blue→red colour scale. Display range is clamped to
+//! - Normalisation: each kernel has unit energy and its linear magnitude is
+//!   calibrated against a unit sine at the centre frequency. The displayed
+//!   dB grid is then referenced to its own maximum, so 0 dB means the
+//!   strongest wavelet cell, not digital full scale or acoustic SPL. Display
+//!   range is clamped to
 //!   [`WAVELET_DB_MIN`]…0 dB ([`WAVELET_DB_MIN`] = −30 dB).
 //! - Time axis: hop [`WAVELET_HOP_MS`] = 1 ms frames over the same
 //!   −5…500 ms span as the waterfall ([`crate::rir_waterfall`]), centred
@@ -79,7 +81,7 @@ pub struct WaveletHeatmap {
     pub freqs_hz: Vec<f64>,
     /// Frame centre times rel. direct (ms).
     pub times_ms: Vec<f64>,
-    /// Magnitudes in dB, 0 dB = full-scale sine at centre.
+    /// Magnitudes in dB, 0 dB = the full input heatmap's peak cell.
     pub mags_db: Vec<Vec<f32>>,
 }
 
@@ -177,7 +179,8 @@ pub fn wavelet_heatmap_at(
         rows.push(row);
     }
 
-    // Normalise to the grid peak (a full-scale sine then reads ≈ 0 dB),
+    // Normalise to the grid peak; the earlier unit-sine calibration does not
+    // survive this display normalization as an absolute dB reference.
     // clamp to −30…0 dB, decimate by max-pooling.
     let peak = rows
         .iter()
@@ -251,6 +254,33 @@ pub fn wavelet_heatmap_at(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn display_reference_is_each_heatmaps_peak() {
+        let sr = 4_000.0;
+        let mut ir = vec![0.0f32; 2_400];
+        ir[100] = 1.0;
+        ir[180] = 0.4;
+        let quiet: Vec<f32> = ir.iter().map(|sample| sample * 0.1).collect();
+        let cfg = WaveletConfig {
+            max_freqs: 32,
+            max_frames: 64,
+            ..WaveletConfig::default()
+        };
+        let original = wavelet_heatmap_at(&ir, sr, 100, &cfg);
+        let scaled = wavelet_heatmap_at(&quiet, sr, 100, &cfg);
+        assert_eq!(original.freqs_hz, scaled.freqs_hz);
+        assert_eq!(original.times_ms, scaled.times_ms);
+        for (before, after) in original.mags_db.iter().zip(&scaled.mags_db) {
+            for (&a, &b) in before.iter().zip(after) {
+                assert!(
+                    (a - b).abs() < 1e-4,
+                    "gain changed the relative heatmap: {a} vs {b}"
+                );
+            }
+        }
+        assert!(original.mags_db.iter().flatten().any(|value| *value == 0.0));
+    }
 
     #[test]
     fn burst_lights_up_right_band_and_time() {
