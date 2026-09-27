@@ -19,8 +19,9 @@ const REPS: usize = 200;
 /// Warmup reps before timing (defeats cold-CPU frequency lottery).
 const WARMUP: usize = 50;
 /// Timed batches per task; the reported time is the min across batches,
-/// which rejects transient contention outliers from concurrent builds.
-const BATCHES: usize = 3;
+/// which rejects transient contention outliers from concurrent builds
+/// and bursty neighbor jobs on this shared machine.
+const BATCHES: usize = 5;
 
 fn make_spectrum(nfft: usize, channels: usize) -> DiffTensor<f64> {
     let fft = Fft::with_channels(nfft, channels);
