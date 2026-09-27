@@ -247,3 +247,17 @@ external reference; G is scheduled after D; H follows SOTF-side.
    Phase E.1 design time with a small accuracy/CPU spike.
 4. Whether `fitting` stays in `math-analog` behind a feature or moves to a
    separate `math-analog-fitting` crate if its dependency weight grows.
+
+## Addendum 2026-09-27 — Phase F complete (component tier)
+
+Phase F's "external reference" gate was satisfied with published classical
+references instead of a measured unit (owner permission: classical
+public-domain models may be used). Shipped: diode clipper (ID 6, Shockley),
+triode stage (ID 7, Koren 12AX7A), TMB tone stack (ID 8, Yeh DAFx-06) —
+the roadmap's own first three components — as bounded state-space models
+per the WDF-vs-state-space spike decision. Frozen equations, parameters,
+and pre-registered tolerances live in
+`crates/math-analog/references/component-references.md`; evidence in
+`crates/math-analog/reports/components.md` and `model-matrix.md`. The
+spike's WDF comparison candidate stays open future work; no measured
+hardware was claimed.

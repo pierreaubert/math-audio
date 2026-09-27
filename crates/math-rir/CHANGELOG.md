@@ -13,14 +13,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   noisy/short RIRs no longer fits noise.
 - `linear_fit_indexed` centers the time base per fit window to reduce
   subtractive cancellation in late windows.
-
-### Fixed
 - `report::early_reflection_table` now measures envelope-peak prominence
   topographically (expand left to higher ground, valley is the minimum
   over that interval, 3 ms horizon). A fixed narrow valley both missed
   merged reflections and admitted smoothing-ripple crests on decay tails.
 
 ### Added
+- `Iso3382Metrics::quality_verdict()` returning an `Iso3382QualityVerdict`
+  (`usable`, `decay_fits_valid`, `finite_metric_count`, `issues`),
+  aggregating the NaN-sentinel and r² acceptance checks into one verdict
+  so callers no longer assemble fit thresholds themselves.
 - Per-band ISO 3382 metrics wired through the `bands` filterbank
   (octave/third-octave with per-band fit quality).
 - `report` module with RoomEQ report primitives (`req-math-audio-report.md`):

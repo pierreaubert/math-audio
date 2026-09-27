@@ -18,3 +18,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Tests
 - Added duplicate-points hull regression coverage and
   translated/large-scale property tests.
+
+## [0.3.2] - 2026-06-21
+
+### Added
+- Criterion benchmark (`benches/quickhull.rs`) and removal of memory
+  copies in hot loops.
+
+### Tests
+- Proptest property-test suite with regression file.

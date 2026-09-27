@@ -13,11 +13,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   44.1, 48, 88.2, 96 kHz) with rate-scaled bands and tones; comparison
   tests loop over every rate entry. C2 stays single-entry: pure
   sample-domain arithmetic with no rate input.
-- Kautz correction QA case (`req-math-audio-kautz.md`):
+## [0.5.3] - 2026-09-23
+
+### Added
+- Kautz correction QA case (`req-math-audio-kautz.md`, shipped in 0.1.3):
   `kautz_correction.wls` (direct z-domain dry-plus-bank response at
   44.1/48/96 kHz) with checked-in engine golden and the
   `wolfram_kautz_correction` comparison test, including a
   streamed-impulse DTFT leg against oracle values.
+
+### Changed
+- Re-versioned 0.1.3 → 0.5.3 to align with the workspace 0.5 line; no
+  functional changes.
 
 ## [0.1.2] - 2026-09-22
 

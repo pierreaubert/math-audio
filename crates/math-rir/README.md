@@ -2,7 +2,7 @@
 
 Room Impulse Response analysis using the SSIR (Spatial Segmentation of Impulse Response) method.
 
-**Version:** 0.5.5
+**Version:** 0.5.11
 
 ## Overview
 

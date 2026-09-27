@@ -21,6 +21,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   refusal. Limits documented by test: magnitude-only fitting can settle
   in phase-flipped local minima; sampled guards do not certify the
   continuum.
+- `peq_spl_into` and `compute_peq_response_into`: PEQ response evaluation
+  into caller-owned buffers so optimisation workers can reuse scratch
+  space without allocating in the hot path.
+
+### Fixed
+- `suppress_pre_ringing` now applies a smooth time-varying cap (audible
+  threshold near the main impulse fading cosinusoidally to zero at the
+  time limit) instead of blending toward a clamped value; pre-ring energy
+  beyond the threshold decays monotonically with distance from the main tap.
+
+### Performance
+- x86_64 AVX2/FMA fast paths for biquad DF1 `process_block` and FIR
+  general/symmetric convolution (~87 → ~150 Msamples/s on the filter
+  bench); aarch64 NEON 8-output symmetric-FIR block path and unrolled DF1
+  scalar path (+12% aggregate throughput, bit-identical checksums).
 
 ## [0.5.23] - 2026-09-09
 

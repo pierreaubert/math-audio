@@ -1,4 +1,4 @@
-# convexhull3d
+# math-convex-hull (lib: `math_convex_hull`)
 
 A Rust implementation of the **Quickhull algorithm** for computing 3D convex hulls.
 
@@ -17,7 +17,7 @@ Based on the [convhull_3d C library](https://github.com/leomccormack/convhull_3d
 ## Quick Start
 
 ```rust
-use convexhull3d::{ConvexHull3D, Vertex};
+use math_convex_hull::{ConvexHull3D, Vertex};
 
 let vertices = vec![
     Vertex::new(0.0, 0.0, 0.0),
@@ -53,7 +53,7 @@ The crate includes generators for all Platonic solids:
 ```
 
 ```rust
-use convexhull3d::{ConvexHull3D, testdata};
+use math_convex_hull::{ConvexHull3D, testdata};
 
 // Generate and compute hull for each solid
 let shapes = [
@@ -99,7 +99,7 @@ Generate uniform point distributions on spheres:
 ```
 
 ```rust
-use convexhull3d::{ConvexHull3D, testdata};
+use math_convex_hull::{ConvexHull3D, testdata};
 
 // Random sphere (non-uniform)
 let random = testdata::random_sphere_points(936, 1.0);
@@ -140,7 +140,7 @@ The convex hull only includes points on the outer boundary:
 ```
 
 ```rust
-use convexhull3d::{ConvexHull3D, testdata};
+use math_convex_hull::{ConvexHull3D, testdata};
 
 // Cube with 100 random interior points
 let vertices = testdata::cube_with_interior_points(2.0, 100);
@@ -155,7 +155,7 @@ println!("Hull: {} faces", hull.num_faces());    // 12 (just the cube!)
 Calculate volume and surface area:
 
 ```rust
-use convexhull3d::{ConvexHull3D, Vertex};
+use math_convex_hull::{ConvexHull3D, Vertex};
 
 // Unit tetrahedron
 let vertices = vec![
@@ -176,7 +176,7 @@ println!("Surface Area: {:.6}", hull.surface_area()); // ≈ 1.732051
 ### OBJ Export (for 3D software)
 
 ```rust
-use convexhull3d::{ConvexHull3D, export_obj, testdata};
+use math_convex_hull::{ConvexHull3D, export_obj, testdata};
 
 let vertices = testdata::icosahedron_vertices();
 let hull = ConvexHull3D::build(&vertices).unwrap();
@@ -189,7 +189,7 @@ Opens in Blender, MeshLab, or any 3D modeling software.
 ### Interactive HTML Visualization
 
 ```rust
-use convexhull3d::{ConvexHull3D, export_html, testdata};
+use math_convex_hull::{ConvexHull3D, export_html, testdata};
 
 let vertices = testdata::fibonacci_sphere_points(200, 1.0);
 let hull = ConvexHull3D::build(&vertices).unwrap();
@@ -314,13 +314,13 @@ testdata::load_obj_vertices(path)
 
 ```bash
 # All tests
-cargo test -p convexhull3d
+cargo test -p math-convex-hull
 
 # With timing info
-cargo test -p convexhull3d -- --nocapture
+cargo test -p math-convex-hull -- --nocapture
 
 # Generate visualizations (requires AUTOEQ_DIR)
-AUTOEQ_DIR=/path/to/output cargo test -p convexhull3d
+AUTOEQ_DIR=/path/to/output cargo test -p math-convex-hull
 ```
 
 ## References

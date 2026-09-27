@@ -2,7 +2,7 @@
 
 IIR, FIR, and SVF filter implementations for audio processing, generic over `f32` and `f64`.
 
-**Version:** 0.5.13
+**Version:** 0.5.24
 
 ## Generic precision
 

@@ -48,6 +48,7 @@ prod: prod-workspace
 	{{cargo}} build --release --bin wav2csv -p math-dsp
 	{{cargo}} build --release --bin simd-fuzzer -p math-dsp
 	{{cargo}} build --release --bin benchmark-convergence -p math-optimisation
+	{{cargo}} build --release --bin benchmark-constrained -p math-optimisation
 
 prod-workspace:
 	{{cargo}} build --release --workspace
@@ -288,6 +289,7 @@ qa-iir-fir: (_qa "math-iir-fir" qa_cov_iir_fir) examples-iir
 qa-optimisation: (_qa "math-optimisation" qa_cov_optimisation) examples-optimisation
 	{{cargo}} build --release --bin run-de -p math-optimisation
 	{{cargo}} build --release --bin benchmark-convergence -p math-optimisation
+	{{cargo}} build --release --bin benchmark-constrained -p math-optimisation
 	{{cargo}} build --release --bin plot-de -p math-optimisation --features plotly
 	{{cargo}} bench -p math-optimisation --bench de_bench -- --quick
 	{{cargo}} bench -p math-optimisation --bench cmaes_bench -- --quick
@@ -307,6 +309,7 @@ qa-analog: (_qa "math-analog" qa_cov_analog)
 	{{cargo}} run --release -p math-analog --example alias_reference_report
 	{{cargo}} run --release -p math-analog --example console_preamp_report
 	{{cargo}} run --release -p math-analog --example model_matrix_report
+	{{cargo}} run --release -p math-analog --example component_report
 	{{cargo}} run --release -p math-analog --example fitting_report --features fitting
 	{{cargo}} bench -p math-analog --bench harmonics -- --quick
 

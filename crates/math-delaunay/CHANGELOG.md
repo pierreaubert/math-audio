@@ -18,6 +18,14 @@
 - Voronoi corner insertion now de-duplicates with the same bounds-relative epsilon used by cell polygon cleanup.
 - Voronoi bounds now have a documented finite, ordered precondition with a debug assertion.
 
+## Tests
+
+- Added a proptest property-test suite.
+
+## New
+
+- Added a criterion benchmark (`benches/voronoi.rs`).
+
 # 0.5.2
 
 ## Fixes

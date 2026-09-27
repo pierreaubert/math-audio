@@ -35,6 +35,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The public `Array5` full-Jacobian response API (`sos_frequency_response_jacobian*`);
   `SosFilter::backward` uses the O(K·M) VJP path.
 
+### Tests
+- `evo_bench` example: fixed-repetition timing harness for the evo
+  parallelism/recursion optimization loop (single total-ms score).
+
 ## [0.5.2] - 2026-08-18
 
 ### Fixed
@@ -58,3 +62,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Removed the unused legacy `Gradient`/`Parameters` abstraction.
 - Added regression coverage for malformed shapes, non-contiguous FFT inputs,
   saturated filter parameters, unstable poles, and multichannel noise.
+
+## [0.5.1] - 2026-07-13
+
+### Fixed
+- Numerical-correctness pass over delay, FFT, gain, biquad, and GEQ
+  forward/backward paths with extended module test coverage.
+
+### Performance
+- FFT, biquad-response, and recursion hot paths optimized with a faster
+  `biquad_bench` harness.
+- Merged evo throughput wins for gain, biquad, frequency-response, and
+  recursion kernels (API-preserving).

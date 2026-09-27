@@ -2,7 +2,7 @@
 
 DSP utilities for audio signal generation and FFT-based analysis.
 
-**Version:** 0.5.19
+**Version:** 0.5.30
 
 ## Overview
 
