@@ -11,20 +11,19 @@
 
 use ndarray::{ArrayD, ArrayView2, ArrayViewMut2, Axis, IxDyn};
 use num_complex::Complex;
-use std::{
-    cell::RefCell,
-    collections::hash_map::DefaultHasher,
-    hash::{Hash, Hasher},
-};
+use std::cell::RefCell;
 
 use crate::error::AutodiffError;
-use crate::module::{DiffModule, validate_spectral_gradient_shape};
+use crate::module::{
+    DiffModule, Scalar, fconst, fnv1a_init, fnv1a_step, reset_buffer,
+    validate_spectral_gradient_shape,
+};
 use crate::tensor::DiffTensor;
 
 /// Softplus mapping raw parameters to positive delay samples.
 #[inline]
-fn softplus(x: f64) -> f64 {
-    if x > 0.0 {
+fn softplus<T: Scalar>(x: T) -> T {
+    if x > T::zero() {
         x + (-x).exp().ln_1p()
     } else {
         x.exp().ln_1p()
@@ -33,12 +32,12 @@ fn softplus(x: f64) -> f64 {
 
 /// Derivative of softplus.
 #[inline]
-fn softplus_derivative(x: f64) -> f64 {
-    if x >= 0.0 {
-        1.0 / (1.0 + (-x).exp())
+fn softplus_derivative<T: Scalar>(x: T) -> T {
+    if x >= T::zero() {
+        T::one() / (T::one() + (-x).exp())
     } else {
         let exp_x = x.exp();
-        exp_x / (1.0 + exp_x)
+        exp_x / (T::one() + exp_x)
     }
 }
 
@@ -47,62 +46,84 @@ fn softplus_derivative(x: f64) -> f64 {
 /// `raw = 0` maps to `tau_min`, so the default initialization yields the
 /// minimum (often zero) delay.
 #[inline]
-fn raw_to_tau(raw: f64, tau_min: f64) -> f64 {
-    tau_min + (softplus(raw) - softplus(0.0)).max(0.0)
+fn raw_to_tau<T: Scalar>(raw: T, tau_min: T) -> T {
+    tau_min + (softplus(raw) - softplus(T::zero())).max(T::zero())
 }
 
 /// Derivative of [`raw_to_tau`]. Negative raw values intentionally remain on
 /// the exact `tau_min` plateau; optimizers must cross the initialization point
 /// through an explicit parameter update before delay can increase.
 #[inline]
-fn raw_to_tau_derivative(raw: f64) -> f64 {
-    if raw < 0.0 {
-        0.0
+fn raw_to_tau_derivative<T: Scalar>(raw: T) -> T {
+    if raw < T::zero() {
+        T::zero()
     } else {
         softplus_derivative(raw)
     }
 }
 
+/// Bins between exact re-anchors in [`delay_response`]'s recurrence.
+const RECURRENCE_ANCHOR_BINS: usize = 256;
+
 /// Build the complex delay frequency response for one delay value.
-fn delay_response(tau: f64, nfft: usize) -> Result<Vec<Complex<f64>>, AutodiffError> {
+///
+/// Uses a complex-exponential recurrence (`h[k+1] = h[k] * step`) instead of
+/// one `cos`/`sin` pair per bin, re-anchoring to an exact evaluation every
+/// [`RECURRENCE_ANCHOR_BINS`] bins so floating-point drift stays bounded.
+fn delay_response<T: Scalar>(tau: T, nfft: usize) -> Result<Vec<Complex<T>>, AutodiffError> {
     if nfft == 0 {
         return Err(AutodiffError::Message(
             "Delay: nfft must be greater than 0".to_string(),
         ));
     }
     let n_bins = nfft / 2 + 1;
-    let scale = -2.0 * std::f64::consts::PI / nfft as f64;
-    Ok((0..n_bins)
-        .map(|bin| {
-            let phase = scale * bin as f64 * tau;
-            Complex::new(phase.cos(), phase.sin())
-        })
-        .collect())
+    let scale = fconst::<T>(-2.0 * std::f64::consts::PI) / fconst::<T>(nfft as f64);
+    let step_phase = scale * tau;
+    let step = Complex::new(step_phase.cos(), step_phase.sin());
+    let mut response = Vec::with_capacity(n_bins);
+    let mut current = Complex::new(T::one(), T::zero());
+    for bin in 0..n_bins {
+        if bin % RECURRENCE_ANCHOR_BINS == 0 {
+            // Re-anchor: exact evaluation kills accumulated recurrence error.
+            let phase = scale * fconst::<T>(bin as f64) * tau;
+            current = Complex::new(phase.cos(), phase.sin());
+        }
+        response.push(current);
+        current *= step;
+    }
+    Ok(response)
 }
 
 #[derive(Debug, Clone)]
-struct DelayResponseCache {
+struct DelayResponseCache<T> {
     hash: u64,
     shape: Vec<usize>,
     tau_min_bits: u64,
-    responses: Vec<Vec<Complex<f64>>>,
+    responses: Vec<Vec<Complex<T>>>,
 }
 
-fn with_cached_delay_responses<R>(
-    cache: &RefCell<Option<DelayResponseCache>>,
-    param: &ArrayD<f64>,
+fn with_cached_delay_responses<T: Scalar, R>(
+    cache: &RefCell<Option<DelayResponseCache<T>>>,
+    param: &ArrayD<T>,
     nfft: usize,
-    tau_min: f64,
-    operation: impl FnOnce(&[Vec<Complex<f64>>]) -> R,
+    tau_min: T,
+    operation: impl FnOnce(&[Vec<Complex<T>>]) -> R,
 ) -> Result<R, AutodiffError> {
-    let mut hasher = DefaultHasher::new();
-    param.shape().hash(&mut hasher);
-    for &value in param {
-        value.to_bits().hash(&mut hasher);
+    let mut hash = fnv1a_init();
+    for &dim in param.shape() {
+        hash = fnv1a_step(hash, dim as u64);
     }
-    let hash = hasher.finish();
+    if let Some(slice) = param.as_slice() {
+        for &value in slice {
+            hash = fnv1a_step(hash, value.hash_bits());
+        }
+    } else {
+        for &value in param {
+            hash = fnv1a_step(hash, value.hash_bits());
+        }
+    }
     let shape = param.shape().to_vec();
-    let tau_min_bits = tau_min.to_bits();
+    let tau_min_bits = tau_min.hash_bits();
     let mut cached = cache.borrow_mut();
     let stale = cached.as_ref().is_none_or(|entry| {
         entry.hash != hash
@@ -127,7 +148,7 @@ fn with_cached_delay_responses<R>(
     ))
 }
 
-fn view2<'a>(param: &'a ArrayD<f64>, name: &str) -> Result<ArrayView2<'a, f64>, AutodiffError> {
+fn view2<'a, T>(param: &'a ArrayD<T>, name: &str) -> Result<ArrayView2<'a, T>, AutodiffError> {
     let shape = param.shape();
     if shape.len() != 2 {
         return Err(AutodiffError::Message(format!(
@@ -142,10 +163,10 @@ fn view2<'a>(param: &'a ArrayD<f64>, name: &str) -> Result<ArrayView2<'a, f64>, 
         .map_err(|e| AutodiffError::Message(format!("{name}: failed to reshape param: {e}")))
 }
 
-fn view2_mut<'a>(
-    param: &'a mut ArrayD<f64>,
+fn view2_mut<'a, T>(
+    param: &'a mut ArrayD<T>,
     name: &str,
-) -> Result<ArrayViewMut2<'a, f64>, AutodiffError> {
+) -> Result<ArrayViewMut2<'a, T>, AutodiffError> {
     let shape = param.shape();
     if shape.len() != 2 {
         return Err(AutodiffError::Message(format!(
@@ -160,10 +181,10 @@ fn view2_mut<'a>(
         .map_err(|e| AutodiffError::Message(format!("{name}: failed to reshape param_grad: {e}")))
 }
 
-fn view1<'a>(
-    param: &'a ArrayD<f64>,
+fn view1<'a, T>(
+    param: &'a ArrayD<T>,
     name: &str,
-) -> Result<ndarray::ArrayView1<'a, f64>, AutodiffError> {
+) -> Result<ndarray::ArrayView1<'a, T>, AutodiffError> {
     if param.ndim() != 1 {
         return Err(AutodiffError::Message(format!(
             "{name}: expected 1-D parameter tensor, got shape {:?}",
@@ -176,10 +197,10 @@ fn view1<'a>(
         .map_err(|e| AutodiffError::Message(format!("{name}: failed to reshape param: {e}")))
 }
 
-fn view1_mut<'a>(
-    param: &'a mut ArrayD<f64>,
+fn view1_mut<'a, T>(
+    param: &'a mut ArrayD<T>,
     name: &str,
-) -> Result<ndarray::ArrayViewMut1<'a, f64>, AutodiffError> {
+) -> Result<ndarray::ArrayViewMut1<'a, T>, AutodiffError> {
     if param.ndim() != 1 {
         return Err(AutodiffError::Message(format!(
             "{name}: expected 1-D parameter gradient tensor, got shape {:?}",
@@ -195,28 +216,23 @@ fn view1_mut<'a>(
 
 /// MIMO frequency-domain delay.
 #[derive(Debug, Clone)]
-pub struct Delay {
+pub struct Delay<T = f64> {
     pub nfft: usize,
     pub n_out: usize,
     pub n_in: usize,
-    pub tau_min: f64,
-    pub param: ArrayD<f64>,
-    pub param_grad: ArrayD<f64>,
-    response_cache: RefCell<Option<DelayResponseCache>>,
+    pub tau_min: T,
+    pub param: ArrayD<T>,
+    pub param_grad: ArrayD<T>,
+    response_cache: RefCell<Option<DelayResponseCache<T>>>,
 }
 
-impl Delay {
+impl<T: Scalar> Delay<T> {
     /// Create a new MIMO frequency-domain delay module.
     ///
     /// # Errors
     ///
     /// Returns an error if `nfft` is zero.
-    pub fn new(
-        nfft: usize,
-        n_out: usize,
-        n_in: usize,
-        tau_min: f64,
-    ) -> Result<Self, AutodiffError> {
+    pub fn new(nfft: usize, n_out: usize, n_in: usize, tau_min: T) -> Result<Self, AutodiffError> {
         if nfft == 0 {
             return Err(AutodiffError::Message(
                 "Delay: nfft must be greater than 0".to_string(),
@@ -248,8 +264,18 @@ impl Delay {
     }
 }
 
-impl DiffModule<f64> for Delay {
-    fn forward(&self, input: &DiffTensor<f64>) -> Result<DiffTensor<f64>, AutodiffError> {
+impl<T: Scalar> DiffModule<T> for Delay<T> {
+    fn forward(&self, input: &DiffTensor<T>) -> Result<DiffTensor<T>, AutodiffError> {
+        let mut out = DiffTensor::zeros(IxDyn(&[0]));
+        self.forward_into(input, &mut out)?;
+        Ok(out)
+    }
+
+    fn forward_into(
+        &self,
+        input: &DiffTensor<T>,
+        out: &mut DiffTensor<T>,
+    ) -> Result<(), AutodiffError> {
         let input_shape = input.data.shape();
         if input_shape.len() < 3 {
             return Err(AutodiffError::Message(format!(
@@ -275,7 +301,8 @@ impl DiffModule<f64> for Delay {
         }
         let mut output_shape = input_shape.to_vec();
         output_shape[2] = n_out;
-        let mut output = ArrayD::zeros(IxDyn(&output_shape));
+        reset_buffer(out, &output_shape);
+        let output = &mut out.data;
 
         with_cached_delay_responses(
             &self.response_cache,
@@ -283,6 +310,26 @@ impl DiffModule<f64> for Delay {
             self.nfft,
             self.tau_min,
             |responses| {
+                if input_shape.len() == 3
+                    && let Some(input_data) = input.data.as_slice()
+                    && let Some(output_data) = output.as_slice_mut()
+                {
+                    // Contiguous fast path: flat indexing, no per-bin view creation.
+                    let batch = input_shape[0];
+                    for out_ch in 0..n_out {
+                        for in_ch in 0..n_in {
+                            let h = &responses[out_ch * n_in + in_ch];
+                            for batch_index in 0..batch {
+                                for (bin, &h_val) in h.iter().enumerate() {
+                                    let frame = batch_index * n_bins + bin;
+                                    output_data[frame * n_out + out_ch] +=
+                                        input_data[frame * n_in + in_ch] * h_val;
+                                }
+                            }
+                        }
+                    }
+                    return;
+                }
                 for out_ch in 0..n_out {
                     for in_ch in 0..n_in {
                         let h = &responses[out_ch * n_in + in_ch];
@@ -302,15 +349,27 @@ impl DiffModule<f64> for Delay {
             },
         )?;
 
-        Ok(DiffTensor::from_array(output))
+        Ok(())
     }
 
     fn backward(
         &mut self,
-        input: &DiffTensor<f64>,
-        _output: &DiffTensor<f64>,
-        grad_output: &DiffTensor<f64>,
-    ) -> Result<DiffTensor<f64>, AutodiffError> {
+        input: &DiffTensor<T>,
+        output: &DiffTensor<T>,
+        grad_output: &DiffTensor<T>,
+    ) -> Result<DiffTensor<T>, AutodiffError> {
+        let mut grad_input = DiffTensor::zeros(IxDyn(&[0]));
+        self.backward_into(input, output, grad_output, &mut grad_input)?;
+        Ok(grad_input)
+    }
+
+    fn backward_into(
+        &mut self,
+        input: &DiffTensor<T>,
+        _output: &DiffTensor<T>,
+        grad_output: &DiffTensor<T>,
+        grad_input_out: &mut DiffTensor<T>,
+    ) -> Result<(), AutodiffError> {
         let input_shape = input.data.shape();
         let grad_shape = grad_output.data.shape();
         let param = view2(&self.param, "Delay")?;
@@ -332,8 +391,9 @@ impl DiffModule<f64> for Delay {
             )));
         }
 
-        let scale = -2.0 * std::f64::consts::PI / self.nfft as f64;
-        let mut grad_input = ArrayD::zeros(IxDyn(input_shape));
+        let scale = fconst::<T>(-2.0 * std::f64::consts::PI) / fconst::<T>(self.nfft as f64);
+        reset_buffer(grad_input_out, input_shape);
+        let grad_input = &mut grad_input_out.data;
 
         with_cached_delay_responses(
             &self.response_cache,
@@ -341,6 +401,35 @@ impl DiffModule<f64> for Delay {
             self.nfft,
             self.tau_min,
             |responses| {
+                if input_shape.len() == 3
+                    && grad_shape.len() == 3
+                    && let Some(input_data) = input.data.as_slice()
+                    && let Some(grad_data) = grad_output.data.as_slice()
+                    && let Some(grad_input_data) = grad_input.as_slice_mut()
+                {
+                    // Contiguous fast path: flat indexing, no per-bin view creation.
+                    let batch = input_shape[0];
+                    for out_ch in 0..n_out {
+                        for in_ch in 0..n_in {
+                            let dtau_draw = raw_to_tau_derivative(param[[out_ch, in_ch]]);
+                            let h = &responses[out_ch * n_in + in_ch];
+                            let mut accum = T::zero();
+                            for batch_index in 0..batch {
+                                for (bin, &h_val) in h.iter().enumerate() {
+                                    let frame = batch_index * n_bins + bin;
+                                    let x = input_data[frame * n_in + in_ch];
+                                    let g = grad_data[frame * n_out + out_ch];
+                                    let dh_dtau = h_val
+                                        * Complex::new(T::zero(), scale * fconst::<T>(bin as f64));
+                                    accum += (g * x.conj() * dh_dtau.conj()).re;
+                                    grad_input_data[frame * n_in + in_ch] += g * h_val.conj();
+                                }
+                            }
+                            param_grad[[out_ch, in_ch]] += accum * dtau_draw;
+                        }
+                    }
+                    return;
+                }
                 for out_ch in 0..n_out {
                     for in_ch in 0..n_in {
                         let raw = param[[out_ch, in_ch]];
@@ -348,7 +437,8 @@ impl DiffModule<f64> for Delay {
                         let h = &responses[out_ch * n_in + in_ch];
 
                         for (bin, &h_val) in h.iter().enumerate() {
-                            let dh_dtau = h_val * Complex::new(0.0, scale * bin as f64);
+                            let dh_dtau =
+                                h_val * Complex::new(T::zero(), scale * fconst::<T>(bin as f64));
 
                             let input_slice = input.data.index_axis(Axis(1), bin);
                             let input_bin = input_slice.index_axis(Axis(1), in_ch);
@@ -356,7 +446,7 @@ impl DiffModule<f64> for Delay {
                             let grad_bin = grad_slice.index_axis(Axis(1), out_ch);
 
                             // Parameter gradient.
-                            let accum: Complex<f64> = grad_bin
+                            let accum: Complex<T> = grad_bin
                                 .iter()
                                 .zip(input_bin.iter())
                                 .map(|(g, x)| g * x.conj() * dh_dtau.conj())
@@ -378,7 +468,7 @@ impl DiffModule<f64> for Delay {
             },
         )?;
 
-        Ok(DiffTensor::from_array(grad_input))
+        Ok(())
     }
 
     fn input_channels(&self) -> usize {
@@ -390,38 +480,38 @@ impl DiffModule<f64> for Delay {
     fn n_bins(&self) -> usize {
         self.n_bins()
     }
-    fn parameters(&self) -> Vec<&ArrayD<f64>> {
+    fn parameters(&self) -> Vec<&ArrayD<T>> {
         vec![&self.param]
     }
-    fn parameters_mut(&mut self) -> Vec<&mut ArrayD<f64>> {
+    fn parameters_mut(&mut self) -> Vec<&mut ArrayD<T>> {
         vec![&mut self.param]
     }
-    fn gradients(&self) -> Vec<&ArrayD<f64>> {
+    fn gradients(&self) -> Vec<&ArrayD<T>> {
         vec![&self.param_grad]
     }
     fn zero_grad(&mut self) {
-        self.param_grad.fill(0.0);
+        self.param_grad.fill(T::zero());
     }
 }
 
 /// Diagonal per-channel frequency-domain delay.
 #[derive(Debug, Clone)]
-pub struct ParallelDelay {
+pub struct ParallelDelay<T = f64> {
     pub nfft: usize,
     pub n_channels: usize,
-    pub tau_min: f64,
-    pub param: ArrayD<f64>,
-    pub param_grad: ArrayD<f64>,
-    response_cache: RefCell<Option<DelayResponseCache>>,
+    pub tau_min: T,
+    pub param: ArrayD<T>,
+    pub param_grad: ArrayD<T>,
+    response_cache: RefCell<Option<DelayResponseCache<T>>>,
 }
 
-impl ParallelDelay {
+impl<T: Scalar> ParallelDelay<T> {
     /// Create a new diagonal per-channel frequency-domain delay module.
     ///
     /// # Errors
     ///
     /// Returns an error if `nfft` is zero.
-    pub fn new(nfft: usize, n_channels: usize, tau_min: f64) -> Result<Self, AutodiffError> {
+    pub fn new(nfft: usize, n_channels: usize, tau_min: T) -> Result<Self, AutodiffError> {
         if nfft == 0 {
             return Err(AutodiffError::Message(
                 "ParallelDelay: nfft must be greater than 0".to_string(),
@@ -452,8 +542,8 @@ impl ParallelDelay {
     }
 }
 
-impl DiffModule<f64> for ParallelDelay {
-    fn forward(&self, input: &DiffTensor<f64>) -> Result<DiffTensor<f64>, AutodiffError> {
+impl<T: Scalar> DiffModule<T> for ParallelDelay<T> {
+    fn forward(&self, input: &DiffTensor<T>) -> Result<DiffTensor<T>, AutodiffError> {
         let input_shape = input.data.shape();
         if input_shape.len() < 3 {
             return Err(AutodiffError::Message(format!(
@@ -498,10 +588,10 @@ impl DiffModule<f64> for ParallelDelay {
 
     fn backward(
         &mut self,
-        input: &DiffTensor<f64>,
-        _output: &DiffTensor<f64>,
-        grad_output: &DiffTensor<f64>,
-    ) -> Result<DiffTensor<f64>, AutodiffError> {
+        input: &DiffTensor<T>,
+        _output: &DiffTensor<T>,
+        grad_output: &DiffTensor<T>,
+    ) -> Result<DiffTensor<T>, AutodiffError> {
         let input_shape = input.data.shape();
         let grad_shape = grad_output.data.shape();
         if input_shape != grad_shape {
@@ -533,7 +623,7 @@ impl DiffModule<f64> for ParallelDelay {
             )));
         }
 
-        let scale = -2.0 * std::f64::consts::PI / self.nfft as f64;
+        let scale = fconst::<T>(-2.0 * std::f64::consts::PI) / fconst::<T>(self.nfft as f64);
         let mut grad_input = ArrayD::zeros(IxDyn(input_shape));
 
         with_cached_delay_responses(
@@ -548,14 +638,15 @@ impl DiffModule<f64> for ParallelDelay {
                     let h = &responses[ch];
 
                     for (bin, &h_val) in h.iter().enumerate() {
-                        let dh_dtau = h_val * Complex::new(0.0, scale * bin as f64);
+                        let dh_dtau =
+                            h_val * Complex::new(T::zero(), scale * fconst::<T>(bin as f64));
 
                         let input_slice = input.data.index_axis(Axis(1), bin);
                         let input_bin = input_slice.index_axis(Axis(1), ch);
                         let grad_slice = grad_output.data.index_axis(Axis(1), bin);
                         let grad_bin = grad_slice.index_axis(Axis(1), ch);
 
-                        let accum: Complex<f64> = grad_bin
+                        let accum: Complex<T> = grad_bin
                             .iter()
                             .zip(input_bin.iter())
                             .map(|(g, x)| g * x.conj() * dh_dtau.conj())
@@ -586,16 +677,16 @@ impl DiffModule<f64> for ParallelDelay {
     fn n_bins(&self) -> usize {
         self.n_bins()
     }
-    fn parameters(&self) -> Vec<&ArrayD<f64>> {
+    fn parameters(&self) -> Vec<&ArrayD<T>> {
         vec![&self.param]
     }
-    fn parameters_mut(&mut self) -> Vec<&mut ArrayD<f64>> {
+    fn parameters_mut(&mut self) -> Vec<&mut ArrayD<T>> {
         vec![&mut self.param]
     }
-    fn gradients(&self) -> Vec<&ArrayD<f64>> {
+    fn gradients(&self) -> Vec<&ArrayD<T>> {
         vec![&self.param_grad]
     }
     fn zero_grad(&mut self) {
-        self.param_grad.fill(0.0);
+        self.param_grad.fill(T::zero());
     }
 }

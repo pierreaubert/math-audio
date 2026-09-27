@@ -16,8 +16,9 @@
 use ndarray::{ArrayD, IxDyn};
 
 use crate::error::AutodiffError;
+use crate::iir::response::BasisCache;
 use crate::iir::sos_filter::SosFilter;
-use crate::module::{DiffModule, validate_spectral_gradient_shape};
+use crate::module::{DiffModule, Scalar, fconst, to_f64, validate_spectral_gradient_shape};
 use crate::tensor::DiffTensor;
 
 /// Minimum allowed quality factor.
@@ -43,77 +44,83 @@ pub enum PeqBandType {
 /// Coefficients and their physical parameter derivatives for a single
 /// peaking/shelving section.
 #[derive(Debug, Clone, Copy)]
-struct SectionCoeffs {
-    b: [f64; 3],
-    a: [f64; 3],
+struct SectionCoeffs<T> {
+    b: [T; 3],
+    a: [T; 3],
     /// `db_dparam[tap][param]` w.r.t. physical parameters (`fc`, `Q`, `gain_db`).
-    db_dparam: [[f64; 3]; 3],
+    db_dparam: [[T; 3]; 3],
     /// `da_dparam[tap][param]` w.r.t. physical parameters.
-    da_dparam: [[f64; 3]; 3],
+    da_dparam: [[T; 3]; 3],
 }
 
-impl SectionCoeffs {
+impl<T: Scalar> SectionCoeffs<T> {
     fn zeros() -> Self {
         Self {
-            b: [0.0; 3],
-            a: [0.0; 3],
-            db_dparam: [[0.0; 3]; 3],
-            da_dparam: [[0.0; 3]; 3],
+            b: [T::zero(); 3],
+            a: [T::zero(); 3],
+            db_dparam: [[T::zero(); 3]; 3],
+            da_dparam: [[T::zero(); 3]; 3],
         }
     }
 }
 
 /// Sigmoid activation mapping raw parameters to the `(0, 1)` interval.
 #[inline]
-fn sigmoid(x: f64) -> f64 {
-    1.0 / (1.0 + (-x).exp())
+fn sigmoid<T: Scalar>(x: T) -> T {
+    T::one() / (T::one() + (-x).exp())
 }
 
 /// Derivative of [`sigmoid`] expressed as a function of its output.
 #[inline]
-fn sigmoid_derivative_from_output(s: f64) -> f64 {
-    s * (1.0 - s)
+fn sigmoid_derivative_from_output<T: Scalar>(s: T) -> T {
+    s * (T::one() - s)
 }
 
 /// Map a raw cutoff parameter to a physical cutoff frequency in Hz.
-fn raw_to_fc(fc_raw: f64, half_fs: f64) -> f64 {
+fn raw_to_fc<T: Scalar>(fc_raw: T, half_fs: T) -> T {
     sigmoid(fc_raw) * half_fs
 }
 
 /// Derivative of [`raw_to_fc`] w.r.t. the raw cutoff parameter.
-fn raw_to_fc_derivative(fc_raw: f64, half_fs: f64) -> f64 {
+fn raw_to_fc_derivative<T: Scalar>(fc_raw: T, half_fs: T) -> T {
     sigmoid_derivative_from_output(sigmoid(fc_raw)) * half_fs
 }
 
 /// Map a raw Q parameter to a physical quality factor.
-fn raw_to_q(q_raw: f64) -> f64 {
-    q_raw.exp().clamp(Q_MIN, Q_MAX)
+fn raw_to_q<T: Scalar>(q_raw: T) -> T {
+    q_raw.exp().max(fconst::<T>(Q_MIN)).min(fconst::<T>(Q_MAX))
 }
 
 /// Derivative of [`raw_to_q`] w.r.t. the raw Q parameter.
-fn raw_to_q_derivative(q_raw: f64) -> f64 {
+fn raw_to_q_derivative<T: Scalar>(q_raw: T) -> T {
     let q = q_raw.exp();
-    if q <= Q_MIN || q >= Q_MAX { 0.0 } else { q }
+    if q <= fconst::<T>(Q_MIN) || q >= fconst::<T>(Q_MAX) {
+        T::zero()
+    } else {
+        q
+    }
 }
 
 /// Map a raw gain parameter to a physical gain in dB.
-fn raw_to_gain_db(gain_raw: f64) -> f64 {
-    gain_raw.clamp(GAIN_DB_MIN, GAIN_DB_MAX)
+fn raw_to_gain_db<T: Scalar>(gain_raw: T) -> T {
+    gain_raw
+        .max(fconst::<T>(GAIN_DB_MIN))
+        .min(fconst::<T>(GAIN_DB_MAX))
 }
 
 /// Derivative of [`raw_to_gain_db`] w.r.t. the raw gain parameter.
-fn raw_to_gain_db_derivative(gain_raw: f64) -> f64 {
-    if gain_raw <= GAIN_DB_MIN || gain_raw >= GAIN_DB_MAX {
-        0.0
+fn raw_to_gain_db_derivative<T: Scalar>(gain_raw: T) -> T {
+    if gain_raw <= fconst::<T>(GAIN_DB_MIN) || gain_raw >= fconst::<T>(GAIN_DB_MAX) {
+        T::zero()
     } else {
-        1.0
+        T::one()
     }
 }
 
 /// Validate a raw PEQ parameter tensor and return `(n_sections, n_channels)`.
 ///
 /// Expects shape `(n_sections, 3, n_channels)` for `[fc_raw, q_raw, gain_raw]`.
-fn validate_prior_param(param: &ArrayD<f64>) -> Result<(usize, usize), AutodiffError> {
+fn validate_prior_param<T: Scalar>(param: &ArrayD<T>) -> Result<(usize, usize), AutodiffError> {
     let shape = param.shape();
     if shape.len() != 3 || shape[1] != 3 {
         return Err(AutodiffError::Message(format!(
@@ -133,25 +140,25 @@ fn validate_prior_param(param: &ArrayD<f64>) -> Result<(usize, usize), AutodiffE
 /// Mean squared difference of `gain_raw` between adjacent sections, averaged
 /// over channels: `sum_ch sum_{k>0} (g[k] - g[k-1])^2 / (C * (K - 1))`.
 /// Penalizes jagged cascades where neighboring sections fight each other. A
-/// single section has no neighbor and returns `0.0`.
+/// single section has no neighbor and returns `T::zero()`.
 ///
 /// # Errors
 ///
 /// Returns an error if `param` does not have shape
 /// `(n_sections, 3, n_channels)`.
-pub fn peq_smoothness_penalty(param: &ArrayD<f64>) -> Result<f64, AutodiffError> {
+pub fn peq_smoothness_penalty<T: Scalar>(param: &ArrayD<T>) -> Result<T, AutodiffError> {
     let (n_sections, n_channels) = validate_prior_param(param)?;
     if n_sections < 2 {
-        return Ok(0.0);
+        return Ok(T::zero());
     }
-    let mut sum = 0.0;
+    let mut sum = T::zero();
     for ch in 0..n_channels {
         for k in 1..n_sections {
             let diff = param[[k, 2, ch]] - param[[k - 1, 2, ch]];
             sum += diff * diff;
         }
     }
-    Ok(sum / (n_channels * (n_sections - 1)) as f64)
+    Ok(sum / fconst::<T>((n_channels * (n_sections - 1)) as f64))
 }
 
 /// Gradient of [`peq_smoothness_penalty`] w.r.t. the raw parameter tensor.
@@ -161,23 +168,25 @@ pub fn peq_smoothness_penalty(param: &ArrayD<f64>) -> Result<f64, AutodiffError>
 /// # Errors
 ///
 /// Same conditions as [`peq_smoothness_penalty`].
-pub fn peq_smoothness_penalty_backward(param: &ArrayD<f64>) -> Result<ArrayD<f64>, AutodiffError> {
+pub fn peq_smoothness_penalty_backward<T: Scalar>(
+    param: &ArrayD<T>,
+) -> Result<ArrayD<T>, AutodiffError> {
     let (n_sections, n_channels) = validate_prior_param(param)?;
     let mut grad = ArrayD::zeros(param.raw_dim());
     if n_sections < 2 {
         return Ok(grad);
     }
-    let denom = (n_channels * (n_sections - 1)) as f64;
+    let denom = fconst::<T>((n_channels * (n_sections - 1)) as f64);
     for ch in 0..n_channels {
         for k in 0..n_sections {
-            let mut g = 0.0;
+            let mut g = T::zero();
             if k > 0 {
                 g += param[[k, 2, ch]] - param[[k - 1, 2, ch]];
             }
             if k + 1 < n_sections {
                 g -= param[[k + 1, 2, ch]] - param[[k, 2, ch]];
             }
-            grad[[k, 2, ch]] = 2.0 * g / denom;
+            grad[[k, 2, ch]] = fconst::<T>(2.0) * g / denom;
         }
     }
     Ok(grad)
@@ -192,15 +201,15 @@ pub fn peq_smoothness_penalty_backward(param: &ArrayD<f64>) -> Result<ArrayD<f64
 ///
 /// Returns an error if `param` does not have shape
 /// `(n_sections, 3, n_channels)`.
-pub fn peq_sparsity_penalty(param: &ArrayD<f64>) -> Result<f64, AutodiffError> {
+pub fn peq_sparsity_penalty<T: Scalar>(param: &ArrayD<T>) -> Result<T, AutodiffError> {
     let (n_sections, n_channels) = validate_prior_param(param)?;
-    let mut sum = 0.0;
+    let mut sum = T::zero();
     for k in 0..n_sections {
         for ch in 0..n_channels {
             sum += param[[k, 2, ch]].abs();
         }
     }
-    Ok(sum / (n_sections * n_channels) as f64)
+    Ok(sum / fconst::<T>((n_sections * n_channels) as f64))
 }
 
 /// Subgradient of [`peq_sparsity_penalty`] w.r.t. the raw parameter tensor.
@@ -211,19 +220,21 @@ pub fn peq_sparsity_penalty(param: &ArrayD<f64>) -> Result<f64, AutodiffError> {
 /// # Errors
 ///
 /// Same conditions as [`peq_sparsity_penalty`].
-pub fn peq_sparsity_penalty_backward(param: &ArrayD<f64>) -> Result<ArrayD<f64>, AutodiffError> {
+pub fn peq_sparsity_penalty_backward<T: Scalar>(
+    param: &ArrayD<T>,
+) -> Result<ArrayD<T>, AutodiffError> {
     let (n_sections, n_channels) = validate_prior_param(param)?;
     let mut grad = ArrayD::zeros(param.raw_dim());
-    let denom = (n_sections * n_channels) as f64;
+    let denom = fconst::<T>((n_sections * n_channels) as f64);
     for k in 0..n_sections {
         for ch in 0..n_channels {
             let g = param[[k, 2, ch]];
-            grad[[k, 2, ch]] = if g > 0.0 {
-                1.0 / denom
-            } else if g < 0.0 {
-                -1.0 / denom
+            grad[[k, 2, ch]] = if g > T::zero() {
+                T::one() / denom
+            } else if g < T::zero() {
+                -T::one() / denom
             } else {
-                0.0
+                T::zero()
             };
         }
     }
@@ -231,36 +242,49 @@ pub fn peq_sparsity_penalty_backward(param: &ArrayD<f64>) -> Result<ArrayD<f64>,
 }
 
 /// Compute normalized RBJ peaking or shelving coefficients.
-fn compute_peq_coeffs(
-    fc: f64,
-    q: f64,
-    gain_db: f64,
-    fs: f64,
+fn compute_peq_coeffs<T: Scalar>(
+    fc: T,
+    q: T,
+    gain_db: T,
+    fs: T,
     band_type: PeqBandType,
-) -> ([f64; 3], [f64; 3]) {
+) -> ([T; 3], [T; 3]) {
     let filter_type = match band_type {
         PeqBandType::Peak => math_audio_iir_fir::BiquadFilterType::Peak,
         PeqBandType::Lowshelf => math_audio_iir_fir::BiquadFilterType::Lowshelf,
         PeqBandType::Highshelf => math_audio_iir_fir::BiquadFilterType::Highshelf,
     };
-    let coeffs = math_audio_iir_fir::Biquad::new(filter_type, fc, fs, q, gain_db).coefficients();
+    // RBJ coefficient math runs in f64 (the external biquad designer's native
+    // precision) and is cast once; the gradient path stays in T.
+    let coeffs = math_audio_iir_fir::Biquad::new(
+        filter_type,
+        to_f64(fc),
+        to_f64(fs),
+        to_f64(q),
+        to_f64(gain_db),
+    )
+    .coefficients();
     (
-        [coeffs.b0, coeffs.b1, coeffs.b2],
-        [1.0, coeffs.a1, coeffs.a2],
+        [
+            fconst::<T>(coeffs.b0),
+            fconst::<T>(coeffs.b1),
+            fconst::<T>(coeffs.b2),
+        ],
+        [T::one(), fconst::<T>(coeffs.a1), fconst::<T>(coeffs.a2)],
     )
 }
 
 /// Compute normalized RBJ peaking or shelving coefficients and their physical
 /// parameter derivatives using central finite differences.
-fn compute_peq_coeffs_with_grads(
-    fc: f64,
-    q: f64,
-    gain_db: f64,
-    fs: f64,
+fn compute_peq_coeffs_with_grads<T: Scalar>(
+    fc: T,
+    q: T,
+    gain_db: T,
+    fs: T,
     band_type: PeqBandType,
-) -> SectionCoeffs {
+) -> SectionCoeffs<T> {
     let (b, a) = compute_peq_coeffs(fc, q, gain_db, fs, band_type);
-    let mut coeffs = SectionCoeffs::zeros();
+    let mut coeffs = SectionCoeffs::<T>::zeros();
     coeffs.b = b;
     coeffs.a = a;
 
@@ -271,7 +295,7 @@ fn compute_peq_coeffs_with_grads(
             2 => gain_db,
             _ => unreachable!(),
         };
-        let eps = f64::EPSILON.cbrt() * value.abs().max(1.0);
+        let eps = T::epsilon().cbrt() * value.abs().max(T::one());
         let (fc_plus, q_plus, gain_plus) = match p {
             0 => (fc + eps, q, gain_db),
             1 => (fc, q + eps, gain_db),
@@ -289,8 +313,8 @@ fn compute_peq_coeffs_with_grads(
         let (b_minus, a_minus) = compute_peq_coeffs(fc_minus, q_minus, gain_minus, fs, band_type);
 
         for tap in 0..3 {
-            coeffs.db_dparam[tap][p] = (b_plus[tap] - b_minus[tap]) / (2.0 * eps);
-            coeffs.da_dparam[tap][p] = (a_plus[tap] - a_minus[tap]) / (2.0 * eps);
+            coeffs.db_dparam[tap][p] = (b_plus[tap] - b_minus[tap]) / (fconst::<T>(2.0) * eps);
+            coeffs.da_dparam[tap][p] = (a_plus[tap] - a_minus[tap]) / (fconst::<T>(2.0) * eps);
         }
     }
 
@@ -300,11 +324,11 @@ fn compute_peq_coeffs_with_grads(
 /// Differentiable parametric equalizer: a cascade of peaking or shelving
 /// sections, each with learnable frequency, Q, and gain.
 #[derive(Debug, Clone)]
-pub struct ParametricEq {
+pub struct ParametricEq<T = f64> {
     /// FFT length.
     pub nfft: usize,
     /// Sample rate in Hz.
-    pub fs: f64,
+    pub fs: T,
     /// Number of cascaded sections.
     pub n_sections: usize,
     /// Number of input/output channels.
@@ -312,16 +336,16 @@ pub struct ParametricEq {
     /// Band type for every section.
     pub band_type: PeqBandType,
     /// Anti-aliasing decay in dB.
-    pub alias_decay_db: f64,
+    pub alias_decay_db: T,
     /// Raw parameters, shape `(n_sections, 3, n_channels)` for
     /// `[fc_raw, q_raw, gain_db_raw]`.
-    pub param: ArrayD<f64>,
+    pub param: ArrayD<T>,
     /// Accumulated parameter gradients, same shape as `param`.
-    pub param_grad: ArrayD<f64>,
-    inner: SosFilter,
+    pub param_grad: ArrayD<T>,
+    inner: SosFilter<T>,
 }
 
-impl ParametricEq {
+impl<T: BasisCache> ParametricEq<T> {
     /// Create a new parametric equalizer.
     ///
     /// # Errors
@@ -330,11 +354,11 @@ impl ParametricEq {
     /// `fs` is not positive and finite.
     pub fn new(
         nfft: usize,
-        fs: f64,
+        fs: T,
         n_sections: usize,
         n_channels: usize,
         band_type: PeqBandType,
-        alias_decay_db: f64,
+        alias_decay_db: T,
     ) -> Result<Self, AutodiffError> {
         if nfft == 0 {
             return Err(AutodiffError::Message(format!(
@@ -351,7 +375,7 @@ impl ParametricEq {
                 "ParametricEq: n_channels must be greater than 0, got {n_channels}"
             )));
         }
-        if fs <= 0.0 || !fs.is_finite() {
+        if fs <= T::zero() || !fs.is_finite() {
             return Err(AutodiffError::Message(format!(
                 "ParametricEq: sample rate must be positive and finite, got {fs}"
             )));
@@ -359,20 +383,21 @@ impl ParametricEq {
 
         let param = ArrayD::zeros(IxDyn(&[n_sections, 3, n_channels]));
         let param_grad = ArrayD::zeros(IxDyn(&[n_sections, 3, n_channels]));
-        let mut inner = SosFilter::new(nfft, n_sections, n_channels, n_channels, alias_decay_db)?;
+        let mut inner =
+            SosFilter::<T>::new(nfft, n_sections, n_channels, n_channels, alias_decay_db)?;
 
         // Initialize the cascade as identity: each diagonal section is b=[1,0,0],
         // a=[1,0,0]; off-diagonal couplings are zero-response (b=[0,0,0],
         // a=[1,0,0]).
-        inner.param.fill(0.0);
+        inner.param.fill(T::zero());
         for section in 0..n_sections {
             for out_ch in 0..n_channels {
                 for in_ch in 0..n_channels {
-                    inner.param[[section, 3, out_ch, in_ch]] = 1.0;
+                    inner.param[[section, 3, out_ch, in_ch]] = T::one();
                 }
             }
             for ch in 0..n_channels {
-                inner.param[[section, 0, ch, ch]] = 1.0;
+                inner.param[[section, 0, ch, ch]] = T::one();
             }
         }
 
@@ -400,25 +425,25 @@ impl ParametricEq {
     /// all off-diagonal couplings are set to a zero-response section
     /// (`b = [0, 0, 0]`, `a = [1, 0, 0]`).
     fn fill_sos_param(
-        sos_param: &mut ArrayD<f64>,
-        peq_param: &ArrayD<f64>,
-        fs: f64,
+        sos_param: &mut ArrayD<T>,
+        peq_param: &ArrayD<T>,
+        fs: T,
         band_type: PeqBandType,
     ) {
         let shape = peq_param.shape();
         let n_sections = shape[0];
         let n_channels = shape[2];
 
-        sos_param.fill(0.0);
+        sos_param.fill(T::zero());
         for section in 0..n_sections {
             for out_ch in 0..n_channels {
                 for in_ch in 0..n_channels {
-                    sos_param[[section, 3, out_ch, in_ch]] = 1.0;
+                    sos_param[[section, 3, out_ch, in_ch]] = T::one();
                 }
             }
         }
 
-        let half_fs = fs / 2.0;
+        let half_fs = fs / fconst::<T>(2.0);
         for section in 0..n_sections {
             for ch in 0..n_channels {
                 let fc_raw = peq_param[[section, 0, ch]];
@@ -445,8 +470,8 @@ impl ParametricEq {
     /// Build a fresh inner SOS filter reflecting the current parameters.
     ///
     /// Used by the immutable `forward` pass.
-    fn build_fresh_inner(&self) -> Result<SosFilter, AutodiffError> {
-        let mut inner = SosFilter::new(
+    fn build_fresh_inner(&self) -> Result<SosFilter<T>, AutodiffError> {
+        let mut inner = SosFilter::<T>::new(
             self.nfft,
             self.n_sections,
             self.n_channels,
@@ -458,8 +483,8 @@ impl ParametricEq {
     }
 }
 
-impl DiffModule<f64> for ParametricEq {
-    fn forward(&self, input: &DiffTensor<f64>) -> Result<DiffTensor<f64>, AutodiffError> {
+impl<T: BasisCache> DiffModule<T> for ParametricEq<T> {
+    fn forward(&self, input: &DiffTensor<T>) -> Result<DiffTensor<T>, AutodiffError> {
         let input_shape = input.data.shape();
         if input_shape.len() < 3 {
             return Err(AutodiffError::Message(format!(
@@ -489,10 +514,10 @@ impl DiffModule<f64> for ParametricEq {
 
     fn backward(
         &mut self,
-        input: &DiffTensor<f64>,
-        output: &DiffTensor<f64>,
-        grad_output: &DiffTensor<f64>,
-    ) -> Result<DiffTensor<f64>, AutodiffError> {
+        input: &DiffTensor<T>,
+        output: &DiffTensor<T>,
+        grad_output: &DiffTensor<T>,
+    ) -> Result<DiffTensor<T>, AutodiffError> {
         let input_shape = input.data.shape();
         let grad_shape = grad_output.data.shape();
         let output_shape = output.data.shape();
@@ -554,7 +579,7 @@ impl DiffModule<f64> for ParametricEq {
                 ))
             })?;
 
-        let half_fs = self.fs / 2.0;
+        let half_fs = self.fs / fconst::<T>(2.0);
         for section in 0..self.n_sections {
             for ch in 0..self.n_channels {
                 let fc_raw = self.param[[section, 0, ch]];
@@ -570,7 +595,7 @@ impl DiffModule<f64> for ParametricEq {
                 let dgain_db_dgain_raw = raw_to_gain_db_derivative(gain_raw);
 
                 for p in 0..3 {
-                    let mut accum = 0.0;
+                    let mut accum = T::zero();
                     for tap in 0..3 {
                         let dl_db = inner_grad[[section, tap, ch, ch]];
                         let dl_da = inner_grad[[section, 3 + tap, ch, ch]];
@@ -604,20 +629,20 @@ impl DiffModule<f64> for ParametricEq {
         self.nfft / 2 + 1
     }
 
-    fn parameters(&self) -> Vec<&ArrayD<f64>> {
+    fn parameters(&self) -> Vec<&ArrayD<T>> {
         vec![&self.param]
     }
 
-    fn parameters_mut(&mut self) -> Vec<&mut ArrayD<f64>> {
+    fn parameters_mut(&mut self) -> Vec<&mut ArrayD<T>> {
         vec![&mut self.param]
     }
 
-    fn gradients(&self) -> Vec<&ArrayD<f64>> {
+    fn gradients(&self) -> Vec<&ArrayD<T>> {
         vec![&self.param_grad]
     }
 
     fn zero_grad(&mut self) {
-        self.param_grad.fill(0.0);
+        self.param_grad.fill(T::zero());
         self.inner.zero_grad();
     }
 }

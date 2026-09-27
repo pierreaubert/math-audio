@@ -277,24 +277,24 @@ fn sos_frequency_response_jacobian_parallel_matches_finite_diff() {
 
 #[test]
 fn sos_frequency_response_errors_on_mismatched_shapes() {
-    let b = Array4::zeros((1, 3, 1, 1));
-    let a = Array4::zeros((1, 3, 2, 1));
+    let b = Array4::<Complex<f64>>::zeros((1, 3, 1, 1));
+    let a = Array4::<Complex<f64>>::zeros((1, 3, 2, 1));
     let err = sos_frequency_response(&b, &a, 64, None).unwrap_err();
     assert!(err.to_string().contains("same shape"));
 }
 
 #[test]
 fn sos_frequency_response_errors_on_zero_nfft() {
-    let b = Array4::zeros((1, 3, 1, 1));
-    let a = Array4::zeros((1, 3, 1, 1));
+    let b = Array4::<Complex<f64>>::zeros((1, 3, 1, 1));
+    let a = Array4::<Complex<f64>>::zeros((1, 3, 1, 1));
     let err = sos_frequency_response(&b, &a, 0, None).unwrap_err();
     assert!(err.to_string().contains("nfft"));
 }
 
 #[test]
 fn sos_frequency_response_errors_on_bad_tap_axis() {
-    let b = Array4::zeros((1, 4, 1, 1));
-    let a = Array4::zeros((1, 4, 1, 1));
+    let b = Array4::<Complex<f64>>::zeros((1, 4, 1, 1));
+    let a = Array4::<Complex<f64>>::zeros((1, 4, 1, 1));
     let err = sos_frequency_response(&b, &a, 64, None).unwrap_err();
     assert!(err.to_string().contains("second axis must be 3"));
 }
@@ -326,15 +326,15 @@ fn sos_jacobian_is_finite_at_zero_numerator() {
 
 #[test]
 fn sos_frequency_response_parallel_errors_on_bad_tap_axis() {
-    let b = Array3::zeros((1, 4, 1));
-    let a = Array3::zeros((1, 4, 1));
+    let b = Array3::<Complex<f64>>::zeros((1, 4, 1));
+    let a = Array3::<Complex<f64>>::zeros((1, 4, 1));
     let err = sos_frequency_response_parallel(&b, &a, 64, None).unwrap_err();
     assert!(err.to_string().contains("second axis must be 3"));
 }
 
 #[test]
 fn sos_response_returns_errors_instead_of_panicking_on_invalid_inputs() {
-    let b = Array4::zeros((1, 3, 1, 1));
+    let b = Array4::<Complex<f64>>::zeros((1, 3, 1, 1));
     let mismatched_a = Array4::zeros((1, 3, 2, 1));
     let err = sos_response(&b, &mismatched_a, 64, &[1.0, 1.0, 1.0]).unwrap_err();
     assert!(err.to_string().contains("same shape"));

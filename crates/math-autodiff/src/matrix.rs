@@ -14,10 +14,10 @@ use ndarray::{Array2, ArrayD, ArrayView2, ArrayViewMut2, Axis, IxDyn};
 use num_complex::Complex;
 
 use crate::error::AutodiffError;
-use crate::module::{DiffModule, validate_spectral_gradient_shape};
+use crate::module::{DiffModule, Scalar, validate_spectral_gradient_shape};
 use crate::tensor::DiffTensor;
 
-fn view2<'a>(param: &'a ArrayD<f64>, name: &str) -> Result<ArrayView2<'a, f64>, AutodiffError> {
+fn view2<'a, T>(param: &'a ArrayD<T>, name: &str) -> Result<ArrayView2<'a, T>, AutodiffError> {
     let shape = param.shape();
     if shape.len() != 2 {
         return Err(AutodiffError::Message(format!(
@@ -32,10 +32,10 @@ fn view2<'a>(param: &'a ArrayD<f64>, name: &str) -> Result<ArrayView2<'a, f64>, 
         .map_err(|e| AutodiffError::Message(format!("{name}: failed to reshape param: {e}")))
 }
 
-fn view2_mut<'a>(
-    param: &'a mut ArrayD<f64>,
+fn view2_mut<'a, T>(
+    param: &'a mut ArrayD<T>,
     name: &str,
-) -> Result<ArrayViewMut2<'a, f64>, AutodiffError> {
+) -> Result<ArrayViewMut2<'a, T>, AutodiffError> {
     let shape = param.shape();
     if shape.len() != 2 {
         return Err(AutodiffError::Message(format!(
@@ -50,12 +50,12 @@ fn view2_mut<'a>(
         .map_err(|e| AutodiffError::Message(format!("{name}: failed to reshape param_grad: {e}")))
 }
 
-fn ndarray2_to_dmatrix(mat: &Array2<f64>) -> DMatrix<f64> {
-    let data: Vec<f64> = mat.iter().copied().collect();
+fn ndarray2_to_dmatrix<T: Scalar + nalgebra::RealField>(mat: &Array2<T>) -> DMatrix<T> {
+    let data: Vec<T> = mat.iter().copied().collect();
     DMatrix::from_row_slice(mat.nrows(), mat.ncols(), &data)
 }
 
-fn dmatrix_to_ndarray2(mat: &DMatrix<f64>) -> Array2<f64> {
+fn dmatrix_to_ndarray2<T: Scalar + nalgebra::RealField>(mat: &DMatrix<T>) -> Array2<T> {
     let mut out = Array2::zeros((mat.nrows(), mat.ncols()));
     for i in 0..mat.nrows() {
         for j in 0..mat.ncols() {
@@ -65,7 +65,7 @@ fn dmatrix_to_ndarray2(mat: &DMatrix<f64>) -> Array2<f64> {
     out
 }
 
-fn matrix_exp_skew_view(raw: &ArrayView2<f64>) -> Array2<f64> {
+fn matrix_exp_skew_view<T: Scalar + nalgebra::RealField>(raw: &ArrayView2<T>) -> Array2<T> {
     let skew = raw.to_owned() - raw.t();
     let dm = ndarray2_to_dmatrix(&skew);
     let exp = dm.exp();
@@ -78,10 +78,13 @@ fn matrix_exp_skew_view(raw: &ArrayView2<f64>) -> Array2<f64> {
 /// Fréchet derivative of the exponential at `S` applied to `G`. The final
 /// skew-symmetrization is the adjoint of `raw -> raw - rawᵀ`.
 #[allow(clippy::similar_names)]
-fn matrix_exp_skew_gradient(raw: &ArrayView2<f64>, dl_dm: &Array2<f64>) -> Array2<f64> {
+fn matrix_exp_skew_gradient<T: Scalar + nalgebra::RealField>(
+    raw: &ArrayView2<T>,
+    dl_dm: &Array2<T>,
+) -> Array2<T> {
     let skew = raw.to_owned() - raw.t();
     let n = skew.nrows();
-    let mut block = DMatrix::<f64>::zeros(2 * n, 2 * n);
+    let mut block = DMatrix::<T>::zeros(2 * n, 2 * n);
     for row in 0..n {
         for col in 0..n {
             let value = skew[[col, row]];
@@ -105,13 +108,13 @@ fn matrix_exp_skew_gradient(raw: &ArrayView2<f64>, dl_dm: &Array2<f64>) -> Array
 /// This is shared by both `Dense` and `Orthogonal` parameterizations: for
 /// `Dense` it is the parameter gradient directly, while `Orthogonal` applies
 /// the chain rule through the skew-symmetric exponential map.
-fn compute_dl_dm(
-    grad_output: &DiffTensor<f64>,
-    input: &DiffTensor<f64>,
+fn compute_dl_dm<T: Scalar + nalgebra::RealField>(
+    grad_output: &DiffTensor<T>,
+    input: &DiffTensor<T>,
     n_out: usize,
     n_in: usize,
-) -> Array2<f64> {
-    let mut dl_dm = Array2::<f64>::zeros((n_out, n_in));
+) -> Array2<T> {
+    let mut dl_dm = Array2::<T>::zeros((n_out, n_in));
     for out_ch in 0..n_out {
         let grad_slice = grad_output.data.index_axis(Axis(2), out_ch);
         for in_ch in 0..n_in {
@@ -120,7 +123,7 @@ fn compute_dl_dm(
                 .iter()
                 .zip(input_slice.iter())
                 .map(|(gradient, sample)| *gradient * sample.conj())
-                .sum::<Complex<f64>>()
+                .sum::<Complex<T>>()
                 .re;
         }
     }
@@ -131,7 +134,7 @@ fn compute_dl_dm(
 ///
 /// The result is an orthogonal matrix.
 #[must_use]
-pub fn matrix_exp_skew(raw: &Array2<f64>) -> Array2<f64> {
+pub fn matrix_exp_skew<T: Scalar + nalgebra::RealField>(raw: &Array2<T>) -> Array2<T> {
     matrix_exp_skew_view(&raw.view())
 }
 
@@ -147,7 +150,7 @@ pub enum MatrixType {
 
 /// Frequency-independent learnable matrix module.
 #[derive(Debug, Clone)]
-pub struct Matrix {
+pub struct Matrix<T = f64> {
     /// FFT length.
     pub nfft: usize,
     /// Number of output channels.
@@ -157,12 +160,12 @@ pub struct Matrix {
     /// Parameterization type.
     pub matrix_type: MatrixType,
     /// Raw parameters, shape `(n_out, n_in)`.
-    pub param: ArrayD<f64>,
+    pub param: ArrayD<T>,
     /// Accumulated parameter gradients, same shape as `param`.
-    pub param_grad: ArrayD<f64>,
+    pub param_grad: ArrayD<T>,
 }
 
-impl Matrix {
+impl<T: Scalar + nalgebra::RealField> Matrix<T> {
     /// Create a new learnable matrix module.
     ///
     /// # Errors
@@ -215,11 +218,11 @@ impl Matrix {
     /// # Errors
     ///
     /// Returns an error if the parameter tensor has an unexpected shape.
-    pub fn build_matrix(&self) -> Result<Array2<Complex<f64>>, AutodiffError> {
+    pub fn build_matrix(&self) -> Result<Array2<Complex<T>>, AutodiffError> {
         match self.matrix_type {
             MatrixType::Dense => {
                 let v = view2(&self.param, "Matrix")?;
-                Ok(v.mapv(|x| Complex::new(x, 0.0)))
+                Ok(v.mapv(|x| Complex::new(x, T::zero())))
             }
             MatrixType::Orthogonal => {
                 let v = view2(&self.param, "Matrix")?;
@@ -230,14 +233,14 @@ impl Matrix {
                     )));
                 }
                 let orth = matrix_exp_skew_view(&v);
-                Ok(orth.mapv(|x| Complex::new(x, 0.0)))
+                Ok(orth.mapv(|x| Complex::new(x, T::zero())))
             }
         }
     }
 }
 
-impl DiffModule<f64> for Matrix {
-    fn forward(&self, input: &DiffTensor<f64>) -> Result<DiffTensor<f64>, AutodiffError> {
+impl<T: Scalar + nalgebra::RealField> DiffModule<T> for Matrix<T> {
+    fn forward(&self, input: &DiffTensor<T>) -> Result<DiffTensor<T>, AutodiffError> {
         let input_shape = input.data.shape();
         if input_shape.len() < 3 {
             return Err(AutodiffError::Message(format!(
@@ -266,6 +269,27 @@ impl DiffModule<f64> for Matrix {
         output_shape[2] = n_out;
         let mut output = ArrayD::zeros(IxDyn(&output_shape));
 
+        if input_shape.len() == 3
+            && let Some(input_data) = input.data.as_slice()
+            && let Some(output_data) = output.as_slice_mut()
+        {
+            // Contiguous fast path: flat indexing, no strided view traversal.
+            let batch = input_shape[0];
+            for out_ch in 0..n_out {
+                for in_ch in 0..n_in {
+                    let h = m[[out_ch, in_ch]];
+                    for batch_index in 0..batch {
+                        for f in 0..n_bins {
+                            let frame = batch_index * n_bins + f;
+                            output_data[frame * n_out + out_ch] +=
+                                input_data[frame * n_in + in_ch] * h;
+                        }
+                    }
+                }
+            }
+            return Ok(DiffTensor::from_array(output));
+        }
+
         for out_ch in 0..n_out {
             for in_ch in 0..n_in {
                 let h = m[[out_ch, in_ch]];
@@ -281,10 +305,10 @@ impl DiffModule<f64> for Matrix {
 
     fn backward(
         &mut self,
-        input: &DiffTensor<f64>,
-        _output: &DiffTensor<f64>,
-        grad_output: &DiffTensor<f64>,
-    ) -> Result<DiffTensor<f64>, AutodiffError> {
+        input: &DiffTensor<T>,
+        _output: &DiffTensor<T>,
+        grad_output: &DiffTensor<T>,
+    ) -> Result<DiffTensor<T>, AutodiffError> {
         let input_shape = input.data.shape();
         let grad_shape = grad_output.data.shape();
         let m = self.build_matrix()?;
@@ -350,6 +374,28 @@ impl DiffModule<f64> for Matrix {
             }
         }
 
+        if input_shape.len() == 3
+            && grad_shape.len() == 3
+            && let Some(grad_data) = grad_output.data.as_slice()
+            && let Some(grad_input_data) = grad_input.as_slice_mut()
+        {
+            // Contiguous fast path: flat indexing, no strided view traversal.
+            let batch = grad_shape[0];
+            for in_ch in 0..n_in {
+                for out_ch in 0..n_out {
+                    let h = m[[out_ch, in_ch]].conj();
+                    for batch_index in 0..batch {
+                        for f in 0..n_bins {
+                            let frame = batch_index * n_bins + f;
+                            grad_input_data[frame * n_in + in_ch] +=
+                                grad_data[frame * n_out + out_ch] * h;
+                        }
+                    }
+                }
+            }
+            return Ok(DiffTensor::from_array(grad_input));
+        }
+
         for in_ch in 0..n_in {
             for out_ch in 0..n_out {
                 let h = m[[out_ch, in_ch]].conj();
@@ -373,16 +419,16 @@ impl DiffModule<f64> for Matrix {
     fn n_bins(&self) -> usize {
         self.n_bins()
     }
-    fn parameters(&self) -> Vec<&ArrayD<f64>> {
+    fn parameters(&self) -> Vec<&ArrayD<T>> {
         vec![&self.param]
     }
-    fn parameters_mut(&mut self) -> Vec<&mut ArrayD<f64>> {
+    fn parameters_mut(&mut self) -> Vec<&mut ArrayD<T>> {
         vec![&mut self.param]
     }
-    fn gradients(&self) -> Vec<&ArrayD<f64>> {
+    fn gradients(&self) -> Vec<&ArrayD<T>> {
         vec![&self.param_grad]
     }
     fn zero_grad(&mut self) {
-        self.param_grad.fill(0.0);
+        self.param_grad.fill(T::zero());
     }
 }

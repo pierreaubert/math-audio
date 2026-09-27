@@ -26,8 +26,9 @@ use num_complex::Complex;
 use std::f64::consts::PI;
 
 use crate::error::AutodiffError;
+use crate::iir::response::BasisCache;
 use crate::iir::sos_filter::SosFilter;
-use crate::module::{DiffModule, validate_spectral_gradient_shape};
+use crate::module::{DiffModule, Scalar, fconst, validate_spectral_gradient_shape};
 use crate::tensor::DiffTensor;
 
 /// SVF filter type.
@@ -57,74 +58,74 @@ impl SvfType {
 /// Coefficients and their physical parameter derivatives for a single
 /// SVF-mapped biquad section.
 #[derive(Debug, Clone, Copy)]
-struct SvfCoeffs {
-    b: [f64; 3],
-    a: [f64; 3],
+struct SvfCoeffs<T> {
+    b: [T; 3],
+    a: [T; 3],
     /// `db_dparam[tap][param]` w.r.t. physical parameters (`fc`/`R`/`gain_db`).
-    db_dparam: [[f64; 3]; 3],
+    db_dparam: [[T; 3]; 3],
     /// `da_dparam[tap][param]` w.r.t. physical parameters.
-    da_dparam: [[f64; 3]; 3],
+    da_dparam: [[T; 3]; 3],
 }
 
-impl SvfCoeffs {
+impl<T: Scalar> SvfCoeffs<T> {
     fn zeros() -> Self {
         Self {
-            b: [0.0; 3],
-            a: [0.0; 3],
-            db_dparam: [[0.0; 3]; 3],
-            da_dparam: [[0.0; 3]; 3],
+            b: [T::zero(); 3],
+            a: [T::zero(); 3],
+            db_dparam: [[T::zero(); 3]; 3],
+            da_dparam: [[T::zero(); 3]; 3],
         }
     }
 }
 
 /// Clamp cutoff frequency to the valid open interval `(0, fs/2)`.
 #[inline]
-fn clamp_fc(fc: f64, fs: f64) -> f64 {
-    fc.clamp(1.0, fs * 0.499)
+fn clamp_fc<T: Scalar>(fc: T, fs: T) -> T {
+    fc.max(T::one()).min(fs * fconst::<T>(0.499))
 }
 
 /// Clamp damping `R` to a small positive value to avoid division by zero.
 #[inline]
-fn clamp_r(R: f64) -> f64 {
-    R.max(1e-6)
+fn clamp_r<T: Scalar>(R: T) -> T {
+    R.max(fconst::<T>(1e-6))
 }
 
 /// Convert dB gain to the SVF shelving/peak factor `a = 10^(gain_db/40)`.
 #[inline]
-fn gain_factor(gain_db: f64) -> f64 {
-    10.0_f64.powf(gain_db / 40.0)
+fn gain_factor<T: Scalar>(gain_db: T) -> T {
+    fconst::<T>(10.0).powf(gain_db / fconst::<T>(40.0))
 }
 
 /// Compute normalized biquad coefficients `(b, a)` that realize the same
 /// frequency response as `math-iir-fir::SvfFilter::process`.
 ///
 /// `R` is the damping coefficient (reciprocal of the SVF quality factor `q`).
-fn svf_coefficients(
-    fc: f64,
-    R: f64,
-    gain_db: f64,
-    fs: f64,
+fn svf_coefficients<T: Scalar>(
+    fc: T,
+    R: T,
+    gain_db: T,
+    fs: T,
     filter_type: SvfType,
-) -> ([f64; 3], [f64; 3]) {
+) -> ([T; 3], [T; 3]) {
     let fc = clamp_fc(fc, fs);
     let R = clamp_r(R);
-    let g = (PI * fc / fs).tan();
+    let g = (fconst::<T>(PI) * fc / fs).tan();
     let k = R;
     let a = gain_factor(gain_db);
 
     // Base numerator polynomials for HP, BP, LP in powers of z^-1.
-    let hp = [1.0, -2.0, 1.0];
-    let bp = [g, 0.0, -g];
-    let lp = [g * g, 2.0 * g * g, g * g];
+    let hp = [T::one(), -fconst::<T>(2.0), T::one()];
+    let bp = [g, T::zero(), -g];
+    let lp = [g * g, fconst::<T>(2.0) * g * g, g * g];
 
     // Common denominator (unnormalized).
-    let a0 = 1.0 + k * g + g * g;
-    let a1_un = -2.0 + 2.0 * g * g;
-    let a2_un = 1.0 - k * g + g * g;
+    let a0 = T::one() + k * g + g * g;
+    let a1_un = -fconst::<T>(2.0) + fconst::<T>(2.0) * g * g;
+    let a2_un = T::one() - k * g + g * g;
 
     // Mix coefficients for H = mix_hp*HP + mix_bp*BP + mix_lp*LP.
     // Derived from the SVF state-space identity `input = HP + k*BP + LP`.
-    let (b_un, denom_un): ([f64; 3], [f64; 3]) = match filter_type {
+    let (b_un, denom_un): ([T; 3], [T; 3]) = match filter_type {
         SvfType::Lowpass => (lp, [a0, a1_un, a2_un]),
         SvfType::Highpass => (hp, [a0, a1_un, a2_un]),
         SvfType::Bandpass => (bp, [a0, a1_un, a2_un]),
@@ -148,19 +149,19 @@ fn svf_coefficients(
                 hp[1] + mix_bp * bp[1] + lp[1],
                 hp[2] + mix_bp * bp[2] + lp[2],
             ];
-            let a0_peak = 1.0 + k_peak * g + g * g;
-            let a1_peak = -2.0 + 2.0 * g * g;
-            let a2_peak = 1.0 - k_peak * g + g * g;
+            let a0_peak = T::one() + k_peak * g + g * g;
+            let a1_peak = -fconst::<T>(2.0) + fconst::<T>(2.0) * g * g;
+            let a2_peak = T::one() - k_peak * g + g * g;
             (b, [a0_peak, a1_peak, a2_peak])
         }
         SvfType::Lowshelf => {
             let g_prime = g * a.sqrt();
             let a2 = a * a;
-            let hp_p = [1.0, -2.0, 1.0];
-            let bp_p = [g_prime, 0.0, -g_prime];
+            let hp_p = [T::one(), -fconst::<T>(2.0), T::one()];
+            let bp_p = [g_prime, T::zero(), -g_prime];
             let lp_p = [
                 g_prime * g_prime,
-                2.0 * g_prime * g_prime,
+                fconst::<T>(2.0) * g_prime * g_prime,
                 g_prime * g_prime,
             ];
             // H = HP' + k*a^2*BP' + a^2*LP'.
@@ -169,31 +170,31 @@ fn svf_coefficients(
                 hp_p[1] + k * a2 * bp_p[1] + a2 * lp_p[1],
                 hp_p[2] + k * a2 * bp_p[2] + a2 * lp_p[2],
             ];
-            let a0_s = 1.0 + k * g_prime + g_prime * g_prime;
-            let a1_s = -2.0 + 2.0 * g_prime * g_prime;
-            let a2_s = 1.0 - k * g_prime + g_prime * g_prime;
+            let a0_s = T::one() + k * g_prime + g_prime * g_prime;
+            let a1_s = -fconst::<T>(2.0) + fconst::<T>(2.0) * g_prime * g_prime;
+            let a2_s = T::one() - k * g_prime + g_prime * g_prime;
             (b, [a0_s, a1_s, a2_s])
         }
         SvfType::Highshelf => {
             let g_prime = g / a.sqrt();
             let a2 = a * a;
-            let hp_p = [1.0, -2.0, 1.0];
-            let bp_p = [g_prime, 0.0, -g_prime];
+            let hp_p = [T::one(), -fconst::<T>(2.0), T::one()];
+            let bp_p = [g_prime, T::zero(), -g_prime];
             let lp_p = [
                 g_prime * g_prime,
-                2.0 * g_prime * g_prime,
+                fconst::<T>(2.0) * g_prime * g_prime,
                 g_prime * g_prime,
             ];
             // H = a^2*HP' + k*a*(a + 1 - a^2)*BP' + LP'.
-            let mix_bp = k * a * (a + 1.0 - a2);
+            let mix_bp = k * a * (a + T::one() - a2);
             let b = [
                 a2 * hp_p[0] + mix_bp * bp_p[0] + lp_p[0],
                 a2 * hp_p[1] + mix_bp * bp_p[1] + lp_p[1],
                 a2 * hp_p[2] + mix_bp * bp_p[2] + lp_p[2],
             ];
-            let a0_s = 1.0 + k * g_prime + g_prime * g_prime;
-            let a1_s = -2.0 + 2.0 * g_prime * g_prime;
-            let a2_s = 1.0 - k * g_prime + g_prime * g_prime;
+            let a0_s = T::one() + k * g_prime + g_prime * g_prime;
+            let a1_s = -fconst::<T>(2.0) + fconst::<T>(2.0) * g_prime * g_prime;
+            let a2_s = T::one() - k * g_prime + g_prime * g_prime;
             (b, [a0_s, a1_s, a2_s])
         }
     };
@@ -201,22 +202,22 @@ fn svf_coefficients(
     let a0 = denom_un[0];
     (
         [b_un[0] / a0, b_un[1] / a0, b_un[2] / a0],
-        [1.0, denom_un[1] / a0, denom_un[2] / a0],
+        [T::one(), denom_un[1] / a0, denom_un[2] / a0],
     )
 }
 
 /// Compute coefficients and their physical parameter derivatives using central
 /// finite differences.
-fn svf_coefficients_with_gradients(
-    fc: f64,
-    R: f64,
-    gain_db: f64,
-    fs: f64,
+fn svf_coefficients_with_gradients<T: Scalar>(
+    fc: T,
+    R: T,
+    gain_db: T,
+    fs: T,
     filter_type: SvfType,
-) -> SvfCoeffs {
+) -> SvfCoeffs<T> {
     let n_params = filter_type.n_params();
     let (b, a) = svf_coefficients(fc, R, gain_db, fs, filter_type);
-    let mut coeffs = SvfCoeffs::zeros();
+    let mut coeffs = SvfCoeffs::<T>::zeros();
     coeffs.b = b;
     coeffs.a = a;
 
@@ -227,7 +228,7 @@ fn svf_coefficients_with_gradients(
             2 => gain_db,
             _ => unreachable!(),
         };
-        let eps = f64::EPSILON.cbrt() * value.abs().max(1.0);
+        let eps = T::epsilon().cbrt() * value.abs().max(T::one());
         let (fc_plus, R_plus, gain_plus) = match p {
             0 => (fc + eps, R, gain_db),
             1 => (fc, R + eps, gain_db),
@@ -245,8 +246,8 @@ fn svf_coefficients_with_gradients(
         let (b_minus, a_minus) = svf_coefficients(fc_minus, R_minus, gain_minus, fs, filter_type);
 
         for tap in 0..3 {
-            coeffs.db_dparam[tap][p] = (b_plus[tap] - b_minus[tap]) / (2.0 * eps);
-            coeffs.da_dparam[tap][p] = (a_plus[tap] - a_minus[tap]) / (2.0 * eps);
+            coeffs.db_dparam[tap][p] = (b_plus[tap] - b_minus[tap]) / (fconst::<T>(2.0) * eps);
+            coeffs.da_dparam[tap][p] = (a_plus[tap] - a_minus[tap]) / (fconst::<T>(2.0) * eps);
         }
     }
 
@@ -255,21 +256,21 @@ fn svf_coefficients_with_gradients(
 
 /// Differentiable State Variable Filter mapped to a single SOS section.
 #[derive(Debug, Clone)]
-pub struct SvFilter {
+pub struct SvFilter<T = f64> {
     pub nfft: usize,
-    pub fs: f64,
+    pub fs: T,
     pub filter_type: SvfType,
     pub n_out: usize,
     pub n_in: usize,
-    pub alias_decay_db: f64,
+    pub alias_decay_db: T,
     /// Physical parameters, shape `(1, P, N_out, N_in)` where `P` is 2 or 3.
-    pub param: ArrayD<f64>,
+    pub param: ArrayD<T>,
     /// Accumulated parameter gradients, same shape as `param`.
-    pub param_grad: ArrayD<f64>,
-    inner: SosFilter,
+    pub param_grad: ArrayD<T>,
+    inner: SosFilter<T>,
 }
 
-impl SvFilter {
+impl<T: BasisCache> SvFilter<T> {
     /// Create a new SVF filter module with trainable interior defaults and zero gradients.
     ///
     /// # Errors
@@ -278,23 +279,23 @@ impl SvFilter {
     /// finite and positive.
     pub fn new(
         nfft: usize,
-        fs: f64,
+        fs: T,
         n_out: usize,
         n_in: usize,
         filter_type: SvfType,
-        alias_decay_db: f64,
+        alias_decay_db: T,
     ) -> Result<Self, AutodiffError> {
         if nfft == 0 {
             return Err(AutodiffError::Message(
                 "SvFilter: nfft must be greater than 0".to_string(),
             ));
         }
-        if fs <= 0.0 || !fs.is_finite() {
+        if fs <= T::zero() || !fs.is_finite() {
             return Err(AutodiffError::Message(
                 "SvFilter: fs must be finite and greater than 0".to_string(),
             ));
         }
-        if fs * 0.499 <= 1.0 {
+        if fs * fconst::<T>(0.499) <= T::one() {
             return Err(AutodiffError::Message(
                 "SvFilter: fs is too small for a valid cutoff interval".to_string(),
             ));
@@ -311,15 +312,16 @@ impl SvFilter {
         }
         let n_params = filter_type.n_params();
         let mut param = ArrayD::zeros(IxDyn(&[1, n_params, n_out, n_in]));
-        let default_fc = 1_000.0_f64.min((1.0 + fs * 0.499) * 0.5);
+        let default_fc =
+            fconst::<T>(1000.0).min((T::one() + fs * fconst::<T>(0.499)) * fconst::<T>(0.5));
         for out_ch in 0..n_out {
             for in_ch in 0..n_in {
                 param[[0, 0, out_ch, in_ch]] = default_fc;
-                param[[0, 1, out_ch, in_ch]] = std::f64::consts::SQRT_2;
+                param[[0, 1, out_ch, in_ch]] = fconst::<T>(std::f64::consts::SQRT_2);
             }
         }
         let param_grad = ArrayD::zeros(IxDyn(&[1, n_params, n_out, n_in]));
-        let inner = SosFilter::new(nfft, 1, n_out, n_in, alias_decay_db)?;
+        let inner = SosFilter::<T>::new(nfft, 1, n_out, n_in, alias_decay_db)?;
 
         Ok(Self {
             nfft,
@@ -344,13 +346,13 @@ impl SvFilter {
     /// This is a convenience accessor for tests and debugging; the module's
     /// `forward`/`backward` handle multi-channel tensors internally.
     #[must_use]
-    pub fn coefficients(&self) -> ([f64; 3], [f64; 3]) {
+    pub fn coefficients(&self) -> ([T; 3], [T; 3]) {
         let fc = self.param[[0, 0, 0, 0]];
         let R = self.param[[0, 1, 0, 0]];
         let gain_db = if self.filter_type.n_params() > 2 {
             self.param[[0, 2, 0, 0]]
         } else {
-            0.0
+            T::zero()
         };
         svf_coefficients(fc, R, gain_db, self.fs, self.filter_type)
     }
@@ -359,15 +361,7 @@ impl SvFilter {
     /// current parameters.
     fn build_coeffs_and_grads(
         &self,
-    ) -> Result<
-        (
-            Array4<Complex<f64>>,
-            Array4<Complex<f64>>,
-            Array5<f64>,
-            Array5<f64>,
-        ),
-        AutodiffError,
-    > {
+    ) -> Result<(Array4<Complex<T>>, Array4<Complex<T>>, Array5<T>, Array5<T>), AutodiffError> {
         let n_params = self.filter_type.n_params();
         let param_view = self
             .param
@@ -389,14 +383,14 @@ impl SvFilter {
                 let gain_db = if n_params > 2 {
                     param_view[[0, 2, out_ch, in_ch]]
                 } else {
-                    0.0
+                    T::zero()
                 };
                 let coeffs =
                     svf_coefficients_with_gradients(fc, R, gain_db, self.fs, self.filter_type);
 
                 for tap in 0..3 {
-                    b[[0, tap, out_ch, in_ch]] = Complex::new(coeffs.b[tap], 0.0);
-                    a[[0, tap, out_ch, in_ch]] = Complex::new(coeffs.a[tap], 0.0);
+                    b[[0, tap, out_ch, in_ch]] = Complex::new(coeffs.b[tap], T::zero());
+                    a[[0, tap, out_ch, in_ch]] = Complex::new(coeffs.a[tap], T::zero());
                     for p in 0..n_params {
                         db_dparam[[0, tap, p, out_ch, in_ch]] = coeffs.db_dparam[tap][p];
                         da_dparam[[0, tap, p, out_ch, in_ch]] = coeffs.da_dparam[tap][p];
@@ -409,8 +403,8 @@ impl SvFilter {
     }
 }
 
-impl DiffModule<f64> for SvFilter {
-    fn forward(&self, input: &DiffTensor<f64>) -> Result<DiffTensor<f64>, AutodiffError> {
+impl<T: BasisCache> DiffModule<T> for SvFilter<T> {
+    fn forward(&self, input: &DiffTensor<T>) -> Result<DiffTensor<T>, AutodiffError> {
         let input_shape = input.data.shape();
         if input_shape.len() < 3 {
             return Err(AutodiffError::Message(format!(
@@ -437,7 +431,8 @@ impl DiffModule<f64> for SvFilter {
         // The inner filter must track the current physical parameters. Build
         // only the required SOS storage so the immutable forward path does not
         // clone the reusable backward state.
-        let mut inner = SosFilter::new(self.nfft, 1, self.n_out, self.n_in, self.alias_decay_db)?;
+        let mut inner =
+            SosFilter::<T>::new(self.nfft, 1, self.n_out, self.n_in, self.alias_decay_db)?;
         let n_params = self.filter_type.n_params();
         let param_view = self
             .param
@@ -453,7 +448,7 @@ impl DiffModule<f64> for SvFilter {
                 let gain_db = if n_params > 2 {
                     param_view[[0, 2, out_ch, in_ch]]
                 } else {
-                    0.0
+                    T::zero()
                 };
                 let (b, a) = svf_coefficients(fc, R, gain_db, self.fs, self.filter_type);
                 for tap in 0..3 {
@@ -468,10 +463,10 @@ impl DiffModule<f64> for SvFilter {
 
     fn backward(
         &mut self,
-        input: &DiffTensor<f64>,
-        output: &DiffTensor<f64>,
-        grad_output: &DiffTensor<f64>,
-    ) -> Result<DiffTensor<f64>, AutodiffError> {
+        input: &DiffTensor<T>,
+        output: &DiffTensor<T>,
+        grad_output: &DiffTensor<T>,
+    ) -> Result<DiffTensor<T>, AutodiffError> {
         let input_shape = input.data.shape();
         let grad_shape = grad_output.data.shape();
         let output_shape = output.data.shape();
@@ -550,7 +545,7 @@ impl DiffModule<f64> for SvFilter {
         for out_ch in 0..self.n_out {
             for in_ch in 0..self.n_in {
                 for p in 0..n_params {
-                    let mut accum = 0.0;
+                    let mut accum = T::zero();
                     for tap in 0..3 {
                         let dl_db = inner_grad[[0, tap, out_ch, in_ch]];
                         let dl_da = inner_grad[[0, 3 + tap, out_ch, in_ch]];
@@ -577,20 +572,20 @@ impl DiffModule<f64> for SvFilter {
         self.n_bins()
     }
 
-    fn parameters(&self) -> Vec<&ArrayD<f64>> {
+    fn parameters(&self) -> Vec<&ArrayD<T>> {
         vec![&self.param]
     }
 
-    fn parameters_mut(&mut self) -> Vec<&mut ArrayD<f64>> {
+    fn parameters_mut(&mut self) -> Vec<&mut ArrayD<T>> {
         vec![&mut self.param]
     }
 
-    fn gradients(&self) -> Vec<&ArrayD<f64>> {
+    fn gradients(&self) -> Vec<&ArrayD<T>> {
         vec![&self.param_grad]
     }
 
     fn zero_grad(&mut self) {
-        self.param_grad.fill(0.0);
+        self.param_grad.fill(T::zero());
         self.inner.zero_grad();
     }
 }

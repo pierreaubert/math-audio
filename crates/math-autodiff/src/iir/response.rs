@@ -3,14 +3,56 @@ use num_complex::Complex;
 use std::{cell::RefCell, collections::HashMap, sync::Arc};
 
 use crate::error::AutodiffError;
+use crate::module::{Scalar, fconst};
 
-const DEFAULT_GAMMA: [f64; 3] = [1.0, 1.0, 1.0];
 const SOS_BIN_CHUNK: usize = 8;
 type SosBasisKey = (usize, [u64; 3]);
-type SosBasisCache = HashMap<SosBasisKey, Arc<Array2<Complex<f64>>>>;
+
+/// Identity anti-aliasing envelope.
+fn default_gamma<T: Scalar>() -> [T; 3] {
+    [T::one(), T::one(), T::one()]
+}
+
+/// Per-scalar-type SOS basis cache access.
+///
+/// Responses are cached in one thread-local map per scalar type; this trait
+/// selects the map. Implemented for `f32` and `f64`.
+pub trait BasisCache: Scalar {
+    /// Fetch the cached tap responses for `nfft`/`gamma`, building them once.
+    fn cached_basis(nfft: usize, gamma: &[Self; 3]) -> Arc<Array2<Complex<Self>>>;
+}
 
 thread_local! {
-    static SOS_BASIS_CACHE: RefCell<SosBasisCache> = RefCell::new(HashMap::new());
+    static SOS_BASIS_CACHE_F32: RefCell<HashMap<SosBasisKey, Arc<Array2<Complex<f32>>>>> =
+        RefCell::new(HashMap::new());
+    static SOS_BASIS_CACHE_F64: RefCell<HashMap<SosBasisKey, Arc<Array2<Complex<f64>>>>> =
+        RefCell::new(HashMap::new());
+}
+
+impl BasisCache for f32 {
+    fn cached_basis(nfft: usize, gamma: &[Self; 3]) -> Arc<Array2<Complex<Self>>> {
+        let key = (nfft, gamma.map(|g| u64::from(g.to_bits())));
+        SOS_BASIS_CACHE_F32.with(|cache| {
+            cache
+                .borrow_mut()
+                .entry(key)
+                .or_insert_with(|| Arc::new(tap_frequency_response(nfft, gamma)))
+                .clone()
+        })
+    }
+}
+
+impl BasisCache for f64 {
+    fn cached_basis(nfft: usize, gamma: &[Self; 3]) -> Arc<Array2<Complex<Self>>> {
+        let key = (nfft, gamma.map(f64::to_bits));
+        SOS_BASIS_CACHE_F64.with(|cache| {
+            cache
+                .borrow_mut()
+                .entry(key)
+                .or_insert_with(|| Arc::new(tap_frequency_response(nfft, gamma)))
+                .clone()
+        })
+    }
 }
 
 /// Response of a cascade of SOS sections.
@@ -19,29 +61,30 @@ thread_local! {
 /// considered legacy; new code should use the VJP-backed module backward
 /// passes instead of constructing this type.
 #[derive(Debug, Clone)]
-pub struct SosResponse {
+pub struct SosResponse<T = f64> {
     /// H(f) shape (M, `N_out`, `N_in`)
-    pub h: Array3<Complex<f64>>,
+    pub h: Array3<Complex<T>>,
     /// dH/d(b_{k,t}) shape (M, K, 3, `N_out`, `N_in`)
-    pub dh_db: Array5<Complex<f64>>,
+    pub dh_db: Array5<Complex<T>>,
     /// dH/d(a_{k,t}) shape (M, K, 3, `N_out`, `N_in`)
-    pub dh_da: Array5<Complex<f64>>,
+    pub dh_da: Array5<Complex<T>>,
 }
 
 /// Validate common SOS inputs and resolve the gamma envelope.
-fn resolve_gamma(gamma: Option<&[f64; 3]>) -> [f64; 3] {
-    gamma.copied().unwrap_or(DEFAULT_GAMMA)
+fn resolve_gamma<T: Scalar>(gamma: Option<&[T; 3]>) -> [T; 3] {
+    gamma.copied().unwrap_or_else(default_gamma)
 }
 
 #[allow(
     clippy::cast_precision_loss,
     reason = "FFT indices and practical audio FFT sizes are exactly representable as f64"
 )]
-fn tap_frequency_response(nfft: usize, gamma: &[f64; 3]) -> Array2<Complex<f64>> {
+fn tap_frequency_response<T: Scalar>(nfft: usize, gamma: &[T; 3]) -> Array2<Complex<T>> {
     let n_bins = nfft / 2 + 1;
     let mut response = Array2::zeros((3, n_bins));
     for bin in 0..n_bins {
-        let angle = -std::f64::consts::TAU * bin as f64 / nfft as f64;
+        let angle = fconst::<T>(-std::f64::consts::TAU) * fconst::<T>(bin as f64)
+            / fconst::<T>(nfft as f64);
         let z1 = Complex::new(angle.cos(), angle.sin());
         response[[0, bin]] = Complex::from(gamma[0]);
         response[[1, bin]] = z1 * gamma[1];
@@ -52,21 +95,14 @@ fn tap_frequency_response(nfft: usize, gamma: &[f64; 3]) -> Array2<Complex<f64>>
 
 /// Parameter-independent frequency basis for three-tap SOS sections.
 #[derive(Debug, Clone)]
-pub(crate) struct SosFrequencyBasis {
+pub(crate) struct SosFrequencyBasis<T> {
     nfft: usize,
-    pub(crate) response: Arc<Array2<Complex<f64>>>,
+    pub(crate) response: Arc<Array2<Complex<T>>>,
 }
 
-impl SosFrequencyBasis {
-    pub(crate) fn new(nfft: usize, gamma: &[f64; 3]) -> Self {
-        let key = (nfft, gamma.map(f64::to_bits));
-        let response = SOS_BASIS_CACHE.with(|cache| {
-            cache
-                .borrow_mut()
-                .entry(key)
-                .or_insert_with(|| Arc::new(tap_frequency_response(nfft, gamma)))
-                .clone()
-        });
+impl<T: BasisCache> SosFrequencyBasis<T> {
+    pub(crate) fn new(nfft: usize, gamma: &[T; 3]) -> Self {
+        let response = T::cached_basis(nfft, gamma);
         Self { nfft, response }
     }
 
@@ -75,18 +111,18 @@ impl SosFrequencyBasis {
     }
 }
 
-fn sos_frequency_response_impl<S>(
+fn sos_frequency_response_impl<S, T: BasisCache>(
     b: &ArrayBase<S, Ix4>,
     a: &ArrayBase<S, Ix4>,
-    basis: &SosFrequencyBasis,
-) -> Array3<Complex<f64>>
+    basis: &SosFrequencyBasis<T>,
+) -> Array3<Complex<T>>
 where
-    S: Data<Elem = Complex<f64>>,
+    S: Data<Elem = Complex<T>>,
 {
     let (n_sections, _, n_out, n_in) = b.dim();
     let n_bins = basis.n_bins();
     let tap_response = &basis.response;
-    let mut h = Array3::from_elem((n_bins, n_out, n_in), Complex::from(1.0));
+    let mut h = Array3::from_elem((n_bins, n_out, n_in), Complex::from(T::one()));
 
     // Process bins in small chunks so that the per-bin H values can live in
     // registers across all SOS sections, and the per-bin basis values are
@@ -94,9 +130,9 @@ where
     let n_chunked = n_bins / SOS_BIN_CHUNK * SOS_BIN_CHUNK;
 
     for bin_start in (0..n_chunked).step_by(SOS_BIN_CHUNK) {
-        let mut basis0_chunk = [Complex::from(0.0); SOS_BIN_CHUNK];
-        let mut basis1_chunk = [Complex::from(0.0); SOS_BIN_CHUNK];
-        let mut basis2_chunk = [Complex::from(0.0); SOS_BIN_CHUNK];
+        let mut basis0_chunk = [Complex::from(T::zero()); SOS_BIN_CHUNK];
+        let mut basis1_chunk = [Complex::from(T::zero()); SOS_BIN_CHUNK];
+        let mut basis2_chunk = [Complex::from(T::zero()); SOS_BIN_CHUNK];
         for i in 0..SOS_BIN_CHUNK {
             let bin = bin_start + i;
             basis0_chunk[i] = tap_response[[0, bin]];
@@ -106,7 +142,7 @@ where
 
         for out_ch in 0..n_out {
             for in_ch in 0..n_in {
-                let mut h_chunk = [Complex::from(1.0); SOS_BIN_CHUNK];
+                let mut h_chunk = [Complex::from(T::one()); SOS_BIN_CHUNK];
                 for section in 0..n_sections {
                     let b0 = b[[section, 0, out_ch, in_ch]];
                     let b1 = b[[section, 1, out_ch, in_ch]];
@@ -138,7 +174,7 @@ where
         let basis2 = tap_response[[2, bin]];
         for out_ch in 0..n_out {
             for in_ch in 0..n_in {
-                let mut h_val = Complex::from(1.0);
+                let mut h_val = Complex::from(T::one());
                 for section in 0..n_sections {
                     let b0 = b[[section, 0, out_ch, in_ch]];
                     let b1 = b[[section, 1, out_ch, in_ch]];
@@ -174,22 +210,22 @@ where
     since = "0.5.3",
     note = "materializes the full O(M·K·3·N_out·N_in) Jacobian; prefer the VJP-backed module backward passes (SosFilter, Biquad), which compute the identical gradient without the intermediate"
 )]
-pub fn sos_response(
-    b: &Array4<Complex<f64>>,
-    a: &Array4<Complex<f64>>,
+pub fn sos_response<T: BasisCache>(
+    b: &Array4<Complex<T>>,
+    a: &Array4<Complex<T>>,
     nfft: usize,
-    gamma: &[f64; 3],
-) -> Result<SosResponse, AutodiffError> {
+    gamma: &[T; 3],
+) -> Result<SosResponse<T>, AutodiffError> {
     validate_sos_4d_inputs(b, a, nfft)?;
-    let basis = SosFrequencyBasis::new(nfft, gamma);
+    let basis = SosFrequencyBasis::<T>::new(nfft, gamma);
     Ok(sos_response_with_basis(b, a, &basis))
 }
 
-pub(crate) fn sos_response_with_basis(
-    b: &Array4<Complex<f64>>,
-    a: &Array4<Complex<f64>>,
-    basis: &SosFrequencyBasis,
-) -> SosResponse {
+pub(crate) fn sos_response_with_basis<T: BasisCache>(
+    b: &Array4<Complex<T>>,
+    a: &Array4<Complex<T>>,
+    basis: &SosFrequencyBasis<T>,
+) -> SosResponse<T> {
     let b_view = b.view();
     let a_view = a.view();
     sos_response_impl(&b_view, &a_view, basis)
@@ -200,15 +236,15 @@ pub(crate) fn sos_response_with_basis(
 // `bin` and `in` labels are single-character apart, which triggers
 // `similar_names`, but renaming them would obscure the axis they index.
 #[allow(clippy::similar_names)]
-pub(crate) fn sos_coefficient_vjp_with_basis(
-    b: &Array4<Complex<f64>>,
-    a: &Array4<Complex<f64>>,
-    basis: &SosFrequencyBasis,
-    dl_dh: &Array3<Complex<f64>>,
-    h: &mut Array3<Complex<f64>>,
-    b_response: &mut Array4<Complex<f64>>,
-    a_response: &mut Array4<Complex<f64>>,
-) -> Result<(Array4<f64>, Array4<f64>), AutodiffError> {
+pub(crate) fn sos_coefficient_vjp_with_basis<T: BasisCache>(
+    b: &Array4<Complex<T>>,
+    a: &Array4<Complex<T>>,
+    basis: &SosFrequencyBasis<T>,
+    dl_dh: &Array3<Complex<T>>,
+    h: &mut Array3<Complex<T>>,
+    b_response: &mut Array4<Complex<T>>,
+    a_response: &mut Array4<Complex<T>>,
+) -> Result<(Array4<T>, Array4<T>), AutodiffError> {
     if b.dim() != a.dim() {
         return Err(AutodiffError::Message(format!(
             "sos_coefficient_vjp: b and a must have the same shape, got {:?} and {:?}",
@@ -243,7 +279,7 @@ pub(crate) fn sos_coefficient_vjp_with_basis(
         )));
     }
 
-    h.fill(Complex::from(1.0));
+    h.fill(Complex::from(T::one()));
     let mut has_zero_b = false;
 
     // Precompute raw pointers and strides for all arrays used in both passes.
@@ -294,9 +330,9 @@ pub(crate) fn sos_coefficient_vjp_with_basis(
     // all SOS sections, and each bin's basis values are loaded only once.
     let n_chunked = n_bins / SOS_BIN_CHUNK * SOS_BIN_CHUNK;
     for bin_start in (0..n_chunked).step_by(SOS_BIN_CHUNK) {
-        let mut basis0_chunk = [Complex::from(0.0); SOS_BIN_CHUNK];
-        let mut basis1_chunk = [Complex::from(0.0); SOS_BIN_CHUNK];
-        let mut basis2_chunk = [Complex::from(0.0); SOS_BIN_CHUNK];
+        let mut basis0_chunk = [Complex::from(T::zero()); SOS_BIN_CHUNK];
+        let mut basis1_chunk = [Complex::from(T::zero()); SOS_BIN_CHUNK];
+        let mut basis2_chunk = [Complex::from(T::zero()); SOS_BIN_CHUNK];
         for i in 0..SOS_BIN_CHUNK {
             let bin = bin_start + i;
             // SAFETY: bin_start + i < n_chunked <= n_bins, so all offsets are in bounds.
@@ -310,8 +346,8 @@ pub(crate) fn sos_coefficient_vjp_with_basis(
             for in_ch in 0..n_in {
                 // Accumulate numerator and denominator products separately so
                 // only one complex division per bin is needed at the end.
-                let mut num_chunk = [Complex::from(1.0); SOS_BIN_CHUNK];
-                let mut den_chunk = [Complex::from(1.0); SOS_BIN_CHUNK];
+                let mut num_chunk = [Complex::from(T::one()); SOS_BIN_CHUNK];
+                let mut den_chunk = [Complex::from(T::one()); SOS_BIN_CHUNK];
                 let h_base = out_ch * h_out_stride + in_ch * h_in_stride;
                 for section in 0..n_sections {
                     let coeff_base =
@@ -351,7 +387,7 @@ pub(crate) fn sos_coefficient_vjp_with_basis(
                         }
                         num_chunk[i] *= numerator;
                         den_chunk[i] *= denominator;
-                        has_zero_b |= numerator == Complex::default();
+                        has_zero_b |= numerator == Complex::new(T::zero(), T::zero());
                     }
                 }
                 // SAFETY: h_base + (bin_start+i)*h_bin_stride stays inside h.
@@ -375,8 +411,8 @@ pub(crate) fn sos_coefficient_vjp_with_basis(
         };
         for out_ch in 0..n_out {
             for in_ch in 0..n_in {
-                let mut num_val = Complex::from(1.0);
-                let mut den_val = Complex::from(1.0);
+                let mut num_val = Complex::from(T::one());
+                let mut den_val = Complex::from(T::one());
                 let h_base = out_ch * h_out_stride + in_ch * h_in_stride;
                 for section in 0..n_sections {
                     let coeff_base =
@@ -409,7 +445,7 @@ pub(crate) fn sos_coefficient_vjp_with_basis(
                     }
                     num_val *= numerator;
                     den_val *= denominator;
-                    has_zero_b |= numerator == Complex::default();
+                    has_zero_b |= numerator == Complex::new(T::zero(), T::zero());
                 }
                 // SAFETY: h_base + bin*h_bin_stride is in bounds.
                 unsafe {
@@ -429,12 +465,12 @@ pub(crate) fn sos_coefficient_vjp_with_basis(
             for tap in 0..3 {
                 for out_ch in 0..n_out {
                     for in_ch in 0..n_in {
-                        let mut numerator_gradient = 0.0;
-                        let mut denominator_gradient = 0.0;
+                        let mut numerator_gradient = T::zero();
+                        let mut denominator_gradient = T::zero();
                         for bin in 0..n_bins {
                             let b_bin = b_response[[section, bin, out_ch, in_ch]];
                             let a_bin = a_response[[section, bin, out_ch, in_ch]];
-                            let mut other_sections = Complex::new(1.0, 0.0);
+                            let mut other_sections = Complex::new(T::one(), T::zero());
                             for other in 0..n_sections {
                                 if other != section {
                                     other_sections *= b_response[[other, bin, out_ch, in_ch]]
@@ -464,12 +500,12 @@ pub(crate) fn sos_coefficient_vjp_with_basis(
         for section in 0..n_sections {
             for out_ch in 0..n_out {
                 for in_ch in 0..n_in {
-                    let mut g0_num = 0.0;
-                    let mut g0_den = 0.0;
-                    let mut g1_num = 0.0;
-                    let mut g1_den = 0.0;
-                    let mut g2_num = 0.0;
-                    let mut g2_den = 0.0;
+                    let mut g0_num = T::zero();
+                    let mut g0_den = T::zero();
+                    let mut g1_num = T::zero();
+                    let mut g1_den = T::zero();
+                    let mut g2_num = T::zero();
+                    let mut g2_den = T::zero();
 
                     let b_base = section * resp_sec_stride
                         + out_ch * resp_out_stride
@@ -493,8 +529,8 @@ pub(crate) fn sos_coefficient_vjp_with_basis(
 
                             // One reciprocal per coefficient instead of
                             // dividing each tap contribution separately.
-                            let inv_b = 1.0 / b_bin;
-                            let inv_a = 1.0 / a_bin;
+                            let inv_b = Complex::from(T::one()) / b_bin;
+                            let inv_a = Complex::from(T::one()) / a_bin;
                             let cb = loss_gradient * h_bin * inv_b;
                             let ca = -loss_gradient * h_bin * inv_a;
 
@@ -527,20 +563,20 @@ pub(crate) fn sos_coefficient_vjp_with_basis(
     Ok((db, da))
 }
 
-fn sos_response_impl<S>(
+fn sos_response_impl<S, T: BasisCache>(
     b: &ArrayBase<S, Ix4>,
     a: &ArrayBase<S, Ix4>,
-    basis: &SosFrequencyBasis,
-) -> SosResponse
+    basis: &SosFrequencyBasis<T>,
+) -> SosResponse<T>
 where
-    S: Data<Elem = Complex<f64>>,
+    S: Data<Elem = Complex<T>>,
 {
     let (n_sections, _, n_out, n_in) = b.dim();
     let n_bins = basis.n_bins();
     let fft_envelope = &basis.response;
 
     // Compute B_k and A_k for every section, and accumulate H = prod_k B_k/A_k.
-    let mut h = Array3::from_elem((n_bins, n_out, n_in), Complex::from(1.0));
+    let mut h = Array3::from_elem((n_bins, n_out, n_in), Complex::from(T::one()));
     let mut b_response = Array4::zeros((n_sections, n_bins, n_out, n_in));
     let mut a_response = Array4::zeros((n_sections, n_bins, n_out, n_in));
 
@@ -571,7 +607,7 @@ where
 
     // Precompute the per-(section, bin, channel) product over the other
     // sections so the Jacobian loops avoid repeated inner "other" loops.
-    let one = Complex::new(1.0, 0.0);
+    let one = Complex::new(T::one(), T::zero());
     let mut other_response = Array4::zeros((n_sections, n_bins, n_out, n_in));
     for section in 0..n_sections {
         for bin in 0..n_bins {
@@ -635,23 +671,23 @@ where
 ///
 /// Returns `AutodiffError` if `b` and `a` have different shapes or if `nfft`
 /// is zero.
-pub fn sos_frequency_response(
-    b: &Array4<Complex<f64>>,
-    a: &Array4<Complex<f64>>,
+pub fn sos_frequency_response<T: BasisCache>(
+    b: &Array4<Complex<T>>,
+    a: &Array4<Complex<T>>,
     nfft: usize,
-    gamma: Option<&[f64; 3]>,
-) -> Result<Array3<Complex<f64>>, AutodiffError> {
+    gamma: Option<&[T; 3]>,
+) -> Result<Array3<Complex<T>>, AutodiffError> {
     validate_sos_4d_inputs(b, a, nfft)?;
     let gamma = resolve_gamma(gamma);
-    let basis = SosFrequencyBasis::new(nfft, &gamma);
+    let basis = SosFrequencyBasis::<T>::new(nfft, &gamma);
     Ok(sos_frequency_response_with_basis(b, a, &basis))
 }
 
-pub(crate) fn sos_frequency_response_with_basis(
-    b: &Array4<Complex<f64>>,
-    a: &Array4<Complex<f64>>,
-    basis: &SosFrequencyBasis,
-) -> Array3<Complex<f64>> {
+pub(crate) fn sos_frequency_response_with_basis<T: BasisCache>(
+    b: &Array4<Complex<T>>,
+    a: &Array4<Complex<T>>,
+    basis: &SosFrequencyBasis<T>,
+) -> Array3<Complex<T>> {
     let b_view = b.view();
     let a_view = a.view();
     sos_frequency_response_impl(&b_view, &a_view, basis)
@@ -674,15 +710,15 @@ pub(crate) fn sos_frequency_response_with_basis(
     note = "materializes the full O(M·K·3·N_out·N_in) Jacobian; prefer the VJP-backed module backward passes (SosFilter, Biquad), which compute the identical gradient without the intermediate"
 )]
 #[allow(clippy::type_complexity)]
-pub fn sos_frequency_response_jacobian(
-    b: &Array4<Complex<f64>>,
-    a: &Array4<Complex<f64>>,
+pub fn sos_frequency_response_jacobian<T: BasisCache>(
+    b: &Array4<Complex<T>>,
+    a: &Array4<Complex<T>>,
     nfft: usize,
-    gamma: Option<&[f64; 3]>,
-) -> Result<(Array5<Complex<f64>>, Array5<Complex<f64>>), AutodiffError> {
+    gamma: Option<&[T; 3]>,
+) -> Result<(Array5<Complex<T>>, Array5<Complex<T>>), AutodiffError> {
     validate_sos_4d_inputs(b, a, nfft)?;
     let gamma = resolve_gamma(gamma);
-    let basis = SosFrequencyBasis::new(nfft, &gamma);
+    let basis = SosFrequencyBasis::<T>::new(nfft, &gamma);
     let b_view = b.view();
     let a_view = a.view();
     let resp = sos_response_impl(&b_view, &a_view, &basis);
@@ -705,12 +741,12 @@ pub fn sos_frequency_response_jacobian(
 ///
 /// Returns `AutodiffError` if `b` and `a` have different shapes, if the
 /// second axis is not `3`, or if `nfft` is zero.
-pub fn sos_frequency_response_parallel(
-    b: &Array3<Complex<f64>>,
-    a: &Array3<Complex<f64>>,
+pub fn sos_frequency_response_parallel<T: BasisCache>(
+    b: &Array3<Complex<T>>,
+    a: &Array3<Complex<T>>,
     nfft: usize,
-    gamma: Option<&[f64; 3]>,
-) -> Result<Array2<Complex<f64>>, AutodiffError> {
+    gamma: Option<&[T; 3]>,
+) -> Result<Array2<Complex<T>>, AutodiffError> {
     validate_sos_3d_inputs(b, a, nfft)?;
     let gamma = resolve_gamma(gamma);
     let (n_sections, _, n_channels) = b.dim();
@@ -722,7 +758,7 @@ pub fn sos_frequency_response_parallel(
     let a4 = a_view
         .to_shape((n_sections, 3, n_channels, 1))
         .map_err(|e| AutodiffError::Message(e.to_string()))?;
-    let basis = SosFrequencyBasis::new(nfft, &gamma);
+    let basis = SosFrequencyBasis::<T>::new(nfft, &gamma);
     let resp = sos_response_impl(&b4, &a4, &basis);
     Ok(resp.h.index_axis(Axis(2), 0).to_owned())
 }
@@ -744,12 +780,12 @@ pub fn sos_frequency_response_parallel(
     note = "materializes the full O(M·K·3·N) Jacobian; prefer the VJP-backed module backward passes (SosFilter, Biquad/ParallelBiquad), which compute the identical gradient without the intermediate"
 )]
 #[allow(clippy::type_complexity)]
-pub fn sos_frequency_response_jacobian_parallel(
-    b: &Array3<Complex<f64>>,
-    a: &Array3<Complex<f64>>,
+pub fn sos_frequency_response_jacobian_parallel<T: BasisCache>(
+    b: &Array3<Complex<T>>,
+    a: &Array3<Complex<T>>,
     nfft: usize,
-    gamma: Option<&[f64; 3]>,
-) -> Result<(Array4<Complex<f64>>, Array4<Complex<f64>>), AutodiffError> {
+    gamma: Option<&[T; 3]>,
+) -> Result<(Array4<Complex<T>>, Array4<Complex<T>>), AutodiffError> {
     validate_sos_3d_inputs(b, a, nfft)?;
     let gamma = resolve_gamma(gamma);
     let (n_sections, _, n_channels) = b.dim();
@@ -761,7 +797,7 @@ pub fn sos_frequency_response_jacobian_parallel(
     let a4 = a_view
         .to_shape((n_sections, 3, n_channels, 1))
         .map_err(|e| AutodiffError::Message(e.to_string()))?;
-    let basis = SosFrequencyBasis::new(nfft, &gamma);
+    let basis = SosFrequencyBasis::<T>::new(nfft, &gamma);
     let resp = sos_response_impl(&b4, &a4, &basis);
     Ok((
         resp.dh_db.index_axis(Axis(4), 0).to_owned(),
@@ -769,9 +805,9 @@ pub fn sos_frequency_response_jacobian_parallel(
     ))
 }
 
-fn validate_sos_4d_inputs(
-    b: &Array4<Complex<f64>>,
-    a: &Array4<Complex<f64>>,
+fn validate_sos_4d_inputs<T>(
+    b: &Array4<Complex<T>>,
+    a: &Array4<Complex<T>>,
     nfft: usize,
 ) -> Result<(), AutodiffError> {
     if b.dim() != a.dim() {
@@ -795,9 +831,9 @@ fn validate_sos_4d_inputs(
     Ok(())
 }
 
-fn validate_sos_3d_inputs(
-    b: &Array3<Complex<f64>>,
-    a: &Array3<Complex<f64>>,
+fn validate_sos_3d_inputs<T>(
+    b: &Array3<Complex<T>>,
+    a: &Array3<Complex<T>>,
     nfft: usize,
 ) -> Result<(), AutodiffError> {
     if b.dim() != a.dim() {

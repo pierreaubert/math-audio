@@ -315,8 +315,8 @@ fn peq_priors_values_and_gradients() {
     // fc/Q rows carry no prior gradient; bad shapes are rejected.
     let grad = peq_smoothness_penalty_backward(&param).unwrap();
     assert!(grad[[0, 0, 0]] == 0.0 && grad[[0, 1, 0]] == 0.0);
-    assert!(peq_smoothness_penalty(&ArrayD::zeros(IxDyn(&[2, 2, 1]))).is_err());
-    assert!(peq_sparsity_penalty(&ArrayD::zeros(IxDyn(&[0, 3, 1]))).is_err());
+    assert!(peq_smoothness_penalty(&ArrayD::<f64>::zeros(IxDyn(&[2, 2, 1]))).is_err());
+    assert!(peq_sparsity_penalty(&ArrayD::<f64>::zeros(IxDyn(&[0, 3, 1]))).is_err());
 }
 
 fn ones_spectrum(shape: &[usize]) -> DiffTensor<f64> {

@@ -12,7 +12,7 @@ const NFFT: usize = 512;
 #[test]
 fn orthogonal_matrix_stays_orthogonal_with_zero_params() {
     let n = 4;
-    let matrix = Matrix::new(NFFT, n, n, MatrixType::Orthogonal).unwrap();
+    let matrix: Matrix<f64> = Matrix::new(NFFT, n, n, MatrixType::Orthogonal).unwrap();
     let m = matrix.build_matrix().unwrap();
     let identity = m.t().dot(&m);
     for i in 0..n {

@@ -119,7 +119,7 @@ fn fft_roundtrip_is_identity() {
 #[test]
 #[should_panic(expected = "nfft must be greater than 0")]
 fn fft_rejects_zero_size_at_construction() {
-    let _ = Fft::new(0);
+    let _ = Fft::<f64>::new(0);
 }
 
 #[test]

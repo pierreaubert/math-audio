@@ -8,8 +8,9 @@
 use ndarray::{ArrayD, IxDyn};
 
 use crate::error::AutodiffError;
+use crate::iir::response::BasisCache;
 use crate::iir::sos_filter::SosFilter;
-use crate::module::{DiffModule, validate_spectral_gradient_shape};
+use crate::module::{DiffModule, Scalar, fconst, to_f64, validate_spectral_gradient_shape};
 use crate::tensor::DiffTensor;
 
 /// Default quality factor for the peaking biquad sections.
@@ -24,7 +25,13 @@ const ISO_CENTER_FREQUENCIES: [f64; 10] = [
 
 /// Build normalized peaking-biquad coefficients whose centre gain is given as
 /// a positive linear amplitude.
-fn peak_coefficients(fc: f64, q: f64, fs: f64, linear_gain: f64) -> ([f64; 3], [f64; 3]) {
+fn peak_coefficients<T: Scalar>(fc: T, q: T, fs: T, linear_gain: T) -> ([T; 3], [T; 3]) {
+    // RBJ coefficient math runs in f64 (the external biquad designer's native
+    // precision) and is cast once; the gradient path stays in T.
+    let fc = to_f64(fc);
+    let q = to_f64(q);
+    let fs = to_f64(fs);
+    let linear_gain = to_f64(linear_gain);
     let gain_db = 20.0 * linear_gain.clamp(MIN_LINEAR_GAIN, MAX_LINEAR_GAIN).log10();
     let coeffs = math_audio_iir_fir::Biquad::new(
         math_audio_iir_fir::BiquadFilterType::Peak,
@@ -35,28 +42,32 @@ fn peak_coefficients(fc: f64, q: f64, fs: f64, linear_gain: f64) -> ([f64; 3], [
     )
     .coefficients();
     (
-        [coeffs.b0, coeffs.b1, coeffs.b2],
-        [1.0, coeffs.a1, coeffs.a2],
+        [
+            fconst::<T>(coeffs.b0),
+            fconst::<T>(coeffs.b1),
+            fconst::<T>(coeffs.b2),
+        ],
+        [T::one(), fconst::<T>(coeffs.a1), fconst::<T>(coeffs.a2)],
     )
 }
 
-fn peak_coefficient_gain_derivatives(
-    fc: f64,
-    q: f64,
-    fs: f64,
-    linear_gain: f64,
-) -> ([f64; 3], [f64; 3]) {
-    if !(MIN_LINEAR_GAIN..MAX_LINEAR_GAIN).contains(&linear_gain) {
-        return ([0.0; 3], [0.0; 3]);
+fn peak_coefficient_gain_derivatives<T: Scalar>(
+    fc: T,
+    q: T,
+    fs: T,
+    linear_gain: T,
+) -> ([T; 3], [T; 3]) {
+    if !(fconst::<T>(MIN_LINEAR_GAIN)..fconst::<T>(MAX_LINEAR_GAIN)).contains(&linear_gain) {
+        return ([T::zero(); 3], [T::zero(); 3]);
     }
-    let step = f64::EPSILON.cbrt() * linear_gain.abs().max(1.0);
+    let step = T::epsilon().cbrt() * linear_gain.abs().max(T::one());
     let (b_plus, a_plus) = peak_coefficients(fc, q, fs, linear_gain + step);
     let (b_minus, a_minus) = peak_coefficients(fc, q, fs, linear_gain - step);
-    let mut db = [0.0; 3];
-    let mut da = [0.0; 3];
+    let mut db = [T::zero(); 3];
+    let mut da = [T::zero(); 3];
     for tap in 0..3 {
-        db[tap] = (b_plus[tap] - b_minus[tap]) / (2.0 * step);
-        da[tap] = (a_plus[tap] - a_minus[tap]) / (2.0 * step);
+        db[tap] = (b_plus[tap] - b_minus[tap]) / (fconst::<T>(2.0) * step);
+        da[tap] = (a_plus[tap] - a_minus[tap]) / (fconst::<T>(2.0) * step);
     }
     (db, da)
 }
@@ -67,19 +78,19 @@ fn peak_coefficient_gain_derivatives(
 /// cascade is a [`SosFilter`] whose coefficients are rebuilt from the gain
 /// parameters on every forward/backward pass.
 #[derive(Debug, Clone)]
-pub struct GraphicEq {
+pub struct GraphicEq<T = f64> {
     pub nfft: usize,
-    pub fs: f64,
+    pub fs: T,
     pub n_bands: usize,
     pub n_channels: usize,
-    pub frequencies: Vec<f64>,
-    pub alias_decay_db: f64,
-    pub param: ArrayD<f64>,
-    pub param_grad: ArrayD<f64>,
-    inner: SosFilter,
+    pub frequencies: Vec<T>,
+    pub alias_decay_db: T,
+    pub param: ArrayD<T>,
+    pub param_grad: ArrayD<T>,
+    inner: SosFilter<T>,
 }
 
-impl GraphicEq {
+impl<T: BasisCache> GraphicEq<T> {
     /// Create a new graphic equalizer.
     ///
     /// `n_bands` selects the first `n_bands` frequencies from the ISO octave
@@ -92,10 +103,10 @@ impl GraphicEq {
     /// `n_bands` exceeds the number of available ISO center frequencies.
     pub fn new(
         nfft: usize,
-        fs: f64,
+        fs: T,
         n_bands: usize,
         n_channels: usize,
-        alias_decay_db: f64,
+        alias_decay_db: T,
     ) -> Result<Self, AutodiffError> {
         if nfft == 0 {
             return Err(AutodiffError::Message(format!(
@@ -119,21 +130,21 @@ impl GraphicEq {
                 ISO_CENTER_FREQUENCIES.len()
             )));
         }
-        if fs <= 0.0 || !fs.is_finite() {
+        if fs <= T::zero() || !fs.is_finite() {
             return Err(AutodiffError::Message(format!(
                 "GraphicEq: sample rate must be positive and finite, got {}",
                 fs
             )));
         }
 
-        let frequencies: Vec<f64> = ISO_CENTER_FREQUENCIES[..n_bands]
+        let frequencies: Vec<T> = ISO_CENTER_FREQUENCIES[..n_bands]
             .iter()
-            .map(|&f| f.min(fs * 0.499))
+            .map(|&f| fconst::<T>(f).min(fs * fconst::<T>(0.499)))
             .collect();
 
         let param = ArrayD::ones(IxDyn(&[n_bands, n_channels]));
         let param_grad = ArrayD::zeros(IxDyn(&[n_bands, n_channels]));
-        let inner = SosFilter::new(nfft, n_bands, n_channels, n_channels, alias_decay_db)?;
+        let inner = SosFilter::<T>::new(nfft, n_bands, n_channels, n_channels, alias_decay_db)?;
 
         let mut geq = Self {
             nfft,
@@ -161,21 +172,21 @@ impl GraphicEq {
     /// off-diagonal couplings are set to a zero-response section
     /// (`b = [0, 0, 0]`, `a = [1, 0, 0]`) so that the cascade response stays
     /// finite and the output channel matrix remains diagonal.
-    fn fill_sos_param(param: &mut ArrayD<f64>, frequencies: &[f64], gains: &ArrayD<f64>, fs: f64) {
+    fn fill_sos_param(param: &mut ArrayD<T>, frequencies: &[T], gains: &ArrayD<T>, fs: T) {
         let n_bands = frequencies.len();
         let n_channels = gains.shape()[1];
-        param.fill(0.0);
+        param.fill(T::zero());
         for band in 0..n_bands {
             for out_ch in 0..n_channels {
                 for in_ch in 0..n_channels {
-                    param[[band, 3, out_ch, in_ch]] = 1.0;
+                    param[[band, 3, out_ch, in_ch]] = T::one();
                 }
             }
         }
         for (band, &fc) in frequencies.iter().enumerate() {
             for ch in 0..n_channels {
                 let gain = gains[[band, ch]];
-                let (b_peak, a) = peak_coefficients(fc, DEFAULT_Q, fs, gain);
+                let (b_peak, a) = peak_coefficients(fc, fconst::<T>(DEFAULT_Q), fs, gain);
                 for (tap, &b_tap) in b_peak.iter().enumerate() {
                     param[[band, tap, ch, ch]] = b_tap;
                     param[[band, 3 + tap, ch, ch]] = a[tap];
@@ -197,8 +208,8 @@ impl GraphicEq {
     /// Build a fresh inner SOS filter reflecting the current parameters.
     ///
     /// Used by the immutable `forward` pass.
-    fn build_fresh_inner(&self) -> Result<SosFilter, AutodiffError> {
-        let mut inner = SosFilter::new(
+    fn build_fresh_inner(&self) -> Result<SosFilter<T>, AutodiffError> {
+        let mut inner = SosFilter::<T>::new(
             self.nfft,
             self.n_bands,
             self.n_channels,
@@ -215,8 +226,8 @@ impl GraphicEq {
             for ch in 0..self.n_channels {
                 let gain = self.param[[band, ch]];
                 let (numerator_gain_derivative, denominator_gain_derivative) =
-                    peak_coefficient_gain_derivatives(fc, DEFAULT_Q, self.fs, gain);
-                let mut accum = 0.0;
+                    peak_coefficient_gain_derivatives(fc, fconst::<T>(DEFAULT_Q), self.fs, gain);
+                let mut accum = T::zero();
                 for tap in 0..3 {
                     accum +=
                         self.inner.param_grad[[band, tap, ch, ch]] * numerator_gain_derivative[tap];
@@ -229,8 +240,8 @@ impl GraphicEq {
     }
 }
 
-impl DiffModule<f64> for GraphicEq {
-    fn forward(&self, input: &DiffTensor<f64>) -> Result<DiffTensor<f64>, AutodiffError> {
+impl<T: BasisCache> DiffModule<T> for GraphicEq<T> {
+    fn forward(&self, input: &DiffTensor<T>) -> Result<DiffTensor<T>, AutodiffError> {
         let input_shape = input.data.shape();
         if input_shape.len() < 3 {
             return Err(AutodiffError::Message(format!(
@@ -260,10 +271,10 @@ impl DiffModule<f64> for GraphicEq {
 
     fn backward(
         &mut self,
-        input: &DiffTensor<f64>,
-        output: &DiffTensor<f64>,
-        grad_output: &DiffTensor<f64>,
-    ) -> Result<DiffTensor<f64>, AutodiffError> {
+        input: &DiffTensor<T>,
+        output: &DiffTensor<T>,
+        grad_output: &DiffTensor<T>,
+    ) -> Result<DiffTensor<T>, AutodiffError> {
         let input_shape = input.data.shape();
         let grad_shape = grad_output.data.shape();
         let output_shape = output.data.shape();
@@ -321,20 +332,20 @@ impl DiffModule<f64> for GraphicEq {
         self.nfft / 2 + 1
     }
 
-    fn parameters(&self) -> Vec<&ArrayD<f64>> {
+    fn parameters(&self) -> Vec<&ArrayD<T>> {
         vec![&self.param]
     }
 
-    fn parameters_mut(&mut self) -> Vec<&mut ArrayD<f64>> {
+    fn parameters_mut(&mut self) -> Vec<&mut ArrayD<T>> {
         vec![&mut self.param]
     }
 
-    fn gradients(&self) -> Vec<&ArrayD<f64>> {
+    fn gradients(&self) -> Vec<&ArrayD<T>> {
         vec![&self.param_grad]
     }
 
     fn zero_grad(&mut self) {
-        self.param_grad.fill(0.0);
+        self.param_grad.fill(T::zero());
         self.inner.zero_grad();
     }
 }

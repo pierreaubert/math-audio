@@ -2,56 +2,69 @@
 
 use ndarray::ArrayD;
 use num_complex::Complex;
-use std::{
-    cell::RefCell,
-    collections::hash_map::DefaultHasher,
-    hash::{Hash, Hasher},
-};
+use std::cell::RefCell;
 
 use crate::error::AutodiffError;
-use crate::module::DiffModule;
+use crate::module::{DiffModule, Scalar, fnv1a_init, fnv1a_step};
 use crate::tensor::DiffTensor;
 
-fn tensor_fingerprint(tensor: &DiffTensor<f64>) -> u64 {
-    let mut hasher = DefaultHasher::new();
-    tensor.data.shape().hash(&mut hasher);
-    for value in &tensor.data {
-        value.re.to_bits().hash(&mut hasher);
-        value.im.to_bits().hash(&mut hasher);
+fn tensor_fingerprint<T: Scalar>(tensor: &DiffTensor<T>) -> u64 {
+    let mut hash = fnv1a_init();
+    for &dim in tensor.data.shape() {
+        hash = fnv1a_step(hash, dim as u64);
     }
-    hasher.finish()
+    if let Some(slice) = tensor.data.as_slice() {
+        for value in slice {
+            hash = fnv1a_step(hash, value.re.hash_bits());
+            hash = fnv1a_step(hash, value.im.hash_bits());
+        }
+    } else {
+        for value in &tensor.data {
+            hash = fnv1a_step(hash, value.re.hash_bits());
+            hash = fnv1a_step(hash, value.im.hash_bits());
+        }
+    }
+    hash
 }
 
-fn parameter_fingerprint(modules: &[Box<dyn DiffModule<f64>>]) -> u64 {
-    let mut hasher = DefaultHasher::new();
+fn parameter_fingerprint<T: Scalar + 'static>(modules: &[Box<dyn DiffModule<T>>]) -> u64 {
+    let mut hash = fnv1a_init();
     for module in modules {
         for parameter in module.parameters() {
-            parameter.shape().hash(&mut hasher);
-            for &value in parameter {
-                value.to_bits().hash(&mut hasher);
+            for &dim in parameter.shape() {
+                hash = fnv1a_step(hash, dim as u64);
+            }
+            if let Some(slice) = parameter.as_slice() {
+                for &value in slice {
+                    hash = fnv1a_step(hash, value.hash_bits());
+                }
+            } else {
+                for &value in parameter {
+                    hash = fnv1a_step(hash, value.hash_bits());
+                }
             }
         }
     }
-    hasher.finish()
+    hash
 }
 
-struct SeriesCache {
+struct SeriesCache<T> {
     input_fingerprint: u64,
     output_fingerprint: u64,
     parameter_fingerprint: u64,
-    intermediates: Vec<DiffTensor<f64>>,
+    intermediates: Vec<DiffTensor<T>>,
 }
 
 /// Sequential composition of differentiable modules.
-pub struct Series {
-    modules: Vec<Box<dyn DiffModule<f64>>>,
+pub struct Series<T: 'static = f64> {
+    modules: Vec<Box<dyn DiffModule<T>>>,
     nfft: usize,
     input_channels: usize,
     output_channels: usize,
-    forward_cache: RefCell<Option<SeriesCache>>,
+    forward_cache: RefCell<Option<SeriesCache<T>>>,
 }
 
-impl std::fmt::Debug for Series {
+impl<T> std::fmt::Debug for Series<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Series")
             .field("nfft", &self.nfft)
@@ -62,7 +75,7 @@ impl std::fmt::Debug for Series {
     }
 }
 
-impl Series {
+impl<T: Scalar> Series<T> {
     /// Create a new series from a vector of modules.
     ///
     /// Verifies that all modules share the same number of frequency bins and
@@ -72,7 +85,7 @@ impl Series {
     ///
     /// Returns an error if the module list is empty or if compatibility checks
     /// fail.
-    pub fn new(modules: Vec<Box<dyn DiffModule<f64>>>) -> Result<Self, AutodiffError> {
+    pub fn new(modules: Vec<Box<dyn DiffModule<T>>>) -> Result<Self, AutodiffError> {
         if modules.is_empty() {
             return Err(AutodiffError::Message(
                 "Series: must contain at least one module".to_string(),
@@ -111,13 +124,13 @@ impl Series {
 
     /// Return the contained modules.
     #[must_use]
-    pub fn modules(&self) -> &[Box<dyn DiffModule<f64>>] {
+    pub fn modules(&self) -> &[Box<dyn DiffModule<T>>] {
         &self.modules
     }
 }
 
-impl DiffModule<f64> for Series {
-    fn forward(&self, input: &DiffTensor<f64>) -> Result<DiffTensor<f64>, AutodiffError> {
+impl<T: Scalar> DiffModule<T> for Series<T> {
+    fn forward(&self, input: &DiffTensor<T>) -> Result<DiffTensor<T>, AutodiffError> {
         // The first module reads `input` directly (no initial clone) and each
         // subsequent output is moved into `intermediates` via `mem::replace`,
         // so only the final output shared with the caller needs a clone to
@@ -144,10 +157,10 @@ impl DiffModule<f64> for Series {
 
     fn backward(
         &mut self,
-        input: &DiffTensor<f64>,
-        output: &DiffTensor<f64>,
-        grad_output: &DiffTensor<f64>,
-    ) -> Result<DiffTensor<f64>, AutodiffError> {
+        input: &DiffTensor<T>,
+        output: &DiffTensor<T>,
+        grad_output: &DiffTensor<T>,
+    ) -> Result<DiffTensor<T>, AutodiffError> {
         let current_parameter_fingerprint = parameter_fingerprint(&self.modules);
         let cache = self.forward_cache.borrow_mut().take();
         let intermediates = cache
@@ -201,21 +214,21 @@ impl DiffModule<f64> for Series {
         self.nfft
     }
 
-    fn parameters(&self) -> Vec<&ArrayD<f64>> {
+    fn parameters(&self) -> Vec<&ArrayD<T>> {
         self.modules
             .iter()
             .flat_map(|module| module.parameters())
             .collect()
     }
 
-    fn parameters_mut(&mut self) -> Vec<&mut ArrayD<f64>> {
+    fn parameters_mut(&mut self) -> Vec<&mut ArrayD<T>> {
         self.modules
             .iter_mut()
             .flat_map(|module| module.parameters_mut())
             .collect()
     }
 
-    fn gradients(&self) -> Vec<&ArrayD<f64>> {
+    fn gradients(&self) -> Vec<&ArrayD<T>> {
         self.modules
             .iter()
             .flat_map(|module| module.gradients())
@@ -229,12 +242,12 @@ impl DiffModule<f64> for Series {
     }
 }
 
-struct ParallelCache {
+struct ParallelCache<T> {
     input_fingerprint: u64,
     output_fingerprint: u64,
     parameter_fingerprint: u64,
-    output_a: DiffTensor<f64>,
-    output_b: DiffTensor<f64>,
+    output_a: DiffTensor<T>,
+    output_b: DiffTensor<T>,
 }
 
 /// Parallel composition of two differentiable modules.
@@ -242,16 +255,16 @@ struct ParallelCache {
 /// Both branches receive the same input and their outputs are summed
 /// element-wise. The branches must share the same number of frequency bins,
 /// input channels, and output channels.
-pub struct Parallel {
-    branch_a: Box<dyn DiffModule<f64>>,
-    branch_b: Box<dyn DiffModule<f64>>,
+pub struct Parallel<T: 'static = f64> {
+    branch_a: Box<dyn DiffModule<T>>,
+    branch_b: Box<dyn DiffModule<T>>,
     nfft: usize,
     input_channels: usize,
     output_channels: usize,
-    forward_cache: RefCell<Option<ParallelCache>>,
+    forward_cache: RefCell<Option<ParallelCache<T>>>,
 }
 
-impl std::fmt::Debug for Parallel {
+impl<T> std::fmt::Debug for Parallel<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Parallel")
             .field("nfft", &self.nfft)
@@ -261,23 +274,31 @@ impl std::fmt::Debug for Parallel {
     }
 }
 
-fn parallel_parameter_fingerprint(
-    branch_a: &dyn DiffModule<f64>,
-    branch_b: &dyn DiffModule<f64>,
+fn parallel_parameter_fingerprint<T: Scalar + 'static>(
+    branch_a: &dyn DiffModule<T>,
+    branch_b: &dyn DiffModule<T>,
 ) -> u64 {
-    let mut hasher = DefaultHasher::new();
+    let mut hash = fnv1a_init();
     for branch in [branch_a, branch_b] {
         for parameter in branch.parameters() {
-            parameter.shape().hash(&mut hasher);
-            for &value in parameter {
-                value.to_bits().hash(&mut hasher);
+            for &dim in parameter.shape() {
+                hash = fnv1a_step(hash, dim as u64);
+            }
+            if let Some(slice) = parameter.as_slice() {
+                for &value in slice {
+                    hash = fnv1a_step(hash, value.hash_bits());
+                }
+            } else {
+                for &value in parameter {
+                    hash = fnv1a_step(hash, value.hash_bits());
+                }
             }
         }
     }
-    hasher.finish()
+    hash
 }
 
-impl Parallel {
+impl<T: Scalar> Parallel<T> {
     /// Create a new parallel combiner from two branches.
     ///
     /// # Errors
@@ -285,8 +306,8 @@ impl Parallel {
     /// Returns an error if the branches do not share the same number of bins,
     /// input channels, or output channels.
     pub fn new(
-        branch_a: Box<dyn DiffModule<f64>>,
-        branch_b: Box<dyn DiffModule<f64>>,
+        branch_a: Box<dyn DiffModule<T>>,
+        branch_b: Box<dyn DiffModule<T>>,
     ) -> Result<Self, AutodiffError> {
         if branch_a.n_bins() != branch_b.n_bins() {
             return Err(AutodiffError::Message(format!(
@@ -321,13 +342,13 @@ impl Parallel {
 
     /// Return the contained branches.
     #[must_use]
-    pub fn branches(&self) -> (&dyn DiffModule<f64>, &dyn DiffModule<f64>) {
+    pub fn branches(&self) -> (&dyn DiffModule<T>, &dyn DiffModule<T>) {
         (self.branch_a.as_ref(), self.branch_b.as_ref())
     }
 }
 
-impl DiffModule<f64> for Parallel {
-    fn forward(&self, input: &DiffTensor<f64>) -> Result<DiffTensor<f64>, AutodiffError> {
+impl<T: Scalar> DiffModule<T> for Parallel<T> {
+    fn forward(&self, input: &DiffTensor<T>) -> Result<DiffTensor<T>, AutodiffError> {
         let out_a = self.branch_a.forward(input)?;
         let out_b = self.branch_b.forward(input)?;
         let output = DiffTensor::from_array(&out_a.data + &out_b.data);
@@ -348,10 +369,10 @@ impl DiffModule<f64> for Parallel {
 
     fn backward(
         &mut self,
-        input: &DiffTensor<f64>,
-        output: &DiffTensor<f64>,
-        grad_output: &DiffTensor<f64>,
-    ) -> Result<DiffTensor<f64>, AutodiffError> {
+        input: &DiffTensor<T>,
+        output: &DiffTensor<T>,
+        grad_output: &DiffTensor<T>,
+    ) -> Result<DiffTensor<T>, AutodiffError> {
         let parameter_fingerprint =
             parallel_parameter_fingerprint(self.branch_a.as_ref(), self.branch_b.as_ref());
         let cache = self.forward_cache.borrow_mut().take();
@@ -397,7 +418,7 @@ impl DiffModule<f64> for Parallel {
         self.nfft
     }
 
-    fn parameters(&self) -> Vec<&ArrayD<f64>> {
+    fn parameters(&self) -> Vec<&ArrayD<T>> {
         self.branch_a
             .parameters()
             .into_iter()
@@ -405,7 +426,7 @@ impl DiffModule<f64> for Parallel {
             .collect()
     }
 
-    fn parameters_mut(&mut self) -> Vec<&mut ArrayD<f64>> {
+    fn parameters_mut(&mut self) -> Vec<&mut ArrayD<T>> {
         let mut params_a = self.branch_a.parameters_mut();
         let mut params_b = self.branch_b.parameters_mut();
         let mut params = Vec::with_capacity(params_a.len() + params_b.len());
@@ -414,7 +435,7 @@ impl DiffModule<f64> for Parallel {
         params
     }
 
-    fn gradients(&self) -> Vec<&ArrayD<f64>> {
+    fn gradients(&self) -> Vec<&ArrayD<T>> {
         self.branch_a
             .gradients()
             .into_iter()
@@ -429,16 +450,16 @@ impl DiffModule<f64> for Parallel {
 }
 
 /// Shell composition: input layer, core, and output layer.
-pub struct Shell {
+pub struct Shell<T: 'static = f64> {
     /// Input transformation layer.
-    pub input_layer: Box<dyn DiffModule<f64>>,
+    pub input_layer: Box<dyn DiffModule<T>>,
     /// Differentiable core whose parameters are optimized.
-    pub core: Box<dyn DiffModule<f64>>,
+    pub core: Box<dyn DiffModule<T>>,
     /// Output transformation layer.
-    pub output_layer: Box<dyn DiffModule<f64>>,
+    pub output_layer: Box<dyn DiffModule<T>>,
 }
 
-impl std::fmt::Debug for Shell {
+impl<T> std::fmt::Debug for Shell<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Shell")
             .field("input_layer", &"<dyn DiffModule>")
@@ -448,16 +469,16 @@ impl std::fmt::Debug for Shell {
     }
 }
 
-impl Shell {
+impl<T: Scalar> Shell<T> {
     /// Create a new shell.
     ///
     /// # Errors
     ///
     /// Returns an error if channel or frequency-bin dimensions are incompatible.
     pub fn new(
-        input_layer: Box<dyn DiffModule<f64>>,
-        core: Box<dyn DiffModule<f64>>,
-        output_layer: Box<dyn DiffModule<f64>>,
+        input_layer: Box<dyn DiffModule<T>>,
+        core: Box<dyn DiffModule<T>>,
+        output_layer: Box<dyn DiffModule<T>>,
     ) -> Result<Self, AutodiffError> {
         if input_layer.n_bins() != core.n_bins() {
             return Err(AutodiffError::Message(format!(
@@ -499,7 +520,7 @@ impl Shell {
     /// # Errors
     ///
     /// Returns an error if any sub-module operation fails.
-    pub fn forward(&self, input: &DiffTensor<f64>) -> Result<DiffTensor<f64>, AutodiffError> {
+    pub fn forward(&self, input: &DiffTensor<T>) -> Result<DiffTensor<T>, AutodiffError> {
         let x1 = self.input_layer.forward(input)?;
         let x2 = self.core.forward(&x1)?;
         self.output_layer.forward(&x2)
@@ -515,10 +536,10 @@ impl Shell {
     /// Returns an error if any sub-module operation fails.
     pub fn backward(
         &mut self,
-        input: &DiffTensor<f64>,
-        _output: &DiffTensor<f64>,
-        grad_output: &DiffTensor<f64>,
-    ) -> Result<DiffTensor<f64>, AutodiffError> {
+        input: &DiffTensor<T>,
+        _output: &DiffTensor<T>,
+        grad_output: &DiffTensor<T>,
+    ) -> Result<DiffTensor<T>, AutodiffError> {
         let x1 = self.input_layer.forward(input)?;
         let x2 = self.core.forward(&x1)?;
         let x3 = self.output_layer.forward(&x2)?;
@@ -537,7 +558,7 @@ impl Shell {
 
     /// Return parameter tensors from all parameter-bearing sub-modules.
     #[must_use]
-    pub fn parameters(&self) -> Vec<&ArrayD<f64>> {
+    pub fn parameters(&self) -> Vec<&ArrayD<T>> {
         let mut params = Vec::new();
         params.extend(self.input_layer.parameters());
         params.extend(self.core.parameters());
@@ -547,7 +568,7 @@ impl Shell {
 
     /// Return mutable parameter tensors from all parameter-bearing sub-modules.
     #[must_use]
-    pub fn parameters_mut(&mut self) -> Vec<&mut ArrayD<f64>> {
+    pub fn parameters_mut(&mut self) -> Vec<&mut ArrayD<T>> {
         let mut params = Vec::new();
         params.extend(self.input_layer.parameters_mut());
         params.extend(self.core.parameters_mut());
@@ -557,7 +578,7 @@ impl Shell {
 
     /// Return gradient tensors from all parameter-bearing sub-modules.
     #[must_use]
-    pub fn gradients(&self) -> Vec<&ArrayD<f64>> {
+    pub fn gradients(&self) -> Vec<&ArrayD<T>> {
         let mut grads = Vec::new();
         grads.extend(self.input_layer.gradients());
         grads.extend(self.core.gradients());
@@ -574,7 +595,7 @@ impl Shell {
     /// # Errors
     ///
     /// Returns an error if the core forward pass fails.
-    pub fn get_freq_response(&self) -> Result<DiffTensor<f64>, AutodiffError> {
+    pub fn get_freq_response(&self) -> Result<DiffTensor<T>, AutodiffError> {
         let n_in = self.core.input_channels();
         let n_out = self.core.output_channels();
         let n_bins = self.core.n_bins();
@@ -583,7 +604,7 @@ impl Shell {
         let mut input_data = ArrayD::zeros(ndarray::IxDyn(&[n_in, n_bins, n_in]));
         for in_ch in 0..n_in {
             for f in 0..n_bins {
-                input_data[[in_ch, f, in_ch]] = Complex::new(1.0, 0.0);
+                input_data[[in_ch, f, in_ch]] = Complex::new(T::one(), T::zero());
             }
         }
         let input = DiffTensor::from_array(input_data);

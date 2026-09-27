@@ -12,21 +12,19 @@
 use nalgebra::DMatrix;
 use ndarray::{Array2, Array3, ArrayD, Axis, IxDyn};
 use num_complex::Complex;
-use std::{
-    collections::hash_map::DefaultHasher,
-    hash::{Hash, Hasher},
-    sync::{Arc, Mutex},
-};
+use std::sync::{Arc, Mutex};
 
 use crate::error::AutodiffError;
-use crate::module::{DiffModule, validate_spectral_gradient_shape};
+use crate::module::{
+    DiffModule, Scalar, fconst, fnv1a_init, fnv1a_step, to_f64, validate_spectral_gradient_shape,
+};
 use crate::tensor::DiffTensor;
 
 /// Extract the transfer matrix of a submodule as `(n_bins, n_out, n_in)`.
-fn module_response(
-    module: &dyn DiffModule<f64>,
-    identity: &DiffTensor<f64>,
-) -> Result<Array3<Complex<f64>>, AutodiffError> {
+fn module_response<T: Scalar + 'static>(
+    module: &dyn DiffModule<T>,
+    identity: &DiffTensor<T>,
+) -> Result<Array3<Complex<T>>, AutodiffError> {
     let nb = module.n_bins();
     let identity_shape = identity.data.shape();
     if identity_shape.len() != 3 || identity_shape[1] != nb {
@@ -71,31 +69,43 @@ fn dmatrix_to_ndarray2(mat: &DMatrix<Complex<f64>>) -> Array2<Complex<f64>> {
     out
 }
 
-fn invert_complex_matrix(
-    mat: &Array2<Complex<f64>>,
+fn invert_complex_matrix<T: Scalar>(
+    mat: &Array2<Complex<T>>,
     bin: usize,
-) -> Result<Array2<Complex<f64>>, AutodiffError> {
-    let dm = ndarray2_to_dmatrix(mat);
+) -> Result<Array2<Complex<T>>, AutodiffError> {
+    // The inverse runs in f64 (nalgebra implements ComplexField only for
+    // concrete f32/f64) and is cast once each way.
+    let mat64 = mat
+        .to_owned()
+        .mapv(|c| Complex::new(to_f64(c.re), to_f64(c.im)));
+    let dm = ndarray2_to_dmatrix(&mat64);
     let inv = dm.try_inverse().ok_or_else(|| {
         AutodiffError::Message(format!(
             "Recursion: failed to invert (I - H_fb) at frequency bin {bin}"
         ))
     })?;
-    Ok(dmatrix_to_ndarray2(&inv))
+    let arr64 = dmatrix_to_ndarray2(&inv);
+    Ok(arr64
+        .to_owned()
+        .mapv(|c| Complex::new(fconst::<T>(c.re), fconst::<T>(c.im))))
 }
 
 /// Compute `out = a @ b` into the pre-allocated `out` buffer.
 #[allow(clippy::many_single_char_names)]
-fn matmul_into(a: &Array2<Complex<f64>>, b: &Array2<Complex<f64>>, out: &mut Array2<Complex<f64>>) {
+fn matmul_into<T: Scalar>(
+    a: &Array2<Complex<T>>,
+    b: &Array2<Complex<T>>,
+    out: &mut Array2<Complex<T>>,
+) {
     let (m, k) = (a.nrows(), a.ncols());
     let n = b.ncols();
     assert_eq!(b.nrows(), k, "matmul_into: incompatible inner dimensions");
     assert_eq!(out.dim(), (m, n), "matmul_into: incompatible output shape");
-    out.fill(Complex::new(0.0, 0.0));
+    out.fill(Complex::new(T::zero(), T::zero()));
     for i in 0..m {
         for l in 0..k {
             let a_il = a[[i, l]];
-            if a_il == Complex::new(0.0, 0.0) {
+            if a_il == Complex::new(T::zero(), T::zero()) {
                 continue;
             }
             for j in 0..n {
@@ -106,7 +116,7 @@ fn matmul_into(a: &Array2<Complex<f64>>, b: &Array2<Complex<f64>>, out: &mut Arr
 }
 
 /// Compute the conjugate transpose `out = a^H` into the pre-allocated `out` buffer.
-fn conj_transpose_into(src: &Array2<Complex<f64>>, dst: &mut Array2<Complex<f64>>) {
+fn conj_transpose_into<T: Scalar>(src: &Array2<Complex<T>>, dst: &mut Array2<Complex<T>>) {
     let (m, n) = (src.nrows(), src.ncols());
     assert_eq!(
         dst.dim(),
@@ -121,49 +131,49 @@ fn conj_transpose_into(src: &Array2<Complex<f64>>, dst: &mut Array2<Complex<f64>
 }
 
 /// Fill an `(n, nb, n)` tensor with an identity spectrum.
-fn fill_identity_spectrum(n: usize, nb: usize, tensor: &mut DiffTensor<f64>) {
-    tensor.data.fill(Complex::new(0.0, 0.0));
+fn fill_identity_spectrum<T: Scalar>(n: usize, nb: usize, tensor: &mut DiffTensor<T>) {
+    tensor.data.fill(Complex::new(T::zero(), T::zero()));
     for i in 0..n {
         for f in 0..nb {
-            tensor.data[[i, f, i]] = Complex::new(1.0, 0.0);
+            tensor.data[[i, f, i]] = Complex::new(T::one(), T::zero());
         }
     }
 }
 
-type ClosedLoopResponse = (
-    Array3<Complex<f64>>,
-    Array3<Complex<f64>>,
-    Array3<Complex<f64>>,
-    Array3<Complex<f64>>,
+type ClosedLoopResponse<T> = (
+    Array3<Complex<T>>,
+    Array3<Complex<T>>,
+    Array3<Complex<T>>,
+    Array3<Complex<T>>,
 );
 
 /// Closed-loop MIMO composition `y = (I - H_fb)^-1 @ H_ff @ x`.
-pub struct Recursion {
-    pub feedforward: Box<dyn DiffModule<f64>>,
-    pub feedback: Box<dyn DiffModule<f64>>,
+pub struct Recursion<T: 'static = f64> {
+    pub feedforward: Box<dyn DiffModule<T>>,
+    pub feedback: Box<dyn DiffModule<T>>,
     n_bins: usize,
-    response_cache: Mutex<Option<(u64, Arc<ClosedLoopResponse>)>>,
+    response_cache: Mutex<Option<(u64, Arc<ClosedLoopResponse<T>>)>>,
     // Reusable backward buffers to avoid per-call heap allocations.
-    identity_ff: DiffTensor<f64>,
-    identity_fb: DiffTensor<f64>,
-    h_ff_response: DiffTensor<f64>,
-    h_fb_response: DiffTensor<f64>,
-    grad_ff: DiffTensor<f64>,
-    grad_fb: DiffTensor<f64>,
-    dl_dh_closed: Array3<Complex<f64>>,
-    grad_input: ArrayD<Complex<f64>>,
+    identity_ff: DiffTensor<T>,
+    identity_fb: DiffTensor<T>,
+    h_ff_response: DiffTensor<T>,
+    h_fb_response: DiffTensor<T>,
+    grad_ff: DiffTensor<T>,
+    grad_fb: DiffTensor<T>,
+    dl_dh_closed: Array3<Complex<T>>,
+    grad_input: ArrayD<Complex<T>>,
     // 2-D per-bin work buffers.
-    a_buf: Array2<Complex<f64>>,
-    a_h_buf: Array2<Complex<f64>>,
-    h_ff_f_buf: Array2<Complex<f64>>,
-    h_ff_h_buf: Array2<Complex<f64>>,
-    dl_dh_closed_f_buf: Array2<Complex<f64>>,
-    dl_dh_ff_bin_buf: Array2<Complex<f64>>,
-    work_buf: Array2<Complex<f64>>,
-    work2_buf: Array2<Complex<f64>>,
+    a_buf: Array2<Complex<T>>,
+    a_h_buf: Array2<Complex<T>>,
+    h_ff_f_buf: Array2<Complex<T>>,
+    h_ff_h_buf: Array2<Complex<T>>,
+    dl_dh_closed_f_buf: Array2<Complex<T>>,
+    dl_dh_ff_bin_buf: Array2<Complex<T>>,
+    work_buf: Array2<Complex<T>>,
+    work2_buf: Array2<Complex<T>>,
 }
 
-impl std::fmt::Debug for Recursion {
+impl<T> std::fmt::Debug for Recursion<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Recursion")
             .field("n_bins", &self.n_bins)
@@ -175,7 +185,7 @@ impl std::fmt::Debug for Recursion {
     }
 }
 
-impl Recursion {
+impl<T: Scalar> Recursion<T> {
     /// Create a new closed-loop recursion module.
     ///
     /// # Errors
@@ -183,8 +193,8 @@ impl Recursion {
     /// Returns an error if the feedforward and feedback modules have incompatible
     /// frequency-bin counts or channel dimensions.
     pub fn new(
-        feedforward: Box<dyn DiffModule<f64>>,
-        feedback: Box<dyn DiffModule<f64>>,
+        feedforward: Box<dyn DiffModule<T>>,
+        feedback: Box<dyn DiffModule<T>>,
     ) -> Result<Self, AutodiffError> {
         if feedforward.n_bins() != feedback.n_bins() {
             return Err(AutodiffError::Message(format!(
@@ -245,23 +255,30 @@ impl Recursion {
     }
 
     fn response_fingerprint(&self) -> u64 {
-        let mut hasher = DefaultHasher::new();
-        self.n_bins.hash(&mut hasher);
+        let mut hash = fnv1a_step(fnv1a_init(), self.n_bins as u64);
         for parameter in self
             .feedforward
             .parameters()
             .into_iter()
             .chain(self.feedback.parameters())
         {
-            parameter.shape().hash(&mut hasher);
-            for &value in parameter {
-                value.to_bits().hash(&mut hasher);
+            for &dim in parameter.shape() {
+                hash = fnv1a_step(hash, dim as u64);
+            }
+            if let Some(slice) = parameter.as_slice() {
+                for &value in slice {
+                    hash = fnv1a_step(hash, value.hash_bits());
+                }
+            } else {
+                for &value in parameter {
+                    hash = fnv1a_step(hash, value.hash_bits());
+                }
             }
         }
-        hasher.finish()
+        hash
     }
 
-    fn cached_closed_loop_response(&self) -> Result<Arc<ClosedLoopResponse>, AutodiffError> {
+    fn cached_closed_loop_response(&self) -> Result<Arc<ClosedLoopResponse<T>>, AutodiffError> {
         let fingerprint = self.response_fingerprint();
         {
             let cache = self
@@ -285,7 +302,7 @@ impl Recursion {
     }
 
     #[allow(clippy::type_complexity)]
-    fn closed_loop_response(&self) -> Result<ClosedLoopResponse, AutodiffError> {
+    fn closed_loop_response(&self) -> Result<ClosedLoopResponse<T>, AutodiffError> {
         let n_in = self.feedforward.input_channels();
         let n_out = self.feedforward.output_channels();
         let nb = self.n_bins();
@@ -302,9 +319,9 @@ impl Recursion {
                 for r in 0..n_out {
                     for c in 0..n_out {
                         m[[r, c]] = if r == c {
-                            Complex::new(1.0, 0.0)
+                            Complex::new(T::one(), T::zero())
                         } else {
-                            Complex::new(0.0, 0.0)
+                            Complex::new(T::zero(), T::zero())
                         };
                         m[[r, c]] -= h_fb[[f, r, c]];
                     }
@@ -319,7 +336,7 @@ impl Recursion {
             }
             for o in 0..n_out {
                 for i in 0..n_in {
-                    let mut sum = Complex::new(0.0, 0.0);
+                    let mut sum = Complex::new(T::zero(), T::zero());
                     for k in 0..n_out {
                         sum += a[[o, k]] * h_ff[[f, k, i]];
                     }
@@ -332,8 +349,8 @@ impl Recursion {
     }
 }
 
-impl DiffModule<f64> for Recursion {
-    fn forward(&self, input: &DiffTensor<f64>) -> Result<DiffTensor<f64>, AutodiffError> {
+impl<T: Scalar> DiffModule<T> for Recursion<T> {
+    fn forward(&self, input: &DiffTensor<T>) -> Result<DiffTensor<T>, AutodiffError> {
         let input_shape = input.data.shape();
         if input_shape.len() < 3 {
             return Err(AutodiffError::Message(format!(
@@ -375,7 +392,7 @@ impl DiffModule<f64> for Recursion {
             for batch_index in 0..batch {
                 for f in 0..nb {
                     for output_channel in 0..n_out {
-                        let mut sum = Complex::default();
+                        let mut sum = Complex::new(T::zero(), T::zero());
                         for input_channel in 0..n_in {
                             let input_index = (batch_index * nb + f) * n_in + input_channel;
                             sum += input_data[input_index]
@@ -409,10 +426,10 @@ impl DiffModule<f64> for Recursion {
     #[allow(clippy::too_many_lines)]
     fn backward(
         &mut self,
-        input: &DiffTensor<f64>,
-        _output: &DiffTensor<f64>,
-        grad_output: &DiffTensor<f64>,
-    ) -> Result<DiffTensor<f64>, AutodiffError> {
+        input: &DiffTensor<T>,
+        _output: &DiffTensor<T>,
+        grad_output: &DiffTensor<T>,
+    ) -> Result<DiffTensor<T>, AutodiffError> {
         let input_shape = input.data.shape();
         let grad_shape = grad_output.data.shape();
         let n_out = self.feedforward.output_channels();
@@ -439,15 +456,19 @@ impl DiffModule<f64> for Recursion {
         // Reusable buffers are sized for the module's fixed channel/bin counts.
         // If the input shape differs from the cached buffer, re-allocate.
         if self.grad_input.shape() == input_shape {
-            self.grad_input.fill(Complex::new(0.0, 0.0));
+            self.grad_input.fill(Complex::new(T::zero(), T::zero()));
         } else {
             self.grad_input = ArrayD::zeros(IxDyn(input_shape));
         }
-        self.dl_dh_closed.fill(Complex::new(0.0, 0.0));
-        self.grad_ff.data.fill(Complex::new(0.0, 0.0));
-        self.grad_fb.data.fill(Complex::new(0.0, 0.0));
-        self.h_ff_response.data.fill(Complex::new(0.0, 0.0));
-        self.h_fb_response.data.fill(Complex::new(0.0, 0.0));
+        self.dl_dh_closed.fill(Complex::new(T::zero(), T::zero()));
+        self.grad_ff.data.fill(Complex::new(T::zero(), T::zero()));
+        self.grad_fb.data.fill(Complex::new(T::zero(), T::zero()));
+        self.h_ff_response
+            .data
+            .fill(Complex::new(T::zero(), T::zero()));
+        self.h_fb_response
+            .data
+            .fill(Complex::new(T::zero(), T::zero()));
 
         // dL/dH_closed[f, o, i] = sum_b grad_output[b, f, o] * conj(input[b, f, i])
         if input_shape.len() == 3
@@ -458,7 +479,7 @@ impl DiffModule<f64> for Recursion {
             for f in 0..nb {
                 for o in 0..n_out {
                     for i in 0..n_in {
-                        let mut sum = Complex::default();
+                        let mut sum = Complex::new(T::zero(), T::zero());
                         for batch_index in 0..batch {
                             let grad_index = (batch_index * nb + f) * n_out + o;
                             let input_index = (batch_index * nb + f) * n_in + i;
@@ -480,7 +501,7 @@ impl DiffModule<f64> for Recursion {
                             .iter()
                             .zip(input_bin.iter())
                             .map(|(g, x)| g * x.conj())
-                            .sum::<Complex<f64>>();
+                            .sum::<Complex<T>>();
                     }
                 }
             }
@@ -565,7 +586,7 @@ impl DiffModule<f64> for Recursion {
             for batch_index in 0..batch {
                 for f in 0..nb {
                     for input_channel in 0..n_in {
-                        let mut sum = Complex::default();
+                        let mut sum = Complex::new(T::zero(), T::zero());
                         for output_channel in 0..n_out {
                             let output_index = (batch_index * nb + f) * n_out + output_channel;
                             sum += grad_output_data[output_index]
@@ -608,19 +629,19 @@ impl DiffModule<f64> for Recursion {
     fn n_bins(&self) -> usize {
         self.n_bins()
     }
-    fn parameters(&self) -> Vec<&ArrayD<f64>> {
+    fn parameters(&self) -> Vec<&ArrayD<T>> {
         let mut p = Vec::new();
         p.extend(self.feedforward.parameters());
         p.extend(self.feedback.parameters());
         p
     }
-    fn parameters_mut(&mut self) -> Vec<&mut ArrayD<f64>> {
+    fn parameters_mut(&mut self) -> Vec<&mut ArrayD<T>> {
         let mut p = Vec::new();
         p.extend(self.feedforward.parameters_mut());
         p.extend(self.feedback.parameters_mut());
         p
     }
-    fn gradients(&self) -> Vec<&ArrayD<f64>> {
+    fn gradients(&self) -> Vec<&ArrayD<T>> {
         let mut g = Vec::new();
         g.extend(self.feedforward.gradients());
         g.extend(self.feedback.gradients());

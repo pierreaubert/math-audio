@@ -3,21 +3,24 @@
 use ndarray::ArrayD;
 
 use crate::error::AutodiffError;
+use crate::module::Scalar;
 
 /// Stochastic gradient descent optimizer with a constant learning rate.
 #[derive(Debug, Clone)]
-pub struct Sgd {
+pub struct Sgd<T = f64> {
     /// Learning rate.
-    pub lr: f64,
+    pub lr: T,
 }
 
-impl Sgd {
+impl<T> Sgd<T> {
     /// Create a new SGD optimizer with the given learning rate.
     #[must_use]
-    pub const fn new(lr: f64) -> Self {
+    pub const fn new(lr: T) -> Self {
         Self { lr }
     }
+}
 
+impl<T: Scalar> Sgd<T> {
     /// Apply a single SGD update: `param -= lr * grad`.
     ///
     /// # Errors
@@ -25,8 +28,8 @@ impl Sgd {
     /// Returns an error if the parameter and gradient counts or shapes differ.
     pub fn step(
         &self,
-        params: &mut [&mut ArrayD<f64>],
-        grads: &[&ArrayD<f64>],
+        params: &mut [&mut ArrayD<T>],
+        grads: &[&ArrayD<T>],
     ) -> Result<(), AutodiffError> {
         if params.len() != grads.len() {
             return Err(AutodiffError::Message(format!(

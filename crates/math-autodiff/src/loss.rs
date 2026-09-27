@@ -9,11 +9,12 @@ use math_audio_dsp::psychoacoustics::{BARK_BAND_EDGES, critical_bandwidth};
 use num_complex::Complex;
 
 use crate::error::AutodiffError;
+use crate::module::{Scalar, fconst};
 use crate::tensor::DiffTensor;
 
-fn validate_loss_inputs(
-    pred: &DiffTensor<f64>,
-    target: &DiffTensor<f64>,
+fn validate_loss_inputs<T: Scalar>(
+    pred: &DiffTensor<T>,
+    target: &DiffTensor<T>,
 ) -> Result<(), AutodiffError> {
     if pred.data.shape() != target.data.shape() {
         return Err(AutodiffError::Message(format!(
@@ -37,10 +38,25 @@ fn validate_loss_inputs(
 /// # Errors
 ///
 /// Returns an error if the tensors have different shapes or are empty.
-pub fn mse_loss(pred: &DiffTensor<f64>, target: &DiffTensor<f64>) -> Result<f64, AutodiffError> {
+pub fn mse_loss<T: Scalar>(
+    pred: &DiffTensor<T>,
+    target: &DiffTensor<T>,
+) -> Result<T, AutodiffError> {
     validate_loss_inputs(pred, target)?;
-    let diff = &pred.data - &target.data;
-    Ok(diff.iter().map(Complex::norm_sqr).sum::<f64>() / diff.len() as f64)
+    // Fused single pass: no temporary difference tensor.
+    let sum: T = if let (Some(p), Some(t)) = (pred.data.as_slice(), target.data.as_slice()) {
+        p.iter()
+            .zip(t.iter())
+            .map(|(a, b)| (*a - *b).norm_sqr())
+            .sum()
+    } else {
+        pred.data
+            .iter()
+            .zip(target.data.iter())
+            .map(|(a, b)| (*a - *b).norm_sqr())
+            .sum()
+    };
+    Ok(sum / fconst::<T>(pred.data.len() as f64))
 }
 
 /// Gradient of [`mse_loss`] with respect to `pred`.
@@ -48,13 +64,13 @@ pub fn mse_loss(pred: &DiffTensor<f64>, target: &DiffTensor<f64>) -> Result<f64,
 /// # Errors
 ///
 /// Returns an error if the tensors have different shapes or are empty.
-pub fn mse_loss_backward(
-    pred: &DiffTensor<f64>,
-    target: &DiffTensor<f64>,
-) -> Result<DiffTensor<f64>, AutodiffError> {
+pub fn mse_loss_backward<T: Scalar>(
+    pred: &DiffTensor<T>,
+    target: &DiffTensor<T>,
+) -> Result<DiffTensor<T>, AutodiffError> {
     validate_loss_inputs(pred, target)?;
-    let scale = 2.0 / pred.data.len() as f64;
-    let mut grad = ndarray::ArrayD::<Complex<f64>>::zeros(pred.data.raw_dim());
+    let scale = fconst::<T>(2.0) / fconst::<T>(pred.data.len() as f64);
+    let mut grad = ndarray::ArrayD::<Complex<T>>::zeros(pred.data.raw_dim());
     ndarray::azip!((g in &mut grad, &p in &pred.data, &t in &target.data) {
         *g = (p - t) * scale;
     });
@@ -68,10 +84,10 @@ pub fn mse_loss_backward(
 /// # Errors
 ///
 /// Returns an error if the tensors have different shapes or are empty.
-pub fn magnitude_mse_loss(
-    pred: &DiffTensor<f64>,
-    target: &DiffTensor<f64>,
-) -> Result<f64, AutodiffError> {
+pub fn magnitude_mse_loss<T: Scalar>(
+    pred: &DiffTensor<T>,
+    target: &DiffTensor<T>,
+) -> Result<T, AutodiffError> {
     validate_loss_inputs(pred, target)?;
     Ok(pred
         .data
@@ -81,8 +97,8 @@ pub fn magnitude_mse_loss(
             let diff = p.norm() - t.norm();
             diff * diff
         })
-        .sum::<f64>()
-        / pred.data.len() as f64)
+        .sum::<T>()
+        / fconst::<T>(pred.data.len() as f64))
 }
 
 /// Gradient of [`magnitude_mse_loss`] with respect to `pred`.
@@ -93,19 +109,19 @@ pub fn magnitude_mse_loss(
 /// # Errors
 ///
 /// Returns an error if the tensors have different shapes or are empty.
-pub fn magnitude_mse_loss_backward(
-    pred: &DiffTensor<f64>,
-    target: &DiffTensor<f64>,
-) -> Result<DiffTensor<f64>, AutodiffError> {
+pub fn magnitude_mse_loss_backward<T: Scalar>(
+    pred: &DiffTensor<T>,
+    target: &DiffTensor<T>,
+) -> Result<DiffTensor<T>, AutodiffError> {
     validate_loss_inputs(pred, target)?;
-    let scale = 2.0 / pred.data.len() as f64;
-    let mut grad = ndarray::ArrayD::<Complex<f64>>::zeros(pred.data.raw_dim());
+    let scale = fconst::<T>(2.0) / fconst::<T>(pred.data.len() as f64);
+    let mut grad = ndarray::ArrayD::<Complex<T>>::zeros(pred.data.raw_dim());
     ndarray::azip!((g in &mut grad, p in &pred.data, t in &target.data) {
         let mag = p.norm();
-        *g = if mag > 0.0 {
-            (scale * (mag - t.norm()) / mag) * *p
+        *g = if mag > T::zero() {
+            *p * (scale * (mag - t.norm()) / mag)
         } else {
-            Complex::new(0.0, 0.0)
+            Complex::new(T::zero(), T::zero())
         };
     });
     Ok(DiffTensor::from_array(grad))
@@ -123,9 +139,11 @@ pub const DEFAULT_SPECTRAL_SCALES: &[usize] = &[1, 2, 4, 8];
 /// ([`bark_weights`], [`erb_weights`]) for spectra produced by an `nfft`-point
 /// transform.
 #[must_use]
-pub fn bin_frequencies(n_bins: usize, sample_rate: f64, nfft: usize) -> Vec<f64> {
-    let nfft = nfft.max(1) as f64;
-    (0..n_bins).map(|k| k as f64 * sample_rate / nfft).collect()
+pub fn bin_frequencies<T: Scalar>(n_bins: usize, sample_rate: T, nfft: usize) -> Vec<T> {
+    let nfft = fconst::<T>(nfft.max(1) as f64);
+    (0..n_bins)
+        .map(|k| fconst::<T>(k as f64) * sample_rate / nfft)
+        .collect()
 }
 
 /// Assign a frequency in Hz to one of the 24 Bark bands (0-23).
@@ -135,7 +153,8 @@ pub fn bin_frequencies(n_bins: usize, sample_rate: f64, nfft: usize) -> Vec<f64>
 /// from `math-dsp`, matching its `bark_spectrum` assignment; out-of-range
 /// inputs clamp to the nearest band.
 #[must_use]
-pub fn bark_band_index(f: f64) -> usize {
+pub fn bark_band_index<T: Scalar>(f: T) -> usize {
+    let f = num_traits::NumCast::from(f).unwrap_or(0.0);
     BARK_BAND_EDGES
         .partition_point(|&edge| edge <= f)
         .saturating_sub(1)
@@ -154,14 +173,15 @@ pub fn bark_band_index(f: f64) -> usize {
 /// [`critical_bandwidth`](math_audio_dsp::psychoacoustics::critical_bandwidth)
 /// in `math-dsp`.
 #[must_use]
-pub fn bark_weights(freqs: &[f64]) -> Vec<f64> {
-    let mut weights: Vec<f64> = freqs
+pub fn bark_weights<T: Scalar>(freqs: &[T]) -> Vec<T> {
+    let mut weights: Vec<T> = freqs
         .iter()
         .map(|&f| {
-            if !f.is_finite() || f <= 0.0 {
-                0.0
+            let f64f: f64 = num_traits::NumCast::from(f).unwrap_or(0.0);
+            if !f64f.is_finite() || f64f <= 0.0 {
+                T::zero()
             } else {
-                1.0 / critical_bandwidth(f.max(20.0))
+                T::one() / fconst::<T>(critical_bandwidth(f64f.max(20.0)))
             }
         })
         .collect();
@@ -173,8 +193,8 @@ pub fn bark_weights(freqs: &[f64]) -> Vec<f64> {
 ///
 /// `ERB(f) = 24.7 * (4.37 * f / 1000 + 1)`. `math-dsp` provides no ERB helper,
 /// so the closed form lives here.
-fn erb_hz(f: f64) -> f64 {
-    24.7 * (4.37 * f / 1000.0 + 1.0)
+fn erb_hz<T: Scalar>(f: T) -> T {
+    fconst::<T>(24.7) * (fconst::<T>(4.37) * f / fconst::<T>(1000.0) + T::one())
 }
 
 /// Per-bin perceptual weights inversely proportional to ERB.
@@ -183,14 +203,14 @@ fn erb_hz(f: f64) -> f64 {
 /// to at least 20 Hz, normalized to mean 1, weight 0 for non-finite or
 /// non-positive frequencies.
 #[must_use]
-pub fn erb_weights(freqs: &[f64]) -> Vec<f64> {
-    let mut weights: Vec<f64> = freqs
+pub fn erb_weights<T: Scalar>(freqs: &[T]) -> Vec<T> {
+    let mut weights: Vec<T> = freqs
         .iter()
         .map(|&f| {
-            if !f.is_finite() || f <= 0.0 {
-                0.0
+            if !f.is_finite() || f <= T::zero() {
+                T::zero()
             } else {
-                1.0 / erb_hz(f.max(20.0))
+                T::one() / erb_hz(f.max(fconst::<T>(20.0)))
             }
         })
         .collect();
@@ -198,22 +218,22 @@ pub fn erb_weights(freqs: &[f64]) -> Vec<f64> {
     weights
 }
 
-fn normalize_weights_mean_one(weights: &mut [f64]) {
+fn normalize_weights_mean_one<T: Scalar>(weights: &mut [T]) {
     if weights.is_empty() {
         return;
     }
-    let mean = weights.iter().sum::<f64>() / weights.len() as f64;
-    if mean > 0.0 && mean.is_finite() {
+    let mean = weights.iter().copied().sum::<T>() / fconst::<T>(weights.len() as f64);
+    if mean > T::zero() && mean.is_finite() {
         for w in weights.iter_mut() {
             *w /= mean;
         }
     }
 }
 
-fn validate_loss_weights(
-    pred: &DiffTensor<f64>,
-    target: &DiffTensor<f64>,
-    weights: &[f64],
+fn validate_loss_weights<T: Scalar>(
+    pred: &DiffTensor<T>,
+    target: &DiffTensor<T>,
+    weights: &[T],
 ) -> Result<(), AutodiffError> {
     validate_loss_inputs(pred, target)?;
     if weights.len() != pred.data.len() {
@@ -223,7 +243,7 @@ fn validate_loss_weights(
             pred.data.len()
         )));
     }
-    if weights.iter().any(|w| !w.is_finite() || *w < 0.0) {
+    if weights.iter().any(|w| !w.is_finite() || *w < T::zero()) {
         return Err(AutodiffError::Message(
             "loss: weights must be finite and non-negative".to_string(),
         ));
@@ -240,14 +260,14 @@ fn validate_loss_weights(
 /// Returns an error if the tensors have different shapes, are empty, if
 /// `weights` has the wrong length or contains negative/non-finite values, or
 /// if all weights are zero.
-pub fn weighted_mse_loss(
-    pred: &DiffTensor<f64>,
-    target: &DiffTensor<f64>,
-    weights: &[f64],
-) -> Result<f64, AutodiffError> {
+pub fn weighted_mse_loss<T: Scalar>(
+    pred: &DiffTensor<T>,
+    target: &DiffTensor<T>,
+    weights: &[T],
+) -> Result<T, AutodiffError> {
     validate_loss_weights(pred, target, weights)?;
-    let total: f64 = weights.iter().sum();
-    if total <= 0.0 {
+    let total: T = weights.iter().copied().sum();
+    if total <= T::zero() {
         return Err(AutodiffError::Message(
             "loss: weights must not all be zero".to_string(),
         ));
@@ -258,7 +278,7 @@ pub fn weighted_mse_loss(
         .zip(target.data.iter())
         .zip(weights.iter())
         .map(|((p, t), &w)| w * (p - t).norm_sqr())
-        .sum::<f64>()
+        .sum::<T>()
         / total)
 }
 
@@ -269,31 +289,46 @@ pub fn weighted_mse_loss(
 /// # Errors
 ///
 /// Same conditions as [`weighted_mse_loss`].
-pub fn weighted_mse_loss_backward(
-    pred: &DiffTensor<f64>,
-    target: &DiffTensor<f64>,
-    weights: &[f64],
-) -> Result<DiffTensor<f64>, AutodiffError> {
+pub fn weighted_mse_loss_backward<T: Scalar>(
+    pred: &DiffTensor<T>,
+    target: &DiffTensor<T>,
+    weights: &[T],
+) -> Result<DiffTensor<T>, AutodiffError> {
     validate_loss_weights(pred, target, weights)?;
-    let total: f64 = weights.iter().sum();
-    if total <= 0.0 {
+    let total: T = weights.iter().copied().sum();
+    if total <= T::zero() {
         return Err(AutodiffError::Message(
             "loss: weights must not all be zero".to_string(),
         ));
     }
-    let weights_array = ndarray::ArrayD::from_shape_vec(pred.data.raw_dim(), weights.to_vec())
-        .map_err(|e| AutodiffError::Message(e.to_string()))?;
-    let mut grad = ndarray::ArrayD::<Complex<f64>>::zeros(pred.data.raw_dim());
-    ndarray::azip!((g in &mut grad, p in &pred.data, t in &target.data, &w in &weights_array) {
-        *g = (p - t) * (2.0 * w / total);
-    });
+    let scale = fconst::<T>(2.0) / total;
+    let mut grad = ndarray::ArrayD::<Complex<T>>::zeros(pred.data.raw_dim());
+    // Index weights directly instead of cloning them into a temporary array.
+    if let (Some(g), Some(p), Some(t)) = (
+        grad.as_slice_mut(),
+        pred.data.as_slice(),
+        target.data.as_slice(),
+    ) {
+        for (i, gv) in g.iter_mut().enumerate() {
+            *gv = (p[i] - t[i]) * (scale * weights[i]);
+        }
+    } else {
+        for (i, ((gv, p), t)) in grad
+            .iter_mut()
+            .zip(pred.data.iter())
+            .zip(target.data.iter())
+            .enumerate()
+        {
+            *gv = (*p - *t) * (scale * weights[i]);
+        }
+    }
     Ok(DiffTensor::from_array(grad))
 }
 
-fn validate_loss_freqs(
-    pred: &DiffTensor<f64>,
-    target: &DiffTensor<f64>,
-    freqs: &[f64],
+fn validate_loss_freqs<T: Scalar>(
+    pred: &DiffTensor<T>,
+    target: &DiffTensor<T>,
+    freqs: &[T],
 ) -> Result<(), AutodiffError> {
     validate_loss_inputs(pred, target)?;
     if freqs.len() != pred.data.len() {
@@ -312,11 +347,11 @@ fn validate_loss_freqs(
 ///
 /// Returns an error if the tensors have different shapes, are empty, or if
 /// `freqs` has the wrong length.
-pub fn bark_weighted_loss(
-    pred: &DiffTensor<f64>,
-    target: &DiffTensor<f64>,
-    freqs: &[f64],
-) -> Result<f64, AutodiffError> {
+pub fn bark_weighted_loss<T: Scalar>(
+    pred: &DiffTensor<T>,
+    target: &DiffTensor<T>,
+    freqs: &[T],
+) -> Result<T, AutodiffError> {
     validate_loss_freqs(pred, target, freqs)?;
     weighted_mse_loss(pred, target, &bark_weights(freqs))
 }
@@ -326,11 +361,11 @@ pub fn bark_weighted_loss(
 /// # Errors
 ///
 /// Same conditions as [`bark_weighted_loss`].
-pub fn bark_weighted_loss_backward(
-    pred: &DiffTensor<f64>,
-    target: &DiffTensor<f64>,
-    freqs: &[f64],
-) -> Result<DiffTensor<f64>, AutodiffError> {
+pub fn bark_weighted_loss_backward<T: Scalar>(
+    pred: &DiffTensor<T>,
+    target: &DiffTensor<T>,
+    freqs: &[T],
+) -> Result<DiffTensor<T>, AutodiffError> {
     validate_loss_freqs(pred, target, freqs)?;
     weighted_mse_loss_backward(pred, target, &bark_weights(freqs))
 }
@@ -341,11 +376,11 @@ pub fn bark_weighted_loss_backward(
 ///
 /// Returns an error if the tensors have different shapes, are empty, or if
 /// `freqs` has the wrong length.
-pub fn erb_weighted_loss(
-    pred: &DiffTensor<f64>,
-    target: &DiffTensor<f64>,
-    freqs: &[f64],
-) -> Result<f64, AutodiffError> {
+pub fn erb_weighted_loss<T: Scalar>(
+    pred: &DiffTensor<T>,
+    target: &DiffTensor<T>,
+    freqs: &[T],
+) -> Result<T, AutodiffError> {
     validate_loss_freqs(pred, target, freqs)?;
     weighted_mse_loss(pred, target, &erb_weights(freqs))
 }
@@ -355,11 +390,11 @@ pub fn erb_weighted_loss(
 /// # Errors
 ///
 /// Same conditions as [`erb_weighted_loss`].
-pub fn erb_weighted_loss_backward(
-    pred: &DiffTensor<f64>,
-    target: &DiffTensor<f64>,
-    freqs: &[f64],
-) -> Result<DiffTensor<f64>, AutodiffError> {
+pub fn erb_weighted_loss_backward<T: Scalar>(
+    pred: &DiffTensor<T>,
+    target: &DiffTensor<T>,
+    freqs: &[T],
+) -> Result<DiffTensor<T>, AutodiffError> {
     validate_loss_freqs(pred, target, freqs)?;
     weighted_mse_loss_backward(pred, target, &erb_weights(freqs))
 }
@@ -372,18 +407,18 @@ pub fn erb_weighted_loss_backward(
 ///
 /// Returns an error if the tensors have different shapes, are empty, or if
 /// `eps` is not positive and finite.
-pub fn spectral_convergence_loss(
-    pred: &DiffTensor<f64>,
-    target: &DiffTensor<f64>,
-    eps: f64,
-) -> Result<f64, AutodiffError> {
+pub fn spectral_convergence_loss<T: Scalar>(
+    pred: &DiffTensor<T>,
+    target: &DiffTensor<T>,
+    eps: T,
+) -> Result<T, AutodiffError> {
     validate_loss_inputs(pred, target)?;
-    if !eps.is_finite() || eps <= 0.0 {
+    if !eps.is_finite() || eps <= T::zero() {
         return Err(AutodiffError::Message(
             "loss: eps must be positive and finite".to_string(),
         ));
     }
-    let num_sq: f64 = pred
+    let num_sq: T = pred
         .data
         .iter()
         .zip(target.data.iter())
@@ -392,7 +427,7 @@ pub fn spectral_convergence_loss(
             diff * diff
         })
         .sum();
-    let den_sq: f64 = target.data.iter().map(Complex::norm_sqr).sum();
+    let den_sq: T = target.data.iter().map(Complex::norm_sqr).sum();
     Ok(num_sq.sqrt() / den_sq.sqrt().max(eps))
 }
 
@@ -404,18 +439,18 @@ pub fn spectral_convergence_loss(
 /// # Errors
 ///
 /// Same conditions as [`spectral_convergence_loss`].
-pub fn spectral_convergence_loss_backward(
-    pred: &DiffTensor<f64>,
-    target: &DiffTensor<f64>,
-    eps: f64,
-) -> Result<DiffTensor<f64>, AutodiffError> {
+pub fn spectral_convergence_loss_backward<T: Scalar>(
+    pred: &DiffTensor<T>,
+    target: &DiffTensor<T>,
+    eps: T,
+) -> Result<DiffTensor<T>, AutodiffError> {
     validate_loss_inputs(pred, target)?;
-    if !eps.is_finite() || eps <= 0.0 {
+    if !eps.is_finite() || eps <= T::zero() {
         return Err(AutodiffError::Message(
             "loss: eps must be positive and finite".to_string(),
         ));
     }
-    let num_sq: f64 = pred
+    let num_sq: T = pred
         .data
         .iter()
         .zip(target.data.iter())
@@ -424,17 +459,17 @@ pub fn spectral_convergence_loss_backward(
             diff * diff
         })
         .sum();
-    let den_sq: f64 = target.data.iter().map(Complex::norm_sqr).sum();
+    let den_sq: T = target.data.iter().map(Complex::norm_sqr).sum();
     let num = num_sq.sqrt();
     let den = den_sq.sqrt().max(eps);
-    let mut grad = ndarray::ArrayD::<Complex<f64>>::zeros(pred.data.raw_dim());
-    if num > 0.0 {
+    let mut grad = ndarray::ArrayD::<Complex<T>>::zeros(pred.data.raw_dim());
+    if num > T::zero() {
         ndarray::azip!((g in &mut grad, p in &pred.data, t in &target.data) {
             let mag = p.norm();
-            *g = if mag > 0.0 {
+            *g = if mag > T::zero() {
                 *p * ((mag - t.norm()) / (mag * num * den))
             } else {
-                Complex::new(0.0, 0.0)
+                Complex::new(T::zero(), T::zero())
             };
         });
     }
@@ -449,13 +484,13 @@ pub fn spectral_convergence_loss_backward(
 ///
 /// Returns an error if the tensors have different shapes, are empty, or if
 /// `eps` is not positive and finite.
-pub fn log_magnitude_loss(
-    pred: &DiffTensor<f64>,
-    target: &DiffTensor<f64>,
-    eps: f64,
-) -> Result<f64, AutodiffError> {
+pub fn log_magnitude_loss<T: Scalar>(
+    pred: &DiffTensor<T>,
+    target: &DiffTensor<T>,
+    eps: T,
+) -> Result<T, AutodiffError> {
     validate_loss_inputs(pred, target)?;
-    if !eps.is_finite() || eps <= 0.0 {
+    if !eps.is_finite() || eps <= T::zero() {
         return Err(AutodiffError::Message(
             "loss: eps must be positive and finite".to_string(),
         ));
@@ -468,8 +503,8 @@ pub fn log_magnitude_loss(
             let diff = (p.norm() + eps).ln() - (t.norm() + eps).ln();
             diff * diff
         })
-        .sum::<f64>()
-        / pred.data.len() as f64)
+        .sum::<T>()
+        / fconst::<T>(pred.data.len() as f64))
 }
 
 /// Gradient of [`log_magnitude_loss`] with respect to `pred`.
@@ -479,34 +514,34 @@ pub fn log_magnitude_loss(
 /// # Errors
 ///
 /// Same conditions as [`log_magnitude_loss`].
-pub fn log_magnitude_loss_backward(
-    pred: &DiffTensor<f64>,
-    target: &DiffTensor<f64>,
-    eps: f64,
-) -> Result<DiffTensor<f64>, AutodiffError> {
+pub fn log_magnitude_loss_backward<T: Scalar>(
+    pred: &DiffTensor<T>,
+    target: &DiffTensor<T>,
+    eps: T,
+) -> Result<DiffTensor<T>, AutodiffError> {
     validate_loss_inputs(pred, target)?;
-    if !eps.is_finite() || eps <= 0.0 {
+    if !eps.is_finite() || eps <= T::zero() {
         return Err(AutodiffError::Message(
             "loss: eps must be positive and finite".to_string(),
         ));
     }
-    let scale = 2.0 / pred.data.len() as f64;
-    let mut grad = ndarray::ArrayD::<Complex<f64>>::zeros(pred.data.raw_dim());
+    let scale = fconst::<T>(2.0) / fconst::<T>(pred.data.len() as f64);
+    let mut grad = ndarray::ArrayD::<Complex<T>>::zeros(pred.data.raw_dim());
     ndarray::azip!((g in &mut grad, p in &pred.data, t in &target.data) {
         let mag = p.norm();
-        *g = if mag > 0.0 {
+        *g = if mag > T::zero() {
             let diff = (mag + eps).ln() - (t.norm() + eps).ln();
             *p * (scale * diff / (mag * (mag + eps)))
         } else {
-            Complex::new(0.0, 0.0)
+            Complex::new(T::zero(), T::zero())
         };
     });
     Ok(DiffTensor::from_array(grad))
 }
 
-fn validate_spectral_scales(
-    pred: &DiffTensor<f64>,
-    target: &DiffTensor<f64>,
+fn validate_spectral_scales<T: Scalar>(
+    pred: &DiffTensor<T>,
+    target: &DiffTensor<T>,
     scales: &[usize],
 ) -> Result<(), AutodiffError> {
     validate_loss_inputs(pred, target)?;
@@ -536,34 +571,34 @@ fn validate_spectral_scales(
 ///
 /// Returns an error if the tensors have different shapes, are empty, if
 /// `scales` is empty, or if any scale is zero.
-pub fn multi_scale_spectral_loss(
-    pred: &DiffTensor<f64>,
-    target: &DiffTensor<f64>,
+pub fn multi_scale_spectral_loss<T: Scalar>(
+    pred: &DiffTensor<T>,
+    target: &DiffTensor<T>,
     scales: &[usize],
-) -> Result<f64, AutodiffError> {
+) -> Result<T, AutodiffError> {
     validate_spectral_scales(pred, target, scales)?;
-    let pred_mag: Vec<f64> = pred.data.iter().map(|c| c.norm()).collect();
-    let target_mag: Vec<f64> = target.data.iter().map(|c| c.norm()).collect();
-    let total: f64 = scales
+    let pred_mag: Vec<T> = pred.data.iter().map(|c| c.norm()).collect();
+    let target_mag: Vec<T> = target.data.iter().map(|c| c.norm()).collect();
+    let total: T = scales
         .iter()
         .map(|&s| pooled_magnitude_mse(&pred_mag, &target_mag, s))
         .sum();
-    Ok(total / scales.len() as f64)
+    Ok(total / fconst::<T>(scales.len() as f64))
 }
 
-fn pooled_magnitude_mse(pred_mag: &[f64], target_mag: &[f64], window: usize) -> f64 {
+fn pooled_magnitude_mse<T: Scalar>(pred_mag: &[T], target_mag: &[T], window: usize) -> T {
     let n_pools = pred_mag.len().div_ceil(window);
-    let mut sum = 0.0;
+    let mut sum = T::zero();
     for pool in 0..n_pools {
         let start = pool * window;
         let end = (start + window).min(pred_mag.len());
-        let len = (end - start) as f64;
-        let mean_pred: f64 = pred_mag[start..end].iter().sum::<f64>() / len;
-        let mean_target: f64 = target_mag[start..end].iter().sum::<f64>() / len;
+        let len = fconst::<T>((end - start) as f64);
+        let mean_pred: T = pred_mag[start..end].iter().copied().sum::<T>() / len;
+        let mean_target: T = target_mag[start..end].iter().copied().sum::<T>() / len;
         let diff = mean_pred - mean_target;
         sum += diff * diff;
     }
-    sum / n_pools as f64
+    sum / fconst::<T>(n_pools as f64)
 }
 
 /// Gradient of [`multi_scale_spectral_loss`] with respect to `pred`.
@@ -574,28 +609,29 @@ fn pooled_magnitude_mse(pred_mag: &[f64], target_mag: &[f64], window: usize) -> 
 /// # Errors
 ///
 /// Same conditions as [`multi_scale_spectral_loss`].
-pub fn multi_scale_spectral_loss_backward(
-    pred: &DiffTensor<f64>,
-    target: &DiffTensor<f64>,
+pub fn multi_scale_spectral_loss_backward<T: Scalar>(
+    pred: &DiffTensor<T>,
+    target: &DiffTensor<T>,
     scales: &[usize],
-) -> Result<DiffTensor<f64>, AutodiffError> {
+) -> Result<DiffTensor<T>, AutodiffError> {
     validate_spectral_scales(pred, target, scales)?;
     let n = pred.data.len();
-    let pred_mag: Vec<f64> = pred.data.iter().map(|c| c.norm()).collect();
-    let target_mag: Vec<f64> = target.data.iter().map(|c| c.norm()).collect();
+    let pred_mag: Vec<T> = pred.data.iter().map(|c| c.norm()).collect();
+    let target_mag: Vec<T> = target.data.iter().map(|c| c.norm()).collect();
     // Accumulate per-bin dL/d|pred_i| over scales, then chain through the
     // magnitude with one pass over the tensors.
-    let mut dmag = vec![0.0_f64; n];
-    let n_scales = scales.len() as f64;
+    let mut dmag = vec![T::zero(); n];
+    let n_scales = fconst::<T>(scales.len() as f64);
     for &window in scales {
         let n_pools = n.div_ceil(window);
         for pool in 0..n_pools {
             let start = pool * window;
             let end = (start + window).min(n);
-            let len = (end - start) as f64;
-            let mean_pred: f64 = pred_mag[start..end].iter().sum::<f64>() / len;
-            let mean_target: f64 = target_mag[start..end].iter().sum::<f64>() / len;
-            let coeff = 2.0 * (mean_pred - mean_target) / (n_scales * n_pools as f64 * len);
+            let len = fconst::<T>((end - start) as f64);
+            let mean_pred: T = pred_mag[start..end].iter().copied().sum::<T>() / len;
+            let mean_target: T = target_mag[start..end].iter().copied().sum::<T>() / len;
+            let coeff = fconst::<T>(2.0) * (mean_pred - mean_target)
+                / (n_scales * fconst::<T>(n_pools as f64) * len);
             for slot in &mut dmag[start..end] {
                 *slot += coeff;
             }
@@ -603,10 +639,10 @@ pub fn multi_scale_spectral_loss_backward(
     }
     let dmag_array = ndarray::ArrayD::from_shape_vec(pred.data.raw_dim(), dmag)
         .map_err(|e| AutodiffError::Message(e.to_string()))?;
-    let mut grad = ndarray::ArrayD::<Complex<f64>>::zeros(pred.data.raw_dim());
+    let mut grad = ndarray::ArrayD::<Complex<T>>::zeros(pred.data.raw_dim());
     ndarray::azip!((g in &mut grad, p in &pred.data, &d in &dmag_array) {
         let mag = p.norm();
-        *g = if mag > 0.0 { *p * (d / mag) } else { Complex::new(0.0, 0.0) };
+        *g = if mag > T::zero() { *p * (d / mag) } else { Complex::new(T::zero(), T::zero()) };
     });
     Ok(DiffTensor::from_array(grad))
 }

@@ -16,6 +16,7 @@ use ndarray::Array3;
 use num_complex::Complex;
 use rand::RngExt;
 
+use crate::module::{Scalar, fconst};
 use crate::tensor::DiffTensor;
 
 /// Available signal types for `signal_gallery`.
@@ -58,12 +59,12 @@ pub enum SignalType {
 ///
 /// Panics if dimensions or signal parameters are invalid or non-finite.
 #[must_use]
-pub fn signal_gallery(
+pub fn signal_gallery<T: Scalar>(
     signal_type: SignalType,
     n_samples: usize,
     n_channels: usize,
     fs: f64,
-) -> DiffTensor<f64> {
+) -> DiffTensor<T> {
     assert!(
         n_samples > 0,
         "signal_gallery: n_samples must be greater than 0"
@@ -77,12 +78,12 @@ pub fn signal_gallery(
         "signal_gallery: fs must be positive and finite"
     );
 
-    let mut data = Array3::<Complex<f64>>::zeros((1, n_samples, n_channels));
+    let mut data = Array3::<Complex<T>>::zeros((1, n_samples, n_channels));
 
     match signal_type {
         SignalType::Impulse => {
             for ch in 0..n_channels {
-                data[[0, 0, ch]] = Complex::new(1.0, 0.0);
+                data[[0, 0, ch]] = Complex::new(T::one(), T::zero());
             }
         }
         SignalType::Sine { freq_hz } => {
@@ -92,7 +93,7 @@ pub fn signal_gallery(
             );
             let omega = 2.0 * PI * freq_hz / fs;
             for n in 0..n_samples {
-                let sample = Complex::new((omega * n as f64).sin(), 0.0);
+                let sample = Complex::new(fconst::<T>((omega * n as f64).sin()), T::zero());
                 for ch in 0..n_channels {
                     data[[0, n, ch]] = sample;
                 }
@@ -108,7 +109,7 @@ pub fn signal_gallery(
                 let t = n as f64 / fs;
                 // Linear chirp phase: phi(t) = 2*pi*(f0*t + (f1-f0)*t^2/(2*T))
                 let phase = 2.0 * PI * (f0_hz * t + (f1_hz - f0_hz) * t * t / (2.0 * duration));
-                let sample = Complex::new(phase.sin(), 0.0);
+                let sample = Complex::new(fconst::<T>(phase.sin()), T::zero());
                 for ch in 0..n_channels {
                     data[[0, n, ch]] = sample;
                 }
@@ -118,7 +119,8 @@ pub fn signal_gallery(
             let mut rng = rand::rng();
             for n in 0..n_samples {
                 for ch in 0..n_channels {
-                    data[[0, n, ch]] = Complex::new(rng.random::<f64>() * 2.0 - 1.0, 0.0);
+                    data[[0, n, ch]] =
+                        Complex::new(fconst::<T>(rng.random::<f64>() * 2.0 - 1.0), T::zero());
                 }
             }
         }
@@ -128,7 +130,7 @@ pub fn signal_gallery(
                 "signal_gallery: decay rate must be non-negative and finite"
             );
             for n in 0..n_samples {
-                let sample = Complex::new((-rate * n as f64 / fs).exp(), 0.0);
+                let sample = Complex::new(fconst::<T>((-rate * n as f64 / fs).exp()), T::zero());
                 for ch in 0..n_channels {
                     data[[0, n, ch]] = sample;
                 }
@@ -157,7 +159,7 @@ pub fn signal_gallery(
                     }
                     idx = idx.min(n_samples - 1);
                     let sign = if rng.random::<bool>() { 1.0 } else { -1.0 };
-                    data[[0, idx, ch]] = Complex::new(sign, 0.0);
+                    data[[0, idx, ch]] = Complex::new(fconst::<T>(sign), T::zero());
                 }
             }
         }

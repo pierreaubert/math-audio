@@ -10,18 +10,13 @@ use std::{
     cell::RefCell,
     collections::HashMap,
     fmt,
+    marker::PhantomData,
     sync::{Arc, Mutex, OnceLock},
 };
 
 use crate::error::AutodiffError;
-use crate::module::DiffModule;
+use crate::module::{DiffModule, Scalar, fconst};
 use crate::tensor::DiffTensor;
-
-/// Convert an FFT size to `f64` for arithmetic.
-#[inline]
-const fn nfft_as_f64(nfft: usize) -> f64 {
-    nfft as f64
-}
 
 const fn validate_fft_config(nfft: usize, channels: usize) {
     assert!(nfft > 0, "FFT: nfft must be greater than 0");
@@ -37,22 +32,22 @@ const fn is_packed_endpoint(nfft: usize, bin: usize) -> bool {
 /// Weight a packed real-FFT bin before applying the unnormalised inverse FFT
 /// to compute the adjoint of an unnormalised forward FFT.
 #[inline]
-const fn rfft_adjoint_weight(nfft: usize, bin: usize) -> f64 {
+fn rfft_adjoint_weight<T: Scalar>(nfft: usize, bin: usize) -> T {
     if is_packed_endpoint(nfft, bin) {
-        1.0
+        T::one()
     } else {
-        0.5
+        fconst::<T>(0.5)
     }
 }
 
 /// Weight an unnormalised forward-FFT bin to compute the adjoint of the
 /// normalised inverse real FFT.
 #[inline]
-fn irfft_adjoint_weight(nfft: usize, bin: usize) -> f64 {
+fn irfft_adjoint_weight<T: Scalar>(nfft: usize, bin: usize) -> T {
     if is_packed_endpoint(nfft, bin) {
-        1.0 / nfft_as_f64(nfft)
+        T::one() / fconst::<T>(nfft as f64)
     } else {
-        2.0 / nfft_as_f64(nfft)
+        fconst::<T>(2.0) / fconst::<T>(nfft as f64)
     }
 }
 
@@ -88,28 +83,154 @@ fn output_shape_for(input_shape: &[usize], n_bins: usize) -> Vec<usize> {
     output_shape
 }
 
+/// Shared realfft plans. Public only to name the `FftScalar` return type.
+#[doc(hidden)]
 #[derive(Clone)]
-struct FftPlans {
-    forward: Arc<dyn RealToComplex<f64>>,
-    inverse: Arc<dyn ComplexToReal<f64>>,
+pub struct FftPlans<T: realfft::FftNum> {
+    forward: Arc<dyn RealToComplex<T>>,
+    inverse: Arc<dyn ComplexToReal<T>>,
 }
 
-static FFT_PLAN_CACHE: OnceLock<Mutex<HashMap<usize, Arc<FftPlans>>>> = OnceLock::new();
-
-fn shared_plans(nfft: usize) -> Arc<FftPlans> {
-    let cache = FFT_PLAN_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
-    let mut cache = cache
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    cache
-        .entry(nfft)
-        .or_insert_with(|| Arc::new(FftPlans::new(nfft)))
-        .clone()
+/// Scalar bound for FFT modules: differentiable scalar plus realfft support,
+/// per-type plan/buffer caches, and copy kernels. Implemented for `f32`/`f64`.
+pub trait FftScalar: Scalar + realfft::FftNum {
+    /// Fetch shared FFT plans for `nfft`, building them once.
+    fn shared_plans(nfft: usize) -> Arc<FftPlans<Self>>;
+    /// Run `operation` with reusable real/complex/scratch buffers for `nfft`.
+    fn with_fft_buffers<R>(
+        nfft: usize,
+        scratch_len: usize,
+        operation: impl FnOnce(&mut [Self], &mut [Complex<Self>], &mut [Complex<Self>]) -> R,
+    ) -> R;
+    /// Copy the real parts of `source` into `destination`.
+    fn copy_real_parts(source: &[Complex<Self>], destination: &mut [Self]);
+    /// Store `source` as complex values scaled by `scale`.
+    fn store_real_as_complex(source: &[Self], destination: &mut [Complex<Self>], scale: Self);
 }
 
-impl FftPlans {
+static FFT_PLAN_CACHE_F32: OnceLock<Mutex<HashMap<usize, Arc<FftPlans<f32>>>>> = OnceLock::new();
+static FFT_PLAN_CACHE_F64: OnceLock<Mutex<HashMap<usize, Arc<FftPlans<f64>>>>> = OnceLock::new();
+
+thread_local! {
+    static FFT_BUFFER_CACHE_F32: RefCell<HashMap<usize, FftBuffers<f32>>> =
+        RefCell::new(HashMap::new());
+    static FFT_BUFFER_CACHE_F64: RefCell<HashMap<usize, FftBuffers<f64>>> =
+        RefCell::new(HashMap::new());
+}
+
+impl FftScalar for f32 {
+    fn shared_plans(nfft: usize) -> Arc<FftPlans<Self>> {
+        let cache = FFT_PLAN_CACHE_F32.get_or_init(|| Mutex::new(HashMap::new()));
+        let mut cache = cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        cache
+            .entry(nfft)
+            .or_insert_with(|| Arc::new(FftPlans::new(nfft)))
+            .clone()
+    }
+
+    fn with_fft_buffers<R>(
+        nfft: usize,
+        scratch_len: usize,
+        operation: impl FnOnce(&mut [Self], &mut [Complex<Self>], &mut [Complex<Self>]) -> R,
+    ) -> R {
+        FFT_BUFFER_CACHE_F32.with(|cache| {
+            let mut cache = cache.borrow_mut();
+            let buffers = cache.entry(nfft).or_insert_with(|| FftBuffers::new(nfft));
+            if buffers.scratch.len() < scratch_len {
+                buffers.scratch.resize(scratch_len, Complex::new(0.0, 0.0));
+            }
+            operation(
+                &mut buffers.real,
+                &mut buffers.complex,
+                &mut buffers.scratch[..scratch_len],
+            )
+        })
+    }
+
+    fn copy_real_parts(source: &[Complex<Self>], destination: &mut [Self]) {
+        debug_assert_eq!(source.len(), destination.len());
+        for (output, input) in destination.iter_mut().zip(source) {
+            *output = input.re;
+        }
+    }
+
+    fn store_real_as_complex(source: &[Self], destination: &mut [Complex<Self>], scale: Self) {
+        debug_assert_eq!(source.len(), destination.len());
+        for (output, &input) in destination.iter_mut().zip(source) {
+            *output = Complex::new(input * scale, 0.0);
+        }
+    }
+}
+
+impl FftScalar for f64 {
+    fn shared_plans(nfft: usize) -> Arc<FftPlans<Self>> {
+        let cache = FFT_PLAN_CACHE_F64.get_or_init(|| Mutex::new(HashMap::new()));
+        let mut cache = cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        cache
+            .entry(nfft)
+            .or_insert_with(|| Arc::new(FftPlans::new(nfft)))
+            .clone()
+    }
+
+    fn with_fft_buffers<R>(
+        nfft: usize,
+        scratch_len: usize,
+        operation: impl FnOnce(&mut [Self], &mut [Complex<Self>], &mut [Complex<Self>]) -> R,
+    ) -> R {
+        FFT_BUFFER_CACHE_F64.with(|cache| {
+            let mut cache = cache.borrow_mut();
+            let buffers = cache.entry(nfft).or_insert_with(|| FftBuffers::new(nfft));
+            if buffers.scratch.len() < scratch_len {
+                buffers.scratch.resize(scratch_len, Complex::new(0.0, 0.0));
+            }
+            operation(
+                &mut buffers.real,
+                &mut buffers.complex,
+                &mut buffers.scratch[..scratch_len],
+            )
+        })
+    }
+
+    fn copy_real_parts(source: &[Complex<Self>], destination: &mut [Self]) {
+        debug_assert_eq!(source.len(), destination.len());
+
+        #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
+        {
+            // SAFETY: both slices have equal length. The kernel processes pairs
+            // within bounds and handles the possible final element scalarly.
+            unsafe { copy_real_parts_neon(source, destination) };
+        }
+
+        #[cfg(not(all(target_arch = "aarch64", target_feature = "neon")))]
+        for (output, input) in destination.iter_mut().zip(source) {
+            *output = input.re;
+        }
+    }
+
+    fn store_real_as_complex(source: &[Self], destination: &mut [Complex<Self>], scale: Self) {
+        debug_assert_eq!(source.len(), destination.len());
+
+        #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
+        {
+            // SAFETY: both slices have equal length. The kernel processes pairs
+            // within bounds and handles the possible final element scalarly.
+            unsafe { store_real_as_complex_neon(source, destination, scale) };
+        }
+
+        #[cfg(not(all(target_arch = "aarch64", target_feature = "neon")))]
+        for (output, &input) in destination.iter_mut().zip(source) {
+            *output = Complex::new(input * scale, 0.0);
+        }
+    }
+}
+
+impl<T: realfft::FftNum> FftPlans<T> {
     fn new(nfft: usize) -> Self {
-        let mut planner = RealFftPlanner::<f64>::new();
+        let mut planner = RealFftPlanner::<T>::new();
         Self {
             forward: planner.plan_fft_forward(nfft),
             inverse: planner.plan_fft_inverse(nfft),
@@ -117,70 +238,31 @@ impl FftPlans {
     }
 }
 
-impl fmt::Debug for FftPlans {
+impl<T: realfft::FftNum> fmt::Debug for FftPlans<T> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("FftPlans")
     }
 }
 
-struct FftBuffers {
-    real: Vec<f64>,
-    complex: Vec<Complex<f64>>,
-    scratch: Vec<Complex<f64>>,
+struct FftBuffers<T> {
+    real: Vec<T>,
+    complex: Vec<Complex<T>>,
+    scratch: Vec<Complex<T>>,
 }
 
-impl FftBuffers {
+impl<T: Scalar> FftBuffers<T> {
     fn new(nfft: usize) -> Self {
         Self {
-            real: vec![0.0; nfft],
-            complex: vec![Complex::default(); nfft / 2 + 1],
+            real: vec![T::zero(); nfft],
+            complex: vec![Complex::new(T::zero(), T::zero()); nfft / 2 + 1],
             scratch: Vec::new(),
         }
     }
 }
 
-thread_local! {
-    static FFT_BUFFER_CACHE: RefCell<HashMap<usize, FftBuffers>> = RefCell::new(HashMap::new());
-}
-
-fn with_fft_buffers<R>(
-    nfft: usize,
-    scratch_len: usize,
-    operation: impl FnOnce(&mut [f64], &mut [Complex<f64>], &mut [Complex<f64>]) -> R,
-) -> R {
-    FFT_BUFFER_CACHE.with(|cache| {
-        let mut cache = cache.borrow_mut();
-        let buffers = cache.entry(nfft).or_insert_with(|| FftBuffers::new(nfft));
-        if buffers.scratch.len() < scratch_len {
-            buffers.scratch.resize(scratch_len, Complex::default());
-        }
-        operation(
-            &mut buffers.real,
-            &mut buffers.complex,
-            &mut buffers.scratch[..scratch_len],
-        )
-    })
-}
-
-fn copy_real_parts(source: &[Complex<f64>], destination: &mut [f64]) {
-    debug_assert_eq!(source.len(), destination.len());
-
-    #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
-    {
-        // SAFETY: both slices have equal length. The kernel processes pairs
-        // within bounds and handles the possible final element scalarly.
-        unsafe { copy_real_parts_neon(source, destination) };
-    }
-
-    #[cfg(not(all(target_arch = "aarch64", target_feature = "neon")))]
-    for (output, input) in destination.iter_mut().zip(source) {
-        *output = input.re;
-    }
-}
-
 #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
 #[target_feature(enable = "neon")]
-unsafe fn copy_real_parts_neon(source: &[Complex<f64>], destination: &mut [f64]) {
+unsafe fn copy_real_parts_neon(source: &[Complex<T>], destination: &mut [T]) {
     use std::arch::aarch64::{vld2q_f64, vst1q_f64};
 
     let mut index = 0;
@@ -198,25 +280,9 @@ unsafe fn copy_real_parts_neon(source: &[Complex<f64>], destination: &mut [f64])
     }
 }
 
-fn store_real_as_complex(source: &[f64], destination: &mut [Complex<f64>], scale: f64) {
-    debug_assert_eq!(source.len(), destination.len());
-
-    #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
-    {
-        // SAFETY: both slices have equal length. The kernel processes pairs
-        // within bounds and handles the possible final element scalarly.
-        unsafe { store_real_as_complex_neon(source, destination, scale) };
-    }
-
-    #[cfg(not(all(target_arch = "aarch64", target_feature = "neon")))]
-    for (output, &input) in destination.iter_mut().zip(source) {
-        *output = Complex::new(input * scale, 0.0);
-    }
-}
-
 #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
 #[target_feature(enable = "neon")]
-unsafe fn store_real_as_complex_neon(source: &[f64], destination: &mut [Complex<f64>], scale: f64) {
+unsafe fn store_real_as_complex_neon(source: &[T], destination: &mut [Complex<T>], scale: T) {
     use std::arch::aarch64::{float64x2x2_t, vdupq_n_f64, vld1q_f64, vmulq_n_f64, vst2q_f64};
 
     let zero = vdupq_n_f64(0.0);
@@ -245,13 +311,13 @@ unsafe fn store_real_as_complex_neon(source: &[f64], destination: &mut [Complex<
 /// channel. Only the real component of each time-domain sample is transformed;
 /// the imaginary component is intentionally ignored.
 #[derive(Debug, Clone)]
-pub struct Fft {
+pub struct Fft<T = f64> {
     pub nfft: usize,
     pub channels: usize,
-    plans: OnceLock<Arc<FftPlans>>,
+    _marker: PhantomData<T>,
 }
 
-impl Fft {
+impl<T> Fft<T> {
     /// Create a new single-channel FFT module.
     #[must_use]
     pub const fn new(nfft: usize) -> Self {
@@ -259,7 +325,7 @@ impl Fft {
         Self {
             nfft,
             channels: 1,
-            plans: OnceLock::new(),
+            _marker: PhantomData,
         }
     }
 
@@ -270,21 +336,17 @@ impl Fft {
         Self {
             nfft,
             channels,
-            plans: OnceLock::new(),
+            _marker: PhantomData,
         }
     }
 
     const fn n_bins(&self) -> usize {
         self.nfft / 2 + 1
     }
-
-    fn plans(&self) -> &FftPlans {
-        self.plans.get_or_init(|| shared_plans(self.nfft)).as_ref()
-    }
 }
 
-impl DiffModule<f64> for Fft {
-    fn forward(&self, input: &DiffTensor<f64>) -> Result<DiffTensor<f64>, AutodiffError> {
+impl<T: FftScalar> DiffModule<T> for Fft<T> {
+    fn forward(&self, input: &DiffTensor<T>) -> Result<DiffTensor<T>, AutodiffError> {
         let input_shape = input.data.shape();
         let (batch, time, channels) = shape_to_batch_time_channels(input_shape)?;
         if time != self.nfft {
@@ -300,7 +362,8 @@ impl DiffModule<f64> for Fft {
             )));
         }
 
-        let r2c = &self.plans().forward;
+        let plans = T::shared_plans(self.nfft);
+        let r2c = &plans.forward;
 
         let input_3d = input
             .data
@@ -311,14 +374,14 @@ impl DiffModule<f64> for Fft {
 
         for b in 0..batch {
             for c in 0..channels {
-                with_fft_buffers(
+                T::with_fft_buffers(
                     self.nfft,
                     r2c.get_scratch_len(),
                     |input_vec, spectrum, scratch| {
                         if channels == 1 {
                             let start = b * self.nfft;
                             if let Some(source) = input_3d.as_slice() {
-                                copy_real_parts(&source[start..start + self.nfft], input_vec);
+                                T::copy_real_parts(&source[start..start + self.nfft], input_vec);
                             } else {
                                 for t in 0..self.nfft {
                                     input_vec[t] = input_3d[[b, t, 0]].re;
@@ -357,10 +420,10 @@ impl DiffModule<f64> for Fft {
 
     fn backward(
         &mut self,
-        _input: &DiffTensor<f64>,
-        _output: &DiffTensor<f64>,
-        grad_output: &DiffTensor<f64>,
-    ) -> Result<DiffTensor<f64>, AutodiffError> {
+        _input: &DiffTensor<T>,
+        _output: &DiffTensor<T>,
+        grad_output: &DiffTensor<T>,
+    ) -> Result<DiffTensor<T>, AutodiffError> {
         let grad_shape = grad_output.data.shape();
         let (batch, n_bins, channels) = shape_to_batch_time_channels(grad_shape)?;
         if n_bins != self.n_bins() {
@@ -377,7 +440,8 @@ impl DiffModule<f64> for Fft {
             )));
         }
 
-        let c2r = &self.plans().inverse;
+        let plans = T::shared_plans(self.nfft);
+        let c2r = &plans.inverse;
 
         let grad_3d = grad_output
             .data
@@ -388,7 +452,7 @@ impl DiffModule<f64> for Fft {
 
         for b in 0..batch {
             for c in 0..channels {
-                with_fft_buffers(
+                T::with_fft_buffers(
                     self.nfft,
                     c2r.get_scratch_len(),
                     |grad_time, grad_vec, scratch| {
@@ -398,9 +462,9 @@ impl DiffModule<f64> for Fft {
                             let start = b * self.n_bins();
                             for bin in 0..self.n_bins() {
                                 let sample = data[start + bin];
-                                let weight = rfft_adjoint_weight(self.nfft, bin);
+                                let weight: T = rfft_adjoint_weight(self.nfft, bin);
                                 grad_vec[bin] = if is_packed_endpoint(self.nfft, bin) {
-                                    Complex::new(sample.re, 0.0)
+                                    Complex::new(sample.re, T::zero())
                                 } else {
                                     sample * weight
                                 };
@@ -408,9 +472,9 @@ impl DiffModule<f64> for Fft {
                         } else {
                             for bin in 0..self.n_bins() {
                                 let sample = grad_3d[[b, bin, c]];
-                                let weight = rfft_adjoint_weight(self.nfft, bin);
+                                let weight: T = rfft_adjoint_weight(self.nfft, bin);
                                 grad_vec[bin] = if is_packed_endpoint(self.nfft, bin) {
-                                    Complex::new(sample.re, 0.0)
+                                    Complex::new(sample.re, T::zero())
                                 } else {
                                     sample * weight
                                 };
@@ -423,10 +487,10 @@ impl DiffModule<f64> for Fft {
                                 .as_slice_mut()
                                 .expect("FFT gradient allocation must be contiguous")
                                 [start..start + self.nfft];
-                            store_real_as_complex(grad_time, destination, 1.0);
+                            T::store_real_as_complex(grad_time, destination, T::one());
                         } else {
                             for t in 0..self.nfft {
-                                grad_input[[b, t, c]] = Complex::new(grad_time[t], 0.0);
+                                grad_input[[b, t, c]] = Complex::new(grad_time[t], T::zero());
                             }
                         }
                         Ok::<(), AutodiffError>(())
@@ -456,15 +520,15 @@ impl DiffModule<f64> for Fft {
         self.n_bins()
     }
 
-    fn parameters(&self) -> Vec<&ArrayD<f64>> {
+    fn parameters(&self) -> Vec<&ArrayD<T>> {
         vec![]
     }
 
-    fn parameters_mut(&mut self) -> Vec<&mut ArrayD<f64>> {
+    fn parameters_mut(&mut self) -> Vec<&mut ArrayD<T>> {
         vec![]
     }
 
-    fn gradients(&self) -> Vec<&ArrayD<f64>> {
+    fn gradients(&self) -> Vec<&ArrayD<T>> {
         vec![]
     }
 
@@ -477,13 +541,13 @@ impl DiffModule<f64> for Fft {
 /// last axis is the channel dimension. Rank-1 input is treated as a single
 /// channel.
 #[derive(Debug, Clone)]
-pub struct Ifft {
+pub struct Ifft<T = f64> {
     pub nfft: usize,
     pub channels: usize,
-    plans: OnceLock<Arc<FftPlans>>,
+    _marker: PhantomData<T>,
 }
 
-impl Ifft {
+impl<T> Ifft<T> {
     /// Create a new single-channel inverse FFT module.
     #[must_use]
     pub const fn new(nfft: usize) -> Self {
@@ -491,7 +555,7 @@ impl Ifft {
         Self {
             nfft,
             channels: 1,
-            plans: OnceLock::new(),
+            _marker: PhantomData,
         }
     }
 
@@ -502,21 +566,17 @@ impl Ifft {
         Self {
             nfft,
             channels,
-            plans: OnceLock::new(),
+            _marker: PhantomData,
         }
     }
 
     const fn n_bins(&self) -> usize {
         self.nfft / 2 + 1
     }
-
-    fn plans(&self) -> &FftPlans {
-        self.plans.get_or_init(|| shared_plans(self.nfft)).as_ref()
-    }
 }
 
-impl DiffModule<f64> for Ifft {
-    fn forward(&self, input: &DiffTensor<f64>) -> Result<DiffTensor<f64>, AutodiffError> {
+impl<T: FftScalar> DiffModule<T> for Ifft<T> {
+    fn forward(&self, input: &DiffTensor<T>) -> Result<DiffTensor<T>, AutodiffError> {
         let input_shape = input.data.shape();
         let (batch, n_bins, channels) = shape_to_batch_time_channels(input_shape)?;
         if n_bins != self.n_bins() {
@@ -533,7 +593,8 @@ impl DiffModule<f64> for Ifft {
             )));
         }
 
-        let c2r = &self.plans().inverse;
+        let plans = T::shared_plans(self.nfft);
+        let c2r = &plans.inverse;
 
         let input_3d = input
             .data
@@ -541,11 +602,11 @@ impl DiffModule<f64> for Ifft {
             .into_shape_with_order((batch, n_bins, channels))
             .map_err(|e| AutodiffError::Message(format!("Ifft: failed to reshape input: {e}")))?;
         let mut output = ArrayD::zeros(IxDyn(&[batch, self.nfft, channels]));
-        let scale = nfft_as_f64(self.nfft);
+        let scale = fconst::<T>(self.nfft as f64);
 
         for b in 0..batch {
             for c in 0..channels {
-                with_fft_buffers(
+                T::with_fft_buffers(
                     self.nfft,
                     c2r.get_scratch_len(),
                     |time, input_vec, scratch| {
@@ -570,10 +631,10 @@ impl DiffModule<f64> for Ifft {
                                 .as_slice_mut()
                                 .expect("IFFT output allocation must be contiguous")
                                 [start..start + self.nfft];
-                            store_real_as_complex(time, destination, scale.recip());
+                            T::store_real_as_complex(time, destination, scale.recip());
                         } else {
                             for t in 0..self.nfft {
-                                output[[b, t, c]] = Complex::new(time[t] / scale, 0.0);
+                                output[[b, t, c]] = Complex::new(time[t] / scale, T::zero());
                             }
                         }
                         Ok::<(), AutodiffError>(())
@@ -591,10 +652,10 @@ impl DiffModule<f64> for Ifft {
 
     fn backward(
         &mut self,
-        _input: &DiffTensor<f64>,
-        _output: &DiffTensor<f64>,
-        grad_output: &DiffTensor<f64>,
-    ) -> Result<DiffTensor<f64>, AutodiffError> {
+        _input: &DiffTensor<T>,
+        _output: &DiffTensor<T>,
+        grad_output: &DiffTensor<T>,
+    ) -> Result<DiffTensor<T>, AutodiffError> {
         let grad_shape = grad_output.data.shape();
         let (batch, time, channels) = shape_to_batch_time_channels(grad_shape)?;
         if time != self.nfft {
@@ -610,7 +671,8 @@ impl DiffModule<f64> for Ifft {
             )));
         }
 
-        let r2c = &self.plans().forward;
+        let plans = T::shared_plans(self.nfft);
+        let r2c = &plans.forward;
 
         let grad_3d = grad_output
             .data
@@ -621,7 +683,7 @@ impl DiffModule<f64> for Ifft {
 
         for b in 0..batch {
             for c in 0..channels {
-                with_fft_buffers(
+                T::with_fft_buffers(
                     self.nfft,
                     r2c.get_scratch_len(),
                     |grad_vec, spectrum, scratch| {
@@ -639,9 +701,9 @@ impl DiffModule<f64> for Ifft {
                         }
                         r2c.process_with_scratch(grad_vec, spectrum, scratch)?;
                         for (bin, sample) in spectrum.iter().enumerate() {
-                            let weight = irfft_adjoint_weight(self.nfft, bin);
+                            let weight: T = irfft_adjoint_weight(self.nfft, bin);
                             grad_input[[b, bin, c]] = if is_packed_endpoint(self.nfft, bin) {
-                                Complex::new(sample.re * weight, 0.0)
+                                Complex::new(sample.re * weight, T::zero())
                             } else {
                                 *sample * weight
                             };
@@ -673,15 +735,15 @@ impl DiffModule<f64> for Ifft {
         self.n_bins()
     }
 
-    fn parameters(&self) -> Vec<&ArrayD<f64>> {
+    fn parameters(&self) -> Vec<&ArrayD<T>> {
         vec![]
     }
 
-    fn parameters_mut(&mut self) -> Vec<&mut ArrayD<f64>> {
+    fn parameters_mut(&mut self) -> Vec<&mut ArrayD<T>> {
         vec![]
     }
 
-    fn gradients(&self) -> Vec<&ArrayD<f64>> {
+    fn gradients(&self) -> Vec<&ArrayD<T>> {
         vec![]
     }
 
@@ -692,21 +754,20 @@ impl DiffModule<f64> for Ifft {
 ///
 /// Only the real component of each time-domain sample is transformed.
 #[derive(Debug, Clone)]
-pub struct FftAntiAlias {
+pub struct FftAntiAlias<T = f64> {
     pub nfft: usize,
     pub channels: usize,
-    pub alias_decay_db: f64,
-    pub gamma: f64,
-    pub envelope: Vec<f64>,
-    plans: Arc<FftPlans>,
+    pub alias_decay_db: T,
+    pub gamma: T,
+    pub envelope: Vec<T>,
 }
 
-impl FftAntiAlias {
+impl<T: FftScalar> FftAntiAlias<T> {
     /// Create a new single-channel anti-aliased FFT module.
     ///
     /// The envelope decays by `alias_decay_db` dB across the FFT window.
     #[must_use]
-    pub fn new(nfft: usize, alias_decay_db: f64) -> Self {
+    pub fn new(nfft: usize, alias_decay_db: T) -> Self {
         Self::with_channels(nfft, 1, alias_decay_db)
     }
 
@@ -716,16 +777,17 @@ impl FftAntiAlias {
     ///
     /// Panics if the FFT size or channel count is zero, or if the decay is not finite.
     #[must_use]
-    pub fn with_channels(nfft: usize, channels: usize, alias_decay_db: f64) -> Self {
+    pub fn with_channels(nfft: usize, channels: usize, alias_decay_db: T) -> Self {
         validate_fft_config(nfft, channels);
         assert!(
             alias_decay_db.is_finite(),
             "FftAntiAlias: alias_decay_db must be finite"
         );
-        let gamma = 10_f64.powf(-alias_decay_db.abs() / (20.0 * nfft_as_f64(nfft)));
+        let gamma = fconst::<T>(10.0)
+            .powf(-alias_decay_db.abs() / (fconst::<T>(20.0) * fconst::<T>(nfft as f64)));
 
         let mut envelope = Vec::with_capacity(nfft);
-        let mut value = 1.0;
+        let mut value = T::one();
         for _ in 0..nfft {
             envelope.push(value);
             value *= gamma;
@@ -737,7 +799,6 @@ impl FftAntiAlias {
             alias_decay_db,
             gamma,
             envelope,
-            plans: shared_plans(nfft),
         }
     }
 
@@ -746,8 +807,8 @@ impl FftAntiAlias {
     }
 }
 
-impl DiffModule<f64> for FftAntiAlias {
-    fn forward(&self, input: &DiffTensor<f64>) -> Result<DiffTensor<f64>, AutodiffError> {
+impl<T: FftScalar> DiffModule<T> for FftAntiAlias<T> {
+    fn forward(&self, input: &DiffTensor<T>) -> Result<DiffTensor<T>, AutodiffError> {
         let input_shape = input.data.shape();
         let (batch, time, channels) = shape_to_batch_time_channels(input_shape)?;
         if time != self.nfft {
@@ -763,7 +824,8 @@ impl DiffModule<f64> for FftAntiAlias {
             )));
         }
 
-        let r2c = &self.plans.forward;
+        let plans = T::shared_plans(self.nfft);
+        let r2c = &plans.forward;
 
         let input_3d = input
             .data
@@ -776,7 +838,7 @@ impl DiffModule<f64> for FftAntiAlias {
 
         for b in 0..batch {
             for c in 0..channels {
-                with_fft_buffers(
+                T::with_fft_buffers(
                     self.nfft,
                     r2c.get_scratch_len(),
                     |input_vec, spectrum, scratch| {
@@ -804,10 +866,10 @@ impl DiffModule<f64> for FftAntiAlias {
 
     fn backward(
         &mut self,
-        _input: &DiffTensor<f64>,
-        _output: &DiffTensor<f64>,
-        grad_output: &DiffTensor<f64>,
-    ) -> Result<DiffTensor<f64>, AutodiffError> {
+        _input: &DiffTensor<T>,
+        _output: &DiffTensor<T>,
+        grad_output: &DiffTensor<T>,
+    ) -> Result<DiffTensor<T>, AutodiffError> {
         let grad_shape = grad_output.data.shape();
         let (batch, n_bins, channels) = shape_to_batch_time_channels(grad_shape)?;
         if n_bins != self.n_bins() {
@@ -824,7 +886,8 @@ impl DiffModule<f64> for FftAntiAlias {
             )));
         }
 
-        let c2r = &self.plans.inverse;
+        let plans = T::shared_plans(self.nfft);
+        let c2r = &plans.inverse;
 
         let grad_3d = grad_output
             .data
@@ -837,7 +900,7 @@ impl DiffModule<f64> for FftAntiAlias {
 
         for b in 0..batch {
             for c in 0..channels {
-                with_fft_buffers(
+                T::with_fft_buffers(
                     self.nfft,
                     c2r.get_scratch_len(),
                     |grad_time, grad_vec, scratch| {
@@ -847,9 +910,9 @@ impl DiffModule<f64> for FftAntiAlias {
                             let start = b * self.n_bins();
                             for bin in 0..self.n_bins() {
                                 let sample = data[start + bin];
-                                let weight = rfft_adjoint_weight(self.nfft, bin);
+                                let weight: T = rfft_adjoint_weight(self.nfft, bin);
                                 grad_vec[bin] = if is_packed_endpoint(self.nfft, bin) {
-                                    Complex::new(sample.re, 0.0)
+                                    Complex::new(sample.re, T::zero())
                                 } else {
                                     sample * weight
                                 };
@@ -857,9 +920,9 @@ impl DiffModule<f64> for FftAntiAlias {
                         } else {
                             for bin in 0..self.n_bins() {
                                 let sample = grad_3d[[b, bin, c]];
-                                let weight = rfft_adjoint_weight(self.nfft, bin);
+                                let weight: T = rfft_adjoint_weight(self.nfft, bin);
                                 grad_vec[bin] = if is_packed_endpoint(self.nfft, bin) {
-                                    Complex::new(sample.re, 0.0)
+                                    Complex::new(sample.re, T::zero())
                                 } else {
                                     sample * weight
                                 };
@@ -868,7 +931,7 @@ impl DiffModule<f64> for FftAntiAlias {
                         c2r.process_with_scratch(grad_vec, grad_time, scratch)?;
                         for t in 0..self.nfft {
                             grad_input[[b, t, c]] =
-                                Complex::new(grad_time[t] * self.envelope[t], 0.0);
+                                Complex::new(grad_time[t] * self.envelope[t], T::zero());
                         }
                         Ok::<(), AutodiffError>(())
                     },
@@ -897,15 +960,15 @@ impl DiffModule<f64> for FftAntiAlias {
         self.n_bins()
     }
 
-    fn parameters(&self) -> Vec<&ArrayD<f64>> {
+    fn parameters(&self) -> Vec<&ArrayD<T>> {
         vec![]
     }
 
-    fn parameters_mut(&mut self) -> Vec<&mut ArrayD<f64>> {
+    fn parameters_mut(&mut self) -> Vec<&mut ArrayD<T>> {
         vec![]
     }
 
-    fn gradients(&self) -> Vec<&ArrayD<f64>> {
+    fn gradients(&self) -> Vec<&ArrayD<T>> {
         vec![]
     }
 
@@ -914,21 +977,20 @@ impl DiffModule<f64> for FftAntiAlias {
 
 /// Complex-to-real inverse FFT with an exponential anti-aliasing envelope.
 #[derive(Debug, Clone)]
-pub struct IfftAntiAlias {
+pub struct IfftAntiAlias<T = f64> {
     pub nfft: usize,
     pub channels: usize,
-    pub alias_decay_db: f64,
-    pub gamma: f64,
-    pub envelope: Vec<f64>,
-    plans: Arc<FftPlans>,
+    pub alias_decay_db: T,
+    pub gamma: T,
+    pub envelope: Vec<T>,
 }
 
-impl IfftAntiAlias {
+impl<T: FftScalar> IfftAntiAlias<T> {
     /// Create a new single-channel anti-aliased inverse FFT module.
     ///
     /// The envelope decays by `alias_decay_db` dB across the FFT window.
     #[must_use]
-    pub fn new(nfft: usize, alias_decay_db: f64) -> Self {
+    pub fn new(nfft: usize, alias_decay_db: T) -> Self {
         Self::with_channels(nfft, 1, alias_decay_db)
     }
 
@@ -938,16 +1000,17 @@ impl IfftAntiAlias {
     ///
     /// Panics if the FFT size or channel count is zero, or if the decay is not finite.
     #[must_use]
-    pub fn with_channels(nfft: usize, channels: usize, alias_decay_db: f64) -> Self {
+    pub fn with_channels(nfft: usize, channels: usize, alias_decay_db: T) -> Self {
         validate_fft_config(nfft, channels);
         assert!(
             alias_decay_db.is_finite(),
             "IfftAntiAlias: alias_decay_db must be finite"
         );
-        let gamma = 10_f64.powf(-alias_decay_db.abs() / (20.0 * nfft_as_f64(nfft)));
+        let gamma = fconst::<T>(10.0)
+            .powf(-alias_decay_db.abs() / (fconst::<T>(20.0) * fconst::<T>(nfft as f64)));
 
         let mut envelope = Vec::with_capacity(nfft);
-        let mut value = 1.0;
+        let mut value = T::one();
         for _ in 0..nfft {
             envelope.push(value);
             value *= gamma;
@@ -959,7 +1022,6 @@ impl IfftAntiAlias {
             alias_decay_db,
             gamma,
             envelope,
-            plans: shared_plans(nfft),
         }
     }
 
@@ -968,8 +1030,8 @@ impl IfftAntiAlias {
     }
 }
 
-impl DiffModule<f64> for IfftAntiAlias {
-    fn forward(&self, input: &DiffTensor<f64>) -> Result<DiffTensor<f64>, AutodiffError> {
+impl<T: FftScalar> DiffModule<T> for IfftAntiAlias<T> {
+    fn forward(&self, input: &DiffTensor<T>) -> Result<DiffTensor<T>, AutodiffError> {
         let input_shape = input.data.shape();
         let (batch, n_bins, channels) = shape_to_batch_time_channels(input_shape)?;
         if n_bins != self.n_bins() {
@@ -986,7 +1048,8 @@ impl DiffModule<f64> for IfftAntiAlias {
             )));
         }
 
-        let c2r = &self.plans.inverse;
+        let plans = T::shared_plans(self.nfft);
+        let c2r = &plans.inverse;
 
         let input_3d = input
             .data
@@ -996,11 +1059,11 @@ impl DiffModule<f64> for IfftAntiAlias {
                 AutodiffError::Message(format!("IfftAntiAlias: failed to reshape input: {e}"))
             })?;
         let mut output = ArrayD::zeros(IxDyn(&[batch, self.nfft, channels]));
-        let scale = nfft_as_f64(self.nfft);
+        let scale = fconst::<T>(self.nfft as f64);
 
         for b in 0..batch {
             for c in 0..channels {
-                with_fft_buffers(
+                T::with_fft_buffers(
                     self.nfft,
                     c2r.get_scratch_len(),
                     |time, input_vec, scratch| {
@@ -1010,7 +1073,7 @@ impl DiffModule<f64> for IfftAntiAlias {
                         c2r.process_with_scratch(input_vec, time, scratch)?;
                         for t in 0..self.nfft {
                             output[[b, t, c]] =
-                                Complex::new(time[t] * self.envelope[t] / scale, 0.0);
+                                Complex::new(time[t] * self.envelope[t] / scale, T::zero());
                         }
                         Ok::<(), AutodiffError>(())
                     },
@@ -1029,10 +1092,10 @@ impl DiffModule<f64> for IfftAntiAlias {
 
     fn backward(
         &mut self,
-        _input: &DiffTensor<f64>,
-        _output: &DiffTensor<f64>,
-        grad_output: &DiffTensor<f64>,
-    ) -> Result<DiffTensor<f64>, AutodiffError> {
+        _input: &DiffTensor<T>,
+        _output: &DiffTensor<T>,
+        grad_output: &DiffTensor<T>,
+    ) -> Result<DiffTensor<T>, AutodiffError> {
         let grad_shape = grad_output.data.shape();
         let (batch, time, channels) = shape_to_batch_time_channels(grad_shape)?;
         if time != self.nfft {
@@ -1048,7 +1111,8 @@ impl DiffModule<f64> for IfftAntiAlias {
             )));
         }
 
-        let r2c = &self.plans.forward;
+        let plans = T::shared_plans(self.nfft);
+        let r2c = &plans.forward;
 
         let grad_3d = grad_output
             .data
@@ -1061,7 +1125,7 @@ impl DiffModule<f64> for IfftAntiAlias {
 
         for b in 0..batch {
             for c in 0..channels {
-                with_fft_buffers(
+                T::with_fft_buffers(
                     self.nfft,
                     r2c.get_scratch_len(),
                     |grad_vec, spectrum, scratch| {
@@ -1079,9 +1143,9 @@ impl DiffModule<f64> for IfftAntiAlias {
                         }
                         r2c.process_with_scratch(grad_vec, spectrum, scratch)?;
                         for (bin, sample) in spectrum.iter().enumerate() {
-                            let weight = irfft_adjoint_weight(self.nfft, bin);
+                            let weight: T = irfft_adjoint_weight(self.nfft, bin);
                             grad_input[[b, bin, c]] = if is_packed_endpoint(self.nfft, bin) {
-                                Complex::new(sample.re * weight, 0.0)
+                                Complex::new(sample.re * weight, T::zero())
                             } else {
                                 *sample * weight
                             };
@@ -1113,15 +1177,15 @@ impl DiffModule<f64> for IfftAntiAlias {
         self.n_bins()
     }
 
-    fn parameters(&self) -> Vec<&ArrayD<f64>> {
+    fn parameters(&self) -> Vec<&ArrayD<T>> {
         vec![]
     }
 
-    fn parameters_mut(&mut self) -> Vec<&mut ArrayD<f64>> {
+    fn parameters_mut(&mut self) -> Vec<&mut ArrayD<T>> {
         vec![]
     }
 
-    fn gradients(&self) -> Vec<&ArrayD<f64>> {
+    fn gradients(&self) -> Vec<&ArrayD<T>> {
         vec![]
     }
 

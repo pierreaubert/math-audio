@@ -13,10 +13,10 @@ use ndarray::{ArrayD, ArrayView1, ArrayView2, ArrayViewMut1, ArrayViewMut2, Axis
 use num_complex::Complex;
 
 use crate::error::AutodiffError;
-use crate::module::{DiffModule, validate_spectral_gradient_shape};
+use crate::module::{DiffModule, Scalar, reset_buffer, validate_spectral_gradient_shape};
 use crate::tensor::DiffTensor;
 
-fn view2<'a>(param: &'a ArrayD<f64>, name: &str) -> Result<ArrayView2<'a, f64>, AutodiffError> {
+fn view2<'a, T>(param: &'a ArrayD<T>, name: &str) -> Result<ArrayView2<'a, T>, AutodiffError> {
     let shape = param.shape();
     if shape.len() != 2 {
         return Err(AutodiffError::Message(format!(
@@ -31,10 +31,10 @@ fn view2<'a>(param: &'a ArrayD<f64>, name: &str) -> Result<ArrayView2<'a, f64>, 
         .map_err(|e| AutodiffError::Message(format!("{name}: failed to reshape param: {e}")))
 }
 
-fn view2_mut<'a>(
-    param: &'a mut ArrayD<f64>,
+fn view2_mut<'a, T>(
+    param: &'a mut ArrayD<T>,
     name: &str,
-) -> Result<ArrayViewMut2<'a, f64>, AutodiffError> {
+) -> Result<ArrayViewMut2<'a, T>, AutodiffError> {
     let shape = param.shape();
     if shape.len() != 2 {
         return Err(AutodiffError::Message(format!(
@@ -49,7 +49,7 @@ fn view2_mut<'a>(
         .map_err(|e| AutodiffError::Message(format!("{name}: failed to reshape param_grad: {e}")))
 }
 
-fn view1<'a>(param: &'a ArrayD<f64>, name: &str) -> Result<ArrayView1<'a, f64>, AutodiffError> {
+fn view1<'a, T>(param: &'a ArrayD<T>, name: &str) -> Result<ArrayView1<'a, T>, AutodiffError> {
     let shape = param.shape();
     if shape.len() != 1 {
         return Err(AutodiffError::Message(format!(
@@ -64,10 +64,10 @@ fn view1<'a>(param: &'a ArrayD<f64>, name: &str) -> Result<ArrayView1<'a, f64>, 
         .map_err(|e| AutodiffError::Message(format!("{name}: failed to reshape param: {e}")))
 }
 
-fn view1_mut<'a>(
-    param: &'a mut ArrayD<f64>,
+fn view1_mut<'a, T>(
+    param: &'a mut ArrayD<T>,
     name: &str,
-) -> Result<ArrayViewMut1<'a, f64>, AutodiffError> {
+) -> Result<ArrayViewMut1<'a, T>, AutodiffError> {
     let shape = param.shape();
     if shape.len() != 1 {
         return Err(AutodiffError::Message(format!(
@@ -85,16 +85,16 @@ fn view1_mut<'a>(
 /// Matrix gain module: mixes `n_in` input channels into `n_out` output channels
 /// with a frequency-independent real gain matrix.
 #[derive(Debug, Clone)]
-pub struct Gain {
+pub struct Gain<T = f64> {
     /// FFT length.
     pub nfft: usize,
     /// Raw gain parameters, shape `(n_out, n_in)`.
-    pub param: ArrayD<f64>,
+    pub param: ArrayD<T>,
     /// Accumulated parameter gradients, same shape as `param`.
-    pub param_grad: ArrayD<f64>,
+    pub param_grad: ArrayD<T>,
 }
 
-impl Gain {
+impl<T: Scalar> Gain<T> {
     /// Create a new gain module with zero-initialized parameters and gradients.
     ///
     /// # Errors
@@ -123,8 +123,18 @@ impl Gain {
     }
 }
 
-impl DiffModule<f64> for Gain {
-    fn forward(&self, input: &DiffTensor<f64>) -> Result<DiffTensor<f64>, AutodiffError> {
+impl<T: Scalar> DiffModule<T> for Gain<T> {
+    fn forward(&self, input: &DiffTensor<T>) -> Result<DiffTensor<T>, AutodiffError> {
+        let mut out = DiffTensor::zeros(IxDyn(&[0]));
+        self.forward_into(input, &mut out)?;
+        Ok(out)
+    }
+
+    fn forward_into(
+        &self,
+        input: &DiffTensor<T>,
+        out: &mut DiffTensor<T>,
+    ) -> Result<(), AutodiffError> {
         let param = view2(&self.param, "Gain")?;
         let input_shape = input.data.shape();
         if input_shape.len() < 3 {
@@ -152,11 +162,33 @@ impl DiffModule<f64> for Gain {
 
         let mut output_shape = input_shape.to_vec();
         output_shape[2] = n_out;
-        let mut output = ArrayD::zeros(IxDyn(&output_shape));
+        reset_buffer(out, &output_shape);
+        let output = &mut out.data;
+
+        if input_shape.len() == 3
+            && let Some(input_data) = input.data.as_slice()
+            && let Some(output_data) = output.as_slice_mut()
+        {
+            // Contiguous fast path: flat indexing, no strided view traversal.
+            let batch = input_shape[0];
+            for out_ch in 0..n_out {
+                for in_ch in 0..n_in {
+                    let h = param[[out_ch, in_ch]];
+                    for batch_index in 0..batch {
+                        for f in 0..n_bins {
+                            let frame = batch_index * n_bins + f;
+                            output_data[frame * n_out + out_ch] +=
+                                input_data[frame * n_in + in_ch] * h;
+                        }
+                    }
+                }
+            }
+            return Ok(());
+        }
 
         for out_ch in 0..n_out {
             for in_ch in 0..n_in {
-                let h = Complex::new(param[[out_ch, in_ch]], 0.0);
+                let h = Complex::new(param[[out_ch, in_ch]], T::zero());
                 let input_slice = input.data.index_axis(Axis(2), in_ch);
                 let mut output_slice = output.index_axis_mut(Axis(2), out_ch);
                 for (dst, &src) in output_slice.iter_mut().zip(input_slice.iter()) {
@@ -165,16 +197,29 @@ impl DiffModule<f64> for Gain {
             }
         }
 
-        Ok(DiffTensor::from_array(output))
+        Ok(())
     }
 
     #[allow(clippy::too_many_lines)]
     fn backward(
         &mut self,
-        input: &DiffTensor<f64>,
-        _output: &DiffTensor<f64>,
-        grad_output: &DiffTensor<f64>,
-    ) -> Result<DiffTensor<f64>, AutodiffError> {
+        input: &DiffTensor<T>,
+        output: &DiffTensor<T>,
+        grad_output: &DiffTensor<T>,
+    ) -> Result<DiffTensor<T>, AutodiffError> {
+        let mut grad_input = DiffTensor::zeros(IxDyn(&[0]));
+        self.backward_into(input, output, grad_output, &mut grad_input)?;
+        Ok(grad_input)
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn backward_into(
+        &mut self,
+        input: &DiffTensor<T>,
+        _output: &DiffTensor<T>,
+        grad_output: &DiffTensor<T>,
+        grad_input_out: &mut DiffTensor<T>,
+    ) -> Result<(), AutodiffError> {
         let n_bins_expected = self.n_bins();
         let param_shape = self.param.shape();
         if param_shape.len() != 2 {
@@ -232,7 +277,7 @@ impl DiffModule<f64> for Gain {
             let batch = input_shape[0];
             for out_ch in 0..n_out {
                 for in_ch in 0..n_in {
-                    let mut sum = 0.0;
+                    let mut sum = T::zero();
                     for batch_index in 0..batch {
                         for f in 0..n_bins {
                             let g = grad_data[(batch_index * n_bins + f) * n_out + out_ch];
@@ -248,7 +293,7 @@ impl DiffModule<f64> for Gain {
                 let grad_slice = grad_output.data.index_axis(Axis(2), out_ch);
                 for in_ch in 0..n_in {
                     let input_slice = input.data.index_axis(Axis(2), in_ch);
-                    let mut sum = 0.0;
+                    let mut sum = T::zero();
                     for (g, x) in grad_slice.iter().zip(input_slice.iter()) {
                         sum += (g * x.conj()).re;
                     }
@@ -258,7 +303,8 @@ impl DiffModule<f64> for Gain {
         }
 
         // Compute dLoss/dInput.
-        let mut grad_input = ArrayD::zeros(IxDyn(input_shape));
+        reset_buffer(grad_input_out, input_shape);
+        let grad_input = &mut grad_input_out.data;
         if grad_shape.len() == 3
             && let Some(grad_data) = grad_output.data.as_slice()
             && let Some(grad_input_data) = grad_input.as_slice_mut()
@@ -279,7 +325,7 @@ impl DiffModule<f64> for Gain {
         } else {
             for in_ch in 0..n_in {
                 for out_ch in 0..n_out {
-                    let h = Complex::new(param[[out_ch, in_ch]], 0.0);
+                    let h = Complex::new(param[[out_ch, in_ch]], T::zero());
                     let grad_slice = grad_output.data.index_axis(Axis(2), out_ch);
                     let mut input_grad_slice = grad_input.index_axis_mut(Axis(2), in_ch);
                     for (dst, &g) in input_grad_slice.iter_mut().zip(grad_slice.iter()) {
@@ -289,7 +335,7 @@ impl DiffModule<f64> for Gain {
             }
         }
 
-        Ok(DiffTensor::from_array(grad_input))
+        Ok(())
     }
 
     fn input_channels(&self) -> usize {
@@ -304,36 +350,36 @@ impl DiffModule<f64> for Gain {
         self.n_bins()
     }
 
-    fn parameters(&self) -> Vec<&ArrayD<f64>> {
+    fn parameters(&self) -> Vec<&ArrayD<T>> {
         vec![&self.param]
     }
 
-    fn parameters_mut(&mut self) -> Vec<&mut ArrayD<f64>> {
+    fn parameters_mut(&mut self) -> Vec<&mut ArrayD<T>> {
         vec![&mut self.param]
     }
 
-    fn gradients(&self) -> Vec<&ArrayD<f64>> {
+    fn gradients(&self) -> Vec<&ArrayD<T>> {
         vec![&self.param_grad]
     }
 
     fn zero_grad(&mut self) {
-        self.param_grad.fill(0.0);
+        self.param_grad.fill(T::zero());
     }
 }
 
 /// Parallel (per-channel) gain module: multiplies each channel by a scalar
 /// frequency-independent gain.
 #[derive(Debug, Clone)]
-pub struct ParallelGain {
+pub struct ParallelGain<T = f64> {
     /// FFT length.
     pub nfft: usize,
     /// Raw gain parameters, shape `(n_channels,)`.
-    pub param: ArrayD<f64>,
+    pub param: ArrayD<T>,
     /// Accumulated parameter gradients, same shape as `param`.
-    pub param_grad: ArrayD<f64>,
+    pub param_grad: ArrayD<T>,
 }
 
-impl ParallelGain {
+impl<T: Scalar> ParallelGain<T> {
     /// Create a new parallel gain module with zero-initialized parameters and
     /// gradients.
     ///
@@ -363,8 +409,8 @@ impl ParallelGain {
     }
 }
 
-impl DiffModule<f64> for ParallelGain {
-    fn forward(&self, input: &DiffTensor<f64>) -> Result<DiffTensor<f64>, AutodiffError> {
+impl<T: Scalar> DiffModule<T> for ParallelGain<T> {
+    fn forward(&self, input: &DiffTensor<T>) -> Result<DiffTensor<T>, AutodiffError> {
         let param = view1(&self.param, "ParallelGain")?;
         let input_shape = input.data.shape();
         if input_shape.len() < 3 {
@@ -392,7 +438,7 @@ impl DiffModule<f64> for ParallelGain {
 
         let mut output = input.data.clone();
         for ch in 0..n_channels {
-            let h = Complex::new(param[ch], 0.0);
+            let h = Complex::new(param[ch], T::zero());
             let mut slice = output.index_axis_mut(Axis(2), ch);
             slice.mapv_inplace(|x| x * h);
         }
@@ -402,10 +448,10 @@ impl DiffModule<f64> for ParallelGain {
 
     fn backward(
         &mut self,
-        input: &DiffTensor<f64>,
-        _output: &DiffTensor<f64>,
-        grad_output: &DiffTensor<f64>,
-    ) -> Result<DiffTensor<f64>, AutodiffError> {
+        input: &DiffTensor<T>,
+        _output: &DiffTensor<T>,
+        grad_output: &DiffTensor<T>,
+    ) -> Result<DiffTensor<T>, AutodiffError> {
         let n_bins_expected = self.n_bins();
         let param_shape = self.param.shape();
         if param_shape.len() != 1 {
@@ -455,7 +501,7 @@ impl DiffModule<f64> for ParallelGain {
                 .iter()
                 .zip(input_slice.iter())
                 .map(|(gradient, sample)| *gradient * sample.conj())
-                .sum::<Complex<f64>>()
+                .sum::<Complex<T>>()
                 .re;
         }
 
@@ -485,20 +531,20 @@ impl DiffModule<f64> for ParallelGain {
         self.n_bins()
     }
 
-    fn parameters(&self) -> Vec<&ArrayD<f64>> {
+    fn parameters(&self) -> Vec<&ArrayD<T>> {
         vec![&self.param]
     }
 
-    fn parameters_mut(&mut self) -> Vec<&mut ArrayD<f64>> {
+    fn parameters_mut(&mut self) -> Vec<&mut ArrayD<T>> {
         vec![&mut self.param]
     }
 
-    fn gradients(&self) -> Vec<&ArrayD<f64>> {
+    fn gradients(&self) -> Vec<&ArrayD<T>> {
         vec![&self.param_grad]
     }
 
     fn zero_grad(&mut self) {
-        self.param_grad.fill(0.0);
+        self.param_grad.fill(T::zero());
     }
 }
 
@@ -536,8 +582,8 @@ impl Magnitude {
     }
 }
 
-impl DiffModule<f64> for Magnitude {
-    fn forward(&self, input: &DiffTensor<f64>) -> Result<DiffTensor<f64>, AutodiffError> {
+impl<T: Scalar> DiffModule<T> for Magnitude {
+    fn forward(&self, input: &DiffTensor<T>) -> Result<DiffTensor<T>, AutodiffError> {
         let input_shape = input.data.shape();
         if input_shape.len() < 3 {
             return Err(AutodiffError::Message(format!(
@@ -563,10 +609,10 @@ impl DiffModule<f64> for Magnitude {
 
         let output = input.data.mapv(|x| {
             let norm = x.norm();
-            if norm > 0.0 {
-                Complex::new(norm, 0.0)
+            if norm > T::zero() {
+                Complex::new(norm, T::zero())
             } else {
-                Complex::new(0.0, 0.0)
+                Complex::new(T::zero(), T::zero())
             }
         });
         Ok(DiffTensor::from_array(output))
@@ -574,10 +620,10 @@ impl DiffModule<f64> for Magnitude {
 
     fn backward(
         &mut self,
-        input: &DiffTensor<f64>,
-        _output: &DiffTensor<f64>,
-        grad_output: &DiffTensor<f64>,
-    ) -> Result<DiffTensor<f64>, AutodiffError> {
+        input: &DiffTensor<T>,
+        _output: &DiffTensor<T>,
+        grad_output: &DiffTensor<T>,
+    ) -> Result<DiffTensor<T>, AutodiffError> {
         let input_shape = input.data.shape();
         let grad_shape = grad_output.data.shape();
         if input_shape != grad_shape {
@@ -589,13 +635,13 @@ impl DiffModule<f64> for Magnitude {
 
         let grad_input = input.data.mapv(|x| {
             let norm = x.norm();
-            if norm > 0.0 {
+            if norm > T::zero() {
                 x / norm
             } else {
-                Complex::new(0.0, 0.0)
+                Complex::new(T::zero(), T::zero())
             }
         });
-        let real_grad_output = grad_output.data.mapv(|g| Complex::new(g.re, 0.0));
+        let real_grad_output = grad_output.data.mapv(|g| Complex::new(g.re, T::zero()));
         let grad = grad_input * real_grad_output;
         Ok(DiffTensor::from_array(grad))
     }
@@ -612,15 +658,15 @@ impl DiffModule<f64> for Magnitude {
         self.n_bins()
     }
 
-    fn parameters(&self) -> Vec<&ArrayD<f64>> {
+    fn parameters(&self) -> Vec<&ArrayD<T>> {
         vec![]
     }
 
-    fn parameters_mut(&mut self) -> Vec<&mut ArrayD<f64>> {
+    fn parameters_mut(&mut self) -> Vec<&mut ArrayD<T>> {
         vec![]
     }
 
-    fn gradients(&self) -> Vec<&ArrayD<f64>> {
+    fn gradients(&self) -> Vec<&ArrayD<T>> {
         vec![]
     }
 
