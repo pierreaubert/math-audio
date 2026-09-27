@@ -164,3 +164,34 @@ Improved Stochastic Ranking Evolution Strategy — constrained nonlinear optimiz
   doi     = {10.1109/4235.873238}
 }
 ```
+
+## Surrogate-assisted constrained optimization (COBRA/SACOBRA, SCBO, DTS-CMA-ES)
+
+Implemented in `src/surrogate.rs` (RBF models with holdout selection),
+`src/cobra.rs` (COBRA-style constrained RBF optimization with
+distance-requirement cycle, self-adjusting output transform, and
+stagnation kicks), `src/bayesian/constrained.rs` (single-trust-region
+constrained BO with constrained EI), and the native adaptive-penalty
+constraints plus IPOP restarts in `src/cmaes.rs`.
+
+- SACOBRA package: self-adjusting constrained optimization of expensive
+  black-box functions under severely limited budgets; RBF surrogates with
+  online model selection, repair of infeasible points, distance-requirement
+  cycle, and logarithmic output transform.
+  <https://rdrr.io/cran/SACOBRA/man/SACOBRA-package.html>
+  <https://github.com/wolfgangkonen/sacobra>
+- SCBO (Eriksson and Poloczek, 2021): scalable constrained Bayesian
+  optimization combining Thompson sampling with trust regions; handles
+  high-dimensional problems with non-convex black-box constraints.
+  <https://proceedings.mlr.press/v130/eriksson21a.html>
+- TuRBO (Eriksson et al., 2019): local Bayesian optimization with a bandit
+  allocation across trust regions for high-dimensional problems.
+  <https://arxiv.org/abs/1910.01739>
+- pySOT (Eriksson, Bindel, and Shoemaker, 2019): asynchronous
+  parallel surrogate optimization toolbox built on the stochastic RBF
+  method of Regis and Shoemaker.
+  <https://arxiv.org/abs/1908.00420>
+- DTS-CMA-ES (Bajer, Pitra, and Holeňa): surrogate-assisted CMA-ES with
+  model-error control (restart and evolution control); earlier lmm-CMA
+  variant uses local quadratic models with ranking response control.
+  <https://ceur-ws.org/Vol-1885/120.pdf>

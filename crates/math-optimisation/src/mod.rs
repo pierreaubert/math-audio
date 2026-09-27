@@ -76,10 +76,20 @@
 #![warn(missing_docs)]
 
 pub use bayesian::{
-    BayesAcquisition, BayesOptCallback, BayesOptConfig, BayesOptIntermediate, BayesOptParetoReport,
-    BayesOptReport, BayesParetoSolution, bayesian_multi_objective, bayesian_optimization,
+    BayesAcquisition, BayesOptCallback, BayesOptConfig, BayesOptConstraint, BayesOptConstraintFn,
+    BayesOptIntermediate, BayesOptParetoReport, BayesOptReport, BayesParetoSolution,
+    ConstrainedBayesOptCallback, ConstrainedBayesOptConfig, ConstrainedBayesOptIntermediate,
+    ConstrainedBayesOptReport, bayesian_multi_objective, bayesian_optimization,
+    constrained_bayesian_optimization,
 };
-pub use cmaes::{CmaEsConfig, CmaEsIntermediate, CmaEsReport, cma_es};
+pub use cmaes::{
+    CmaCovariance, CmaEsConfig, CmaEsConstraint, CmaEsConstraintFn, CmaEsIntermediate, CmaEsReport,
+    cma_es,
+};
+pub use cobra::{
+    CobraCallback, CobraConfig, CobraConstraint, CobraConstraintFn, CobraIntermediate, CobraReport,
+    cobra,
+};
 pub use cobyla::{CobylaConfig, CobylaConstraint, CobylaReport, CobylaStopTols};
 pub use continuous_area::{
     AreaError, AreaScalarisation, Prior, Quadrature, build_quadrature_points, evaluate_area_loss,
@@ -98,6 +108,7 @@ pub use nsga::{NsgaConfig, NsgaReport, NsgaVariant, ParetoSolution, nsga, nsga2,
 pub use parallel_eval::ParallelConfig;
 pub use recorder::{OptimizationRecord, OptimizationRecorder};
 pub use run_recorded::run_recorded_differential_evolution;
+pub use surrogate::{RbfKind, RbfSurrogate};
 
 /// Integer variable handling for mixed-integer optimization.
 pub mod apply_integrality;
@@ -108,6 +119,8 @@ mod argmin;
 pub mod bayesian;
 /// Pure-Rust CMA-ES global optimizer.
 pub mod cmaes;
+/// Surrogate-assisted constrained optimizer (COBRA-style RBF models).
+pub mod cobra;
 /// Pure-Rust COBYLA local optimizer.
 ///
 /// Hand-translated from NLopt 2.7.1's `cobyla.c` (Powell 1994) — see
@@ -172,6 +185,8 @@ pub mod recorder;
 pub mod run_recorded;
 /// Linear penalty stacking utilities for combining multiple constraints.
 pub mod stack_linear_penalty;
+/// Radial-basis-function surrogates for expensive black-box optimisation.
+pub mod surrogate;
 
 mod adaptive_config;
 mod adaptive_state;

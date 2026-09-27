@@ -555,6 +555,368 @@ pub fn get_function_metadata() -> HashMap<String, FunctionMetadata> {
     );
 
     metadata.insert(
+        "g04_objective".to_string(),
+        FunctionMetadata {
+            name: "g04_objective".to_string(),
+            bounds: vec![
+                (78.0, 102.0),
+                (33.0, 45.0),
+                (27.0, 45.0),
+                (27.0, 45.0),
+                (27.0, 45.0),
+            ],
+            global_minima: vec![(
+                vec![78.0, 33.0, 29.99525602, 45.0, 36.77581290],
+                -30665.53867178,
+            )],
+            inequality_constraints: vec![
+                g04_constraint1,
+                g04_constraint2,
+                g04_constraint3,
+                g04_constraint4,
+                g04_constraint5,
+                g04_constraint6,
+            ],
+            equality_constraints: vec![],
+            description: "G04 objective function (CEC 2006)".to_string(),
+            multimodal: false,
+            dimensions: vec![5],
+        },
+    );
+
+    metadata.insert(
+        "g04_constraint1".to_string(),
+        FunctionMetadata {
+            name: "g04_constraint1".to_string(),
+            bounds: vec![
+                (78.0, 102.0),
+                (33.0, 45.0),
+                (27.0, 45.0),
+                (27.0, 45.0),
+                (27.0, 45.0),
+            ],
+            global_minima: vec![],
+            inequality_constraints: vec![],
+            equality_constraints: vec![],
+            description: "G04 constraint 1 function".to_string(),
+            multimodal: false,
+            dimensions: vec![5],
+        },
+    );
+
+    metadata.insert(
+        "g04_constraint2".to_string(),
+        FunctionMetadata {
+            name: "g04_constraint2".to_string(),
+            bounds: vec![
+                (78.0, 102.0),
+                (33.0, 45.0),
+                (27.0, 45.0),
+                (27.0, 45.0),
+                (27.0, 45.0),
+            ],
+            global_minima: vec![],
+            inequality_constraints: vec![],
+            equality_constraints: vec![],
+            description: "G04 constraint 2 function".to_string(),
+            multimodal: false,
+            dimensions: vec![5],
+        },
+    );
+
+    metadata.insert(
+        "g04_constraint3".to_string(),
+        FunctionMetadata {
+            name: "g04_constraint3".to_string(),
+            bounds: vec![
+                (78.0, 102.0),
+                (33.0, 45.0),
+                (27.0, 45.0),
+                (27.0, 45.0),
+                (27.0, 45.0),
+            ],
+            global_minima: vec![],
+            inequality_constraints: vec![],
+            equality_constraints: vec![],
+            description: "G04 constraint 3 function".to_string(),
+            multimodal: false,
+            dimensions: vec![5],
+        },
+    );
+
+    metadata.insert(
+        "g04_constraint4".to_string(),
+        FunctionMetadata {
+            name: "g04_constraint4".to_string(),
+            bounds: vec![
+                (78.0, 102.0),
+                (33.0, 45.0),
+                (27.0, 45.0),
+                (27.0, 45.0),
+                (27.0, 45.0),
+            ],
+            global_minima: vec![],
+            inequality_constraints: vec![],
+            equality_constraints: vec![],
+            description: "G04 constraint 4 function".to_string(),
+            multimodal: false,
+            dimensions: vec![5],
+        },
+    );
+
+    metadata.insert(
+        "g04_constraint5".to_string(),
+        FunctionMetadata {
+            name: "g04_constraint5".to_string(),
+            bounds: vec![
+                (78.0, 102.0),
+                (33.0, 45.0),
+                (27.0, 45.0),
+                (27.0, 45.0),
+                (27.0, 45.0),
+            ],
+            global_minima: vec![],
+            inequality_constraints: vec![],
+            equality_constraints: vec![],
+            description: "G04 constraint 5 function".to_string(),
+            multimodal: false,
+            dimensions: vec![5],
+        },
+    );
+
+    metadata.insert(
+        "g04_constraint6".to_string(),
+        FunctionMetadata {
+            name: "g04_constraint6".to_string(),
+            bounds: vec![
+                (78.0, 102.0),
+                (33.0, 45.0),
+                (27.0, 45.0),
+                (27.0, 45.0),
+                (27.0, 45.0),
+            ],
+            global_minima: vec![],
+            inequality_constraints: vec![],
+            equality_constraints: vec![],
+            description: "G04 constraint 6 function".to_string(),
+            multimodal: false,
+            dimensions: vec![5],
+        },
+    );
+
+    metadata.insert(
+        "g06_objective".to_string(),
+        FunctionMetadata {
+            name: "g06_objective".to_string(),
+            bounds: vec![(13.0, 100.0), (0.0, 100.0)],
+            global_minima: vec![(vec![14.095, 0.84296], -6961.81387558)],
+            inequality_constraints: vec![g06_constraint1, g06_constraint2],
+            equality_constraints: vec![],
+            description: "G06 objective function (CEC 2006)".to_string(),
+            multimodal: false,
+            dimensions: vec![2],
+        },
+    );
+
+    metadata.insert(
+        "g06_constraint1".to_string(),
+        FunctionMetadata {
+            name: "g06_constraint1".to_string(),
+            bounds: vec![(13.0, 100.0), (0.0, 100.0)],
+            global_minima: vec![],
+            inequality_constraints: vec![],
+            equality_constraints: vec![],
+            description: "G06 constraint 1 function".to_string(),
+            multimodal: false,
+            dimensions: vec![2],
+        },
+    );
+
+    metadata.insert(
+        "g06_constraint2".to_string(),
+        FunctionMetadata {
+            name: "g06_constraint2".to_string(),
+            bounds: vec![(13.0, 100.0), (0.0, 100.0)],
+            global_minima: vec![],
+            inequality_constraints: vec![],
+            equality_constraints: vec![],
+            description: "G06 constraint 2 function".to_string(),
+            multimodal: false,
+            dimensions: vec![2],
+        },
+    );
+
+    metadata.insert(
+        "g08_objective".to_string(),
+        FunctionMetadata {
+            name: "g08_objective".to_string(),
+            bounds: vec![(0.0, 10.0), (0.0, 10.0)],
+            global_minima: vec![(vec![1.2279713, 4.2453733], -0.095825)],
+            inequality_constraints: vec![g08_constraint1, g08_constraint2],
+            equality_constraints: vec![],
+            description: "G08 objective function (CEC 2006)".to_string(),
+            multimodal: true,
+            dimensions: vec![2],
+        },
+    );
+
+    metadata.insert(
+        "g08_constraint1".to_string(),
+        FunctionMetadata {
+            name: "g08_constraint1".to_string(),
+            bounds: vec![(0.0, 10.0), (0.0, 10.0)],
+            global_minima: vec![],
+            inequality_constraints: vec![],
+            equality_constraints: vec![],
+            description: "G08 constraint 1 function".to_string(),
+            multimodal: false,
+            dimensions: vec![2],
+        },
+    );
+
+    metadata.insert(
+        "g08_constraint2".to_string(),
+        FunctionMetadata {
+            name: "g08_constraint2".to_string(),
+            bounds: vec![(0.0, 10.0), (0.0, 10.0)],
+            global_minima: vec![],
+            inequality_constraints: vec![],
+            equality_constraints: vec![],
+            description: "G08 constraint 2 function".to_string(),
+            multimodal: false,
+            dimensions: vec![2],
+        },
+    );
+
+    metadata.insert(
+        "g09_objective".to_string(),
+        FunctionMetadata {
+            name: "g09_objective".to_string(),
+            bounds: vec![(-10.0, 10.0); 7],
+            global_minima: vec![(
+                vec![
+                    2.33049935,
+                    1.95137236,
+                    -0.47754139,
+                    4.36572624,
+                    -0.62448747,
+                    1.03813099,
+                    1.59422667,
+                ],
+                680.63005737,
+            )],
+            inequality_constraints: vec![
+                g09_constraint1,
+                g09_constraint2,
+                g09_constraint3,
+                g09_constraint4,
+            ],
+            equality_constraints: vec![],
+            description: "G09 objective function (CEC 2006)".to_string(),
+            multimodal: false,
+            dimensions: vec![7],
+        },
+    );
+
+    metadata.insert(
+        "g09_constraint1".to_string(),
+        FunctionMetadata {
+            name: "g09_constraint1".to_string(),
+            bounds: vec![(-10.0, 10.0); 7],
+            global_minima: vec![],
+            inequality_constraints: vec![],
+            equality_constraints: vec![],
+            description: "G09 constraint 1 function".to_string(),
+            multimodal: false,
+            dimensions: vec![7],
+        },
+    );
+
+    metadata.insert(
+        "g09_constraint2".to_string(),
+        FunctionMetadata {
+            name: "g09_constraint2".to_string(),
+            bounds: vec![(-10.0, 10.0); 7],
+            global_minima: vec![],
+            inequality_constraints: vec![],
+            equality_constraints: vec![],
+            description: "G09 constraint 2 function".to_string(),
+            multimodal: false,
+            dimensions: vec![7],
+        },
+    );
+
+    metadata.insert(
+        "g09_constraint3".to_string(),
+        FunctionMetadata {
+            name: "g09_constraint3".to_string(),
+            bounds: vec![(-10.0, 10.0); 7],
+            global_minima: vec![],
+            inequality_constraints: vec![],
+            equality_constraints: vec![],
+            description: "G09 constraint 3 function".to_string(),
+            multimodal: false,
+            dimensions: vec![7],
+        },
+    );
+
+    metadata.insert(
+        "g09_constraint4".to_string(),
+        FunctionMetadata {
+            name: "g09_constraint4".to_string(),
+            bounds: vec![(-10.0, 10.0); 7],
+            global_minima: vec![],
+            inequality_constraints: vec![],
+            equality_constraints: vec![],
+            description: "G09 constraint 4 function".to_string(),
+            multimodal: false,
+            dimensions: vec![7],
+        },
+    );
+
+    metadata.insert(
+        "g24_objective".to_string(),
+        FunctionMetadata {
+            name: "g24_objective".to_string(),
+            bounds: vec![(0.0, 3.0), (0.0, 4.0)],
+            global_minima: vec![(vec![2.32952019, 3.17849307], -5.50801327)],
+            inequality_constraints: vec![g24_constraint1, g24_constraint2],
+            equality_constraints: vec![],
+            description: "G24 objective function (CEC 2006)".to_string(),
+            multimodal: false,
+            dimensions: vec![2],
+        },
+    );
+
+    metadata.insert(
+        "g24_constraint1".to_string(),
+        FunctionMetadata {
+            name: "g24_constraint1".to_string(),
+            bounds: vec![(0.0, 3.0), (0.0, 4.0)],
+            global_minima: vec![],
+            inequality_constraints: vec![],
+            equality_constraints: vec![],
+            description: "G24 constraint 1 function".to_string(),
+            multimodal: false,
+            dimensions: vec![2],
+        },
+    );
+
+    metadata.insert(
+        "g24_constraint2".to_string(),
+        FunctionMetadata {
+            name: "g24_constraint2".to_string(),
+            bounds: vec![(0.0, 3.0), (0.0, 4.0)],
+            global_minima: vec![],
+            inequality_constraints: vec![],
+            equality_constraints: vec![],
+            description: "G24 constraint 2 function".to_string(),
+            multimodal: false,
+            dimensions: vec![2],
+        },
+    );
+
+    metadata.insert(
         "goldstein_price".to_string(),
         FunctionMetadata {
             name: "goldstein_price".to_string(),
@@ -1601,6 +1963,27 @@ mod tests {
             "exponential" => Some(exponential(x)),
             "forrester_2008" => Some(forrester_2008(x)),
             "freudenstein_roth" => Some(freudenstein_roth(x)),
+            "g04_constraint1" => None,
+            "g04_constraint2" => None,
+            "g04_constraint3" => None,
+            "g04_constraint4" => None,
+            "g04_constraint5" => None,
+            "g04_constraint6" => None,
+            "g04_objective" => Some(g04_objective(x)),
+            "g06_constraint1" => None,
+            "g06_constraint2" => None,
+            "g06_objective" => Some(g06_objective(x)),
+            "g08_constraint1" => None,
+            "g08_constraint2" => None,
+            "g08_objective" => Some(g08_objective(x)),
+            "g09_constraint1" => None,
+            "g09_constraint2" => None,
+            "g09_constraint3" => None,
+            "g09_constraint4" => None,
+            "g09_objective" => Some(g09_objective(x)),
+            "g24_constraint1" => None,
+            "g24_constraint2" => None,
+            "g24_objective" => Some(g24_objective(x)),
             "goldstein_price" => Some(goldstein_price(x)),
             "gramacy_lee_2012" => Some(gramacy_lee_2012(x)),
             "gramacy_lee_function" => Some(gramacy_lee_function(x)),

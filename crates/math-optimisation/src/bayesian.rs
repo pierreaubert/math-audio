@@ -12,6 +12,7 @@ use ndarray::Array1;
 
 mod bayes_opt_config;
 mod cholesky;
+mod constrained;
 mod consts;
 mod derive;
 mod evaluate;
@@ -29,6 +30,11 @@ mod tests;
 mod types;
 
 pub use bayes_opt_config::*;
+pub use constrained::{
+    BayesOptConstraint, BayesOptConstraintFn, ConstrainedBayesOptCallback,
+    ConstrainedBayesOptConfig, ConstrainedBayesOptIntermediate, ConstrainedBayesOptReport,
+    constrained_bayesian_optimization,
+};
 pub use types::*;
 
 use bayes_opt_config::candidate_pool;

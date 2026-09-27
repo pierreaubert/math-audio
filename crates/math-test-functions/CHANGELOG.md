@@ -1,3 +1,11 @@
+# 0.5.4
+
+## New features
+
+- Added CEC constrained fixtures `g06`, `g08`, `g24`, `g04`, and `g09`
+  (objectives plus inequality constraints) with registry metadata,
+  dispatch entries, known optima, and dimension guards.
+
 # 0.5.3
 
 ## Fixes
@@ -8,6 +16,15 @@
 - `happy_cat` is now a deprecated alias delegating to `happycat`,
   resolving the `|s-n|^0.5` vs `|s-n|^0.25` exponent divergence; the
   function registry dispatches `happy_cat` to the reference definition.
+
+## Performance
+
+- `levy` rewritten allocation-free with an empty-input guard.
+
+## Tests
+
+- Added proptest property tests and a criterion `eval` bench
+  (rosenbrock/rastrigin/ackley/levy at 30-D).
 
 # 0.5.2
 

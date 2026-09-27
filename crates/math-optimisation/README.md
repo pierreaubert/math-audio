@@ -128,6 +128,46 @@ let nonlinear_constraint = |x: &[f64]| -> f64 {
 };
 ```
 
+## Constrained global optimisation
+
+For constrained non-convex problems (`g(x) <= 0`), from cheapest to most
+sample-efficient:
+
+- `cobyla` multistart: cheap local baseline, no surrogate.
+- `cma_es` with `CmaEsConstraint` + `CmaEsConfig::adapt_penalty_weight`:
+  robust native-constraint baseline with IPOP restarts (`max_restarts`) and an
+  optional diagonal (`CmaCovariance::Diagonal`) mode for high dimensions.
+- `cobra` (`CobraConfig`): SACOBRA-style RBF-surrogate optimiser, one surrogate
+  per constraint plus objective, distance-requirement cycle, self-adjusting
+  output transform, stagnation kicks, COBYLA polish. Best default when
+  evaluations are expensive.
+- `constrained_bayesian_optimization` (`ConstrainedBayesOptConfig`):
+  single-trust-region constrained BO with constrained EI. Most sample-efficient
+  on low-dimensional multimodal problems; GP cost caps it at a few hundred
+  evaluations.
+- `RbfSurrogate` (`surrogate`): shared RBF models (cubic/Gaussian/multiquadric)
+  with holdout model selection for custom surrogate loops.
+
+Head-to-head on `benchmark-constrained` (G06, G08, G24, G04, G09,
+rosenbrock-disk; budget rungs 10-200 evals/dim, 3 seeds, success = feasible
+within per-problem tolerance of best known):
+
+| solver | problems solved | rung successes |
+|---|---|---|
+| cobra | 5/6 | 30/90 |
+| cobyla-ms | 3/6 | 24/90 |
+| cmaes+nat | 2/6 | 12/90 |
+| cmaes+pen | 2/6 | 10/90 |
+| scbo (<=250 evals) | 2/6 | 12/63 |
+| bo+pen | 0/6 | 1/60 |
+| isres | 0/6 | 2/90 |
+| lshade+pen | 0/6 | 1/90 |
+
+COBRA wins on smooth constrained problems (including 5-D G04 and 7-D G09);
+SCBO wins on multimodal low-dimensional ones (G08, rosenbrock-disk) at tiny
+budgets. Run with `cargo run --release -p math-optimisation --bin
+benchmark-constrained`.
+
 ## Visualization
 
 The crate includes a `plot_functions` binary for visualizing test functions and optimization traces:

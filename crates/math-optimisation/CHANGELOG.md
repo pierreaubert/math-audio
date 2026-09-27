@@ -1,3 +1,20 @@
+# 0.5.15
+
+## New features
+
+- Added `cobra`, a SACOBRA-style surrogate-assisted constrained optimiser
+  (RBF models per objective/constraint, distance-requirement cycle,
+  self-adjusting output transform, stagnation kicks, COBYLA polish).
+- Added `constrained_bayesian_optimization`, a single-trust-region
+  constrained BO arm with constrained EI.
+- Added `RbfSurrogate` with cubic/Gaussian/multiquadric kernels and
+  holdout model selection (`fit_auto`).
+- CMA-ES gained native inequality constraints with adaptive-penalty merit,
+  IPOP restarts, and a diagonal-covariance mode.
+- Added the `benchmark-constrained` suite (G06, G08, G24, G04, G09,
+  rosenbrock-disk) with budget-normalised rungs; COBRA solves 5/6 problems
+  against 2/6 for the CMA-ES baseline.
+
 # 0.5.14
 
 ## Bug fixes
@@ -24,6 +41,39 @@
 
 - `happy_cat` registry entries now point at `happycat` (same landscape);
   the deprecated duplicate no longer triggers deprecation warnings.
+
+# 0.5.12
+
+## Performance
+
+- CMA-ES and DE minimise memory copies by pre-allocating generation scratch
+  buffers and offspring pools.
+
+## Tests
+
+- Fixed a flaky CMA-ES caller-pool test: workers are now identified by
+  thread name and the worker-count assertion tolerates pool scheduling.
+
+# 0.5.11
+
+## Performance
+
+- DE and CMA-ES hot paths are ~7.3x faster on the evo benchmark (551.55 ms
+  -> 75.12 ms): reusable buffers, thread-local scratch, raw-slice
+  mutation/crossover loops, fused parallel trial build+eval, a guarded
+  Best1Bin fast path, and no materialised B*D transform matrix in CMA-ES.
+- Removed memory copies from mutation, crossover, and selection loops.
+
+## Internal
+
+- `benchmark_convergence` moved out of `benches/` (it is a binary, not a
+  benchmark) and the duplicate benchmark target removed.
+- Migrated to the `rand` `RngExt` API.
+
+## Tests
+
+- Added proptest property tests and criterion `de_bench`/`cmaes_bench`
+  benchmarks.
 
 # 0.5.10
 
