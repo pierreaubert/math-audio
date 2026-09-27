@@ -27,7 +27,7 @@ fn make_spectrum(nfft: usize, channels: usize) -> DiffTensor<f64> {
     fft.forward(&time).unwrap()
 }
 
-fn time_it(label: &str, reps: usize, mut op: impl FnMut()) -> f64 {
+fn time_it(tasks: &mut Vec<(String, f64)>, label: &str, reps: usize, mut op: impl FnMut()) {
     for _ in 0..5 {
         op();
     }
@@ -37,21 +37,21 @@ fn time_it(label: &str, reps: usize, mut op: impl FnMut()) -> f64 {
     }
     let ms = start.elapsed().as_secs_f64() * 1000.0;
     println!("{label}: {ms:.3} ms total for {reps} reps");
-    ms
+    tasks.push((label.to_string(), ms));
 }
 
 fn main() {
     let spectrum = make_spectrum(NFFT, CHANNELS);
-    let mut total = 0.0;
+    let mut tasks: Vec<(String, f64)> = Vec::new();
 
     let gain = Gain::new(NFFT, CHANNELS, CHANNELS).unwrap();
     let gain_out = gain.forward(&spectrum).unwrap();
     let gain_grad = DiffTensor::from_array(gain_out.data.clone());
-    total += time_it("gain fwd", REPS, || {
+    time_it(&mut tasks, "gain fwd", REPS, || {
         std::hint::black_box(gain.forward(&spectrum).unwrap());
     });
     let mut gain_mut = gain;
-    total += time_it("gain bwd", REPS, || {
+    time_it(&mut tasks, "gain bwd", REPS, || {
         gain_mut.zero_grad();
         std::hint::black_box(gain_mut.backward(&spectrum, &gain_out, &gain_grad).unwrap());
     });
@@ -59,11 +59,11 @@ fn main() {
     let delay = Delay::new(NFFT, CHANNELS, CHANNELS, 0.0).unwrap();
     let delay_out = delay.forward(&spectrum).unwrap();
     let delay_grad = DiffTensor::from_array(delay_out.data.clone());
-    total += time_it("delay fwd", REPS, || {
+    time_it(&mut tasks, "delay fwd", REPS, || {
         std::hint::black_box(delay.forward(&spectrum).unwrap());
     });
     let mut delay_mut = delay;
-    total += time_it("delay bwd", REPS, || {
+    time_it(&mut tasks, "delay bwd", REPS, || {
         delay_mut.zero_grad();
         std::hint::black_box(
             delay_mut
@@ -85,11 +85,11 @@ fn main() {
     let spectrum_1ch = make_spectrum(NFFT, 1);
     let biquad_out = biquad.forward(&spectrum_1ch).unwrap();
     let biquad_grad = DiffTensor::from_array(biquad_out.data.clone());
-    total += time_it("biquad fwd", REPS, || {
+    time_it(&mut tasks, "biquad fwd", REPS, || {
         std::hint::black_box(biquad.forward(&spectrum_1ch).unwrap());
     });
     let mut biquad_mut = biquad;
-    total += time_it("biquad bwd", REPS, || {
+    time_it(&mut tasks, "biquad bwd", REPS, || {
         biquad_mut.zero_grad();
         std::hint::black_box(
             biquad_mut
@@ -103,11 +103,11 @@ fn main() {
     let series = Series::new(vec![Box::new(series_gain), Box::new(series_delay)]).unwrap();
     let series_out = series.forward(&spectrum).unwrap();
     let series_grad = DiffTensor::from_array(series_out.data.clone());
-    total += time_it("series fwd", REPS, || {
+    time_it(&mut tasks, "series fwd", REPS, || {
         std::hint::black_box(series.forward(&spectrum).unwrap());
     });
     let mut series_mut = series;
-    total += time_it("series bwd", REPS, || {
+    time_it(&mut tasks, "series bwd", REPS, || {
         series_mut.zero_grad();
         std::hint::black_box(
             series_mut
@@ -121,11 +121,11 @@ fn main() {
     let recursion = Recursion::new(Box::new(rec_ff), Box::new(rec_fb)).unwrap();
     let rec_out = recursion.forward(&spectrum).unwrap();
     let rec_grad = DiffTensor::from_array(rec_out.data.clone());
-    total += time_it("recursion fwd", REPS, || {
+    time_it(&mut tasks, "recursion fwd", REPS, || {
         std::hint::black_box(recursion.forward(&spectrum).unwrap());
     });
     let mut recursion_mut = recursion;
-    total += time_it("recursion bwd", REPS, || {
+    time_it(&mut tasks, "recursion bwd", REPS, || {
         recursion_mut.zero_grad();
         std::hint::black_box(
             recursion_mut
@@ -134,5 +134,18 @@ fn main() {
         );
     });
 
+    let total: f64 = tasks.iter().map(|(_, ms)| ms).sum();
     println!("{total:.6}");
+    if let Ok(path) = std::env::var("EVO_RESULT_PATH") {
+        let tasks_json: Vec<String> = tasks
+            .iter()
+            .map(|(name, ms)| format!("\"{name}\": {ms:.6}"))
+            .collect();
+        let json = format!(
+            "{{\"score\": {total:.6}, \"tasks\": {{{}}}}}",
+            tasks_json.join(", ")
+        );
+        std::fs::write(&path, &json).expect("write EVO_RESULT_PATH");
+        println!("wrote {path}");
+    }
 }
