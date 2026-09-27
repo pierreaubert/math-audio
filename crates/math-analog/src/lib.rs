@@ -13,6 +13,7 @@
 mod chain;
 mod console_preamp;
 mod curves;
+mod diode_clipper;
 mod effects;
 #[cfg(feature = "fitting")]
 pub mod fitting;
@@ -22,11 +23,14 @@ mod level;
 mod process;
 mod stateful;
 mod static_color;
+mod tonestack;
+mod triode_stage;
 
 pub mod analysis;
 
 pub use console_preamp::ConsolePreampModel;
 pub use curves::{asymmetric_style, normalized_soft_clip, tape_style, tube_style};
+pub use diode_clipper::{DiodeClipperModel, DiodeFlavor};
 pub use effects::{
     DefectConfig, DefectState, HysteresisMode, HysteresisState, NonlinearSolveResult,
     PowerSupplySag, SlewRateLimiter, TapeEqCurve, TapeEqPoint, solve_bounded_nonlinear,
@@ -42,6 +46,8 @@ pub use level::{
 pub use process::{AnalogError, AnalogProcessor, ProcessSpec};
 pub use stateful::{TapeModel, TransformerMode, TransformerModel};
 pub use static_color::{StaticColorModel, StaticCurve};
+pub use tonestack::{ToneStackModel, ToneStackValues};
+pub use triode_stage::TriodeStageModel;
 
 /// The model family selected for one prepared processor.
 ///
@@ -61,6 +67,12 @@ pub enum AnalogModel {
     Transformer(TransformerModel),
     /// A stylized Wiener–Hammerstein console/preamp structure.
     ConsolePreamp(ConsolePreampModel),
+    /// A Shockley-diode shunt clipper component model.
+    DiodeClipper(DiodeClipperModel),
+    /// A Koren-12AX7A common-cathode triode stage component model.
+    TriodeStage(TriodeStageModel),
+    /// An FMV/TMB tone-stack network component model.
+    ToneStack(ToneStackModel),
 }
 
 impl AnalogModel {
@@ -71,6 +83,9 @@ impl AnalogModel {
     pub const TAPE_ID: u32 = 3;
     pub const TRANSFORMER_ID: u32 = 4;
     pub const CONSOLE_PREAMP_ID: u32 = 5;
+    pub const DIODE_CLIPPER_ID: u32 = 6;
+    pub const TRIODE_STAGE_ID: u32 = 7;
+    pub const TONE_STACK_ID: u32 = 8;
 
     /// Decode a serialized model identifier without mutating an existing
     /// model.  Unknown identifiers are rejected rather than guessed.
@@ -82,6 +97,9 @@ impl AnalogModel {
             Self::TAPE_ID => Ok(Self::Tape(TapeModel::default())),
             Self::TRANSFORMER_ID => Ok(Self::Transformer(TransformerModel::default())),
             Self::CONSOLE_PREAMP_ID => Ok(Self::ConsolePreamp(ConsolePreampModel::default())),
+            Self::DIODE_CLIPPER_ID => Ok(Self::DiodeClipper(DiodeClipperModel::default())),
+            Self::TRIODE_STAGE_ID => Ok(Self::TriodeStage(TriodeStageModel::default())),
+            Self::TONE_STACK_ID => Ok(Self::ToneStack(ToneStackModel::default())),
             unknown => Err(AnalogError::UnknownModelId(unknown)),
         }
     }
@@ -94,6 +112,9 @@ impl AnalogModel {
             Self::Tape(_) => Self::TAPE_ID,
             Self::Transformer(_) => Self::TRANSFORMER_ID,
             Self::ConsolePreamp(_) => Self::CONSOLE_PREAMP_ID,
+            Self::DiodeClipper(_) => Self::DIODE_CLIPPER_ID,
+            Self::TriodeStage(_) => Self::TRIODE_STAGE_ID,
+            Self::ToneStack(_) => Self::TONE_STACK_ID,
         }
     }
 }
@@ -113,6 +134,9 @@ impl AnalogProcessor for AnalogModel {
             Self::Tape(model) => model.prepare(spec),
             Self::Transformer(model) => model.prepare(spec),
             Self::ConsolePreamp(model) => model.prepare(spec),
+            Self::DiodeClipper(model) => model.prepare(spec),
+            Self::TriodeStage(model) => model.prepare(spec),
+            Self::ToneStack(model) => model.prepare(spec),
         }
     }
 
@@ -124,6 +148,9 @@ impl AnalogProcessor for AnalogModel {
             Self::Tape(model) => model.reset(),
             Self::Transformer(model) => model.reset(),
             Self::ConsolePreamp(model) => model.reset(),
+            Self::DiodeClipper(model) => model.reset(),
+            Self::TriodeStage(model) => model.reset(),
+            Self::ToneStack(model) => model.reset(),
         }
     }
 
@@ -139,6 +166,9 @@ impl AnalogProcessor for AnalogModel {
             Self::Tape(model) => model.process_interleaved(samples, frames),
             Self::Transformer(model) => model.process_interleaved(samples, frames),
             Self::ConsolePreamp(model) => model.process_interleaved(samples, frames),
+            Self::DiodeClipper(model) => model.process_interleaved(samples, frames),
+            Self::TriodeStage(model) => model.process_interleaved(samples, frames),
+            Self::ToneStack(model) => model.process_interleaved(samples, frames),
         }
     }
 
@@ -150,6 +180,9 @@ impl AnalogProcessor for AnalogModel {
             Self::Tape(model) => model.latency_samples(),
             Self::Transformer(model) => model.latency_samples(),
             Self::ConsolePreamp(model) => model.latency_samples(),
+            Self::DiodeClipper(model) => model.latency_samples(),
+            Self::TriodeStage(model) => model.latency_samples(),
+            Self::ToneStack(model) => model.latency_samples(),
         }
     }
 }

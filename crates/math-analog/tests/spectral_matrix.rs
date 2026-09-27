@@ -100,6 +100,14 @@ fn every_model_family_exposes_an_in_crate_alias_reduction_path() {
             AnalogModel::Tape(model) => model.set_anti_aliasing(mode),
             AnalogModel::Transformer(model) => model.set_anti_aliasing(mode),
             AnalogModel::ConsolePreamp(model) => model.set_anti_aliasing(mode),
+            // Component models (IDs 6-8) expose no in-crate ADAA option:
+            // implicit Newton solves have no closed-form antiderivative and
+            // the tone stack is linear. Alias control is documented host
+            // oversampling (see references/component-references.md); the
+            // characterization test below records their finite behavior.
+            AnalogModel::DiodeClipper(_)
+            | AnalogModel::TriodeStage(_)
+            | AnalogModel::ToneStack(_) => {}
         }
         match &mut model {
             AnalogModel::Harmonics(model) => {
@@ -112,6 +120,11 @@ fn every_model_family_exposes_an_in_crate_alias_reduction_path() {
             AnalogModel::Tape(model) => model.set_drive_db(24.0).unwrap(),
             AnalogModel::Transformer(model) => model.set_drive_db(24.0).unwrap(),
             AnalogModel::ConsolePreamp(model) => model.set_input_gain_db(24.0).unwrap(),
+            AnalogModel::DiodeClipper(model) => model.set_drive_db(24.0).unwrap(),
+            AnalogModel::TriodeStage(model) => model.set_drive_db(24.0).unwrap(),
+            AnalogModel::ToneStack(model) => {
+                model.set_treble(0.9).unwrap();
+            }
         }
         model
             .prepare(ProcessSpec::new(sample_rate, 1, record_length))
@@ -129,6 +142,10 @@ fn every_model_family_exposes_an_in_crate_alias_reduction_path() {
             .alias_rms
     };
 
+    // The 50% folded-energy guard stays scoped to families 0-5 (the models
+    // it was pre-registered for in the Phase B exit criterion). Component
+    // models carry no in-crate ADAA path by design; see the
+    // characterization test below and references/component-references.md.
     for model_id in 0..=AnalogModel::CONSOLE_PREAMP_ID {
         let off = render(model_id, AntiAliasing::Off);
         let adaa = render(model_id, AntiAliasing::Adaa1);
@@ -141,4 +158,60 @@ fn every_model_family_exposes_an_in_crate_alias_reduction_path() {
             "model {model_id} failed the provisional folded-energy guard: ADAA={adaa} Off={off}"
         );
     }
+}
+
+#[test]
+fn component_models_record_finite_alias_characterization() {
+    // IDs 6-8 have no in-crate ADAA path (implicit solves / linear): record
+    // finite alias reports instead of asserting the folded-energy guard, and
+    // prove the linear tone stack aliases at the measurement floor.
+    let sample_rate = 48_000.0;
+    let frequency = 10_000.0;
+    let record_length = 4_800;
+    let render = |model_id: u32| {
+        let mut model = AnalogModel::from_id(model_id).unwrap();
+        match &mut model {
+            AnalogModel::DiodeClipper(model) => model.set_drive_db(24.0).unwrap(),
+            AnalogModel::TriodeStage(model) => model.set_drive_db(24.0).unwrap(),
+            AnalogModel::ToneStack(model) => {
+                model.set_treble(0.9).unwrap();
+            }
+            _ => unreachable!("component fixture covers IDs 6-8 only"),
+        }
+        // Settle first: startup transients leak broadband energy into the
+        // alias bins of every model, linear or not. The characterization
+        // measures steady-state behavior on the second half.
+        model
+            .prepare(ProcessSpec::new(sample_rate, 1, 2 * record_length))
+            .unwrap();
+        let mut samples: Vec<f32> = (0..2 * record_length)
+            .map(|index| (TAU * frequency * index as f32 / sample_rate).sin() * 0.8)
+            .collect();
+        model
+            .process_interleaved(&mut samples, 2 * record_length)
+            .unwrap();
+        assert!(samples.iter().all(|sample| sample.is_finite()));
+        let settled = &samples[record_length..];
+        measure_harmonics(settled, sample_rate, frequency, 5)
+            .unwrap()
+            .distortion(settled)
+            .unwrap()
+            .alias_rms
+    };
+
+    let clipper = render(AnalogModel::DIODE_CLIPPER_ID);
+    let triode = render(AnalogModel::TRIODE_STAGE_ID);
+    let stack = render(AnalogModel::TONE_STACK_ID);
+    assert!(clipper.is_finite() && triode.is_finite() && stack.is_finite());
+    // The linear stack aliases at the f32 DFT floor (~2e-5 here); the
+    // clipping components alias orders of magnitude higher.
+    assert!(
+        stack < 1e-4,
+        "linear tone stack should alias at the floor, got {stack}"
+    );
+    assert!(
+        stack < clipper * 0.01 && stack < triode * 0.01,
+        "stack {stack} not well below clipper {clipper} / triode {triode}"
+    );
+    println!("component alias_rms: clipper={clipper} triode={triode} stack={stack}");
 }

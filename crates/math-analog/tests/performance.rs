@@ -26,7 +26,7 @@ fn worst_callback_report_covers_all_models_and_channel_widths() {
     let mut worst_ns = 0_u128;
     let mut worst_case = (0_u32, 0_usize);
     for channels in [1, 2, 6, 12] {
-        for model_id in 0..=AnalogModel::CONSOLE_PREAMP_ID {
+        for model_id in 0..=AnalogModel::TONE_STACK_ID {
             let spec = ProcessSpec::new(48_000.0, channels, 2_048);
             let mut model = AnalogModel::from_id(model_id).unwrap();
             model.prepare(spec).unwrap();
@@ -65,7 +65,13 @@ fn worst_callback_report_covers_all_models_and_channel_widths() {
 
 #[test]
 fn stateful_models_survive_denormal_stress() {
-    for model_id in [AnalogModel::TAPE_ID, AnalogModel::TRANSFORMER_ID] {
+    for model_id in [
+        AnalogModel::TAPE_ID,
+        AnalogModel::TRANSFORMER_ID,
+        AnalogModel::DIODE_CLIPPER_ID,
+        AnalogModel::TRIODE_STAGE_ID,
+        AnalogModel::TONE_STACK_ID,
+    ] {
         let mut model = AnalogModel::from_id(model_id).unwrap();
         model.prepare(ProcessSpec::new(48_000.0, 2, 2_048)).unwrap();
         let mut block = vec![f32::MIN_POSITIVE * 0.25; 2 * 2_048];

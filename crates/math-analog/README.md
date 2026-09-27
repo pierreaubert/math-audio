@@ -7,7 +7,7 @@ wrappers.
 
 ## Current model boundary
 
-The crate currently provides six truthful model families:
+The crate currently provides nine truthful model families:
 
 - `HarmonicModel`: a controlled H2/H3 baseline using
   `u = tanh(drive * x)` and
@@ -30,6 +30,18 @@ The crate currently provides six truthful model families:
 - `ConsolePreampModel`: a bounded Wiener–Hammerstein-style structure with
   synthetic defaults, append-only model ID 5, and prepared biquad poles. It
   is not a hardware claim without fitted provenance.
+- `DiodeClipperModel`: a Shockley-diode shunt clipper component model
+  (append-only model ID 6) with trapezoidal capacitor integration and a
+  per-sample bounded Newton solve. Silicon/germanium flavors are
+  illustrative documented defaults, not datasheet values.
+- `TriodeStageModel`: a Koren-12AX7A common-cathode stage component model
+  (append-only model ID 7) with an implicit plate solve at the documented
+  350 V / 150 kΩ operating point, normalized to unity small-signal gain.
+  No grid current is modeled; fixed bias only.
+- `ToneStackModel`: the Yeh (DAFx-06) FMV/TMB passive network component
+  model (append-only model ID 8) as an exact state-space discretization
+  with schematic ('59, default) or production value sets. Bass sweeps
+  linearly in v1 (Yeh's log taper deferred).
 
 The common `character` macro is neutral at `0.5`. For the memoryless and
 Hammerstein families it applies a bounded pre-curve bias, making the mapping
@@ -85,10 +97,13 @@ ceiling. It creates no preference or discrimination result; human listening
 must still be blinded, randomized, and recorded separately.
 
 The `model_matrix_report` example applies one declared synthetic fixture to
-all six serialized model families and records harmonic, THD/THD+N, IMD,
+all nine serialized model families and records harmonic, THD/THD+N, IMD,
 transient, DC, and finite-output rows. `console_preamp_report` adds an
-explicit loudness-matched H2/H3 baseline comparison. These are
-characterization evidence, not hardware-validation or listening claims.
+explicit loudness-matched H2/H3 baseline comparison, and
+`component_report` records clipper thresholds/symmetry, triode
+gain/THD/solver stats, and tone-stack scoop/sweep evidence against the
+frozen references. These are characterization evidence, not
+hardware-validation or listening claims.
 
 The verification surface includes a 44.1/48/96/192 kHz harmonic matrix at
 -36/-24/-18/-12/-6/-1 dBFS and 50/100/1k/5k/near-Nyquist test frequencies,

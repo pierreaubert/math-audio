@@ -442,11 +442,16 @@ where
         };
         let next = candidate.clamp(lo, hi);
         if (next - value).abs() <= tolerance * 0.1 {
+            // A stalled iterate that already satisfies the tolerance is
+            // converged: near the root the Newton correction underflows f32
+            // resolution before the residual check runs again. This matches
+            // the exhausted-budget exit below.
+            let stalled = function(next);
             return NonlinearSolveResult {
                 value: next,
-                residual: function(next),
+                residual: stalled,
                 iterations: iteration,
-                converged: false,
+                converged: stalled.is_finite() && stalled.abs() <= tolerance,
             };
         }
         value = next;
@@ -605,5 +610,25 @@ mod tests {
         assert!((result.value.abs() - 2.0).abs() < 1e-3);
         let capped = solve_bounded_nonlinear(|_| 1.0, 0.0, -1.0, 1.0, 1_000, 1e-8);
         assert!(capped.iterations <= 64);
+    }
+
+    #[test]
+    fn nonlinear_solver_stall_with_good_residual_counts_as_converged() {
+        // Steep, nearly linear root: the Newton correction drops below the
+        // stall threshold (tolerance * 0.1) while the residual is still just
+        // above tolerance, then lands inside tolerance. A stalled iterate
+        // that satisfies the tolerance is converged (matches the
+        // exhausted-budget exit); without that rule this reports false.
+        let result = solve_bounded_nonlinear(
+            |x| 1e6 * (x - 0.5) * (x - 0.5) * (x - 0.5) + 200.0 * (x - 0.5),
+            0.500008,
+            -1.0,
+            1.0,
+            64,
+            1e-4,
+        );
+        assert!(result.converged);
+        assert!(result.residual.abs() <= 1e-4);
+        assert!((result.value - 0.5).abs() < 1e-6);
     }
 }

@@ -18,6 +18,9 @@ fn model_name(model_id: u32) -> &'static str {
         AnalogModel::TAPE_ID => "Tape-style",
         AnalogModel::TRANSFORMER_ID => "Transformer-style",
         AnalogModel::CONSOLE_PREAMP_ID => "Console/Preamp-style",
+        AnalogModel::DIODE_CLIPPER_ID => "DiodeClipper",
+        AnalogModel::TRIODE_STAGE_ID => "TriodeStage",
+        AnalogModel::TONE_STACK_ID => "ToneStack",
         _ => "Unknown",
     }
 }
@@ -71,6 +74,26 @@ fn configure(model: &mut AnalogModel) {
             model.set_amount(1.0).expect("valid amount");
             model.set_mix(1.0).expect("valid mix");
         }
+        AnalogModel::DiodeClipper(model) => {
+            model.set_drive_db(12.0).expect("valid drive");
+            model.set_output_gain_db(0.0).expect("valid output gain");
+            model.set_amount(1.0).expect("valid amount");
+            model.set_mix(1.0).expect("valid mix");
+        }
+        AnalogModel::TriodeStage(model) => {
+            model.set_drive_db(12.0).expect("valid drive");
+            model.set_output_gain_db(0.0).expect("valid output gain");
+            model.set_amount(1.0).expect("valid amount");
+            model.set_mix(1.0).expect("valid mix");
+        }
+        AnalogModel::ToneStack(model) => {
+            model.set_treble(0.5).expect("valid treble");
+            model.set_mid(0.5).expect("valid mid");
+            model.set_bass(0.5).expect("valid bass");
+            model.set_output_gain_db(0.0).expect("valid output gain");
+            model.set_amount(1.0).expect("valid amount");
+            model.set_mix(1.0).expect("valid mix");
+        }
     }
 }
 
@@ -115,7 +138,7 @@ fn main() {
         "columns=model id finite h1 h2 h3 thd thd_plus_n imd_2f1_minus_f2 imd_2f2_minus_f1 transient_peak transient_rms dc"
     );
 
-    for model_id in 0..=AnalogModel::CONSOLE_PREAMP_ID {
+    for model_id in 0..=AnalogModel::TONE_STACK_ID {
         let harmonic_samples = render_tone(model_id, 1_000.0);
         let harmonic =
             measure_harmonics(&harmonic_samples, SAMPLE_RATE, 1_000.0, 3).expect("harmonic");
