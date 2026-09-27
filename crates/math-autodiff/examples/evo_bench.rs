@@ -1,7 +1,8 @@
 //! Fast timing harness for the evo optimization loop (items: parallelism,
 //! recursion). Not statistically rigorous like criterion; it runs fixed
-//! repetition counts and prints one total-milliseconds score (lower is
-//! better) as the last stdout line.
+//! repetition counts (50 warmup + min-of-3 timed batches per task) and
+//! prints one total-milliseconds score (lower is better) as the last
+//! stdout line.
 
 use math_audio_autodiff::{
     delay::Delay, fft::Fft, gain::Gain, iir::biquad::Biquad, module::DiffModule,
@@ -15,6 +16,11 @@ use std::time::Instant;
 const NFFT: usize = 8192;
 const CHANNELS: usize = 2;
 const REPS: usize = 200;
+/// Warmup reps before timing (defeats cold-CPU frequency lottery).
+const WARMUP: usize = 50;
+/// Timed batches per task; the reported time is the min across batches,
+/// which rejects transient contention outliers from concurrent builds.
+const BATCHES: usize = 3;
 
 fn make_spectrum(nfft: usize, channels: usize) -> DiffTensor<f64> {
     let fft = Fft::with_channels(nfft, channels);
@@ -28,16 +34,22 @@ fn make_spectrum(nfft: usize, channels: usize) -> DiffTensor<f64> {
 }
 
 fn time_it(tasks: &mut Vec<(String, f64)>, label: &str, reps: usize, mut op: impl FnMut()) {
-    for _ in 0..5 {
+    for _ in 0..WARMUP {
         op();
     }
-    let start = Instant::now();
-    for _ in 0..reps {
-        op();
+    let mut best = f64::INFINITY;
+    let mut worst = 0.0f64;
+    for _ in 0..BATCHES {
+        let start = Instant::now();
+        for _ in 0..reps {
+            op();
+        }
+        let ms = start.elapsed().as_secs_f64() * 1000.0;
+        best = best.min(ms);
+        worst = worst.max(ms);
     }
-    let ms = start.elapsed().as_secs_f64() * 1000.0;
-    println!("{label}: {ms:.3} ms total for {reps} reps");
-    tasks.push((label.to_string(), ms));
+    println!("{label}: {best:.3} ms min-of-{BATCHES} for {reps} reps (worst {worst:.3})");
+    tasks.push((label.to_string(), best));
 }
 
 fn main() {
