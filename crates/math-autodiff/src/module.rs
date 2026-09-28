@@ -187,6 +187,26 @@ pub trait DiffModule<T> {
         Ok(())
     }
 
+    /// Backward pass that only accumulates parameter gradients.
+    ///
+    /// Equivalent to [`backward`](Self::backward) except the dLoss/dInput
+    /// tensor is neither computed nor returned, for callers that provably
+    /// discard it. The default implementation calls `backward` and drops the
+    /// result; override to skip the `grad_input` computation.
+    ///
+    /// # Errors
+    ///
+    /// Same conditions as [`backward`](Self::backward).
+    fn backward_params_only(
+        &mut self,
+        input: &DiffTensor<T>,
+        output: &DiffTensor<T>,
+        grad_output: &DiffTensor<T>,
+    ) -> Result<(), AutodiffError> {
+        let _ = self.backward(input, output, grad_output)?;
+        Ok(())
+    }
+
     /// Number of input channels expected by this module.
     fn input_channels(&self) -> usize;
 

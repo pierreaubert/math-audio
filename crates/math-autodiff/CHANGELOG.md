@@ -8,6 +8,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `DiffModule::backward_params_only` (default routes through `backward`;
+  `Gain` overrides to skip the discarded `grad_input`), used by `Recursion`
+  to avoid submodule input-gradient work it throws away.
 - `loss`: Bark/ERB weighting helpers (`bark_weights`, `erb_weights`,
   `bark_weighted_loss`, `erb_weighted_loss`), spectral-convergence,
   log-magnitude, and multi-scale spectral losses with VJP backward passes.
@@ -19,6 +22,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Criterion coverage for gain, delay, `Series`, losses, and the `_into` APIs.
 
 ### Changed
+- `Recursion::backward` uses a fused per-bin kernel (`fused_backward_bins`):
+  single pass over contiguous slices computing `A^H @ G` once per bin and
+  reusing it for both feedforward/feedback gradients, with stack
+  `MaybeUninit` scratch (no per-bin zeroing) and direct scatter; buffered
+  fallback kept for >16 channels or non-contiguous inputs. Measured -66% on
+  recursion backward, -45% total (`evo_bench`, `nfft=8192` stereo).
 - Contiguous fast paths (flat indexing, no per-bin view creation) in
   `Gain`, `Delay`, `Matrix`, `Biquad`, `ParallelBiquad`, and `SosFilter`
   forward/backward (measured 17-156x on `nfft=8192` stereo benches).
@@ -38,6 +47,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Tests
 - `evo_bench` example: fixed-repetition timing harness for the evo
   parallelism/recursion optimization loop (single total-ms score).
+- `recursion_tests`: buffered-fallback (>16ch, strided) equivalence with the
+  fused kernel, wide-channel finite-difference spot check, and
+  `backward_params_only` parity/error coverage.
 
 ## [0.5.2] - 2026-08-18
 

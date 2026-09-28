@@ -338,6 +338,97 @@ impl<T: Scalar> DiffModule<T> for Gain<T> {
         Ok(())
     }
 
+    #[allow(clippy::too_many_lines)]
+    fn backward_params_only(
+        &mut self,
+        input: &DiffTensor<T>,
+        _output: &DiffTensor<T>,
+        grad_output: &DiffTensor<T>,
+    ) -> Result<(), AutodiffError> {
+        let n_bins_expected = self.n_bins();
+        let param_shape = self.param.shape();
+        if param_shape.len() != 2 {
+            return Err(AutodiffError::Message(format!(
+                "Gain::backward: expected 2-D parameter tensor, got shape {:?}",
+                param_shape
+            )));
+        }
+        let (n_out, n_in_stored) = (param_shape[0], param_shape[1]);
+        let mut param_grad = view2_mut(&mut self.param_grad, "Gain")?;
+
+        let input_shape = input.data.shape();
+        let grad_shape = grad_output.data.shape();
+        validate_spectral_gradient_shape("Gain::backward", input_shape, grad_shape, n_out)?;
+        if input_shape.len() < 3 {
+            return Err(AutodiffError::Message(format!(
+                "Gain::backward: input must have at least 3 dimensions, got {:?}",
+                input_shape
+            )));
+        }
+        if grad_shape.len() < 3 {
+            return Err(AutodiffError::Message(format!(
+                "Gain::backward: grad_output must have at least 3 dimensions, got {:?}",
+                grad_shape
+            )));
+        }
+        let n_bins = input_shape[1];
+        let n_in = input_shape[2];
+        if n_bins != n_bins_expected {
+            return Err(AutodiffError::Message(format!(
+                "Gain::backward: expected {} frequency bins, got {}",
+                n_bins_expected, n_bins
+            )));
+        }
+        if n_in != n_in_stored {
+            return Err(AutodiffError::Message(format!(
+                "Gain::backward: expected {} input channels, got {}",
+                n_in_stored, n_in
+            )));
+        }
+        if grad_shape[1] != n_bins || grad_shape[2] != n_out {
+            return Err(AutodiffError::Message(format!(
+                "Gain::backward: grad_output shape {:?} incompatible with (..., {}, {})",
+                grad_shape, n_bins, n_out
+            )));
+        }
+
+        // Accumulate parameter gradients (dLoss/dInput is skipped entirely).
+        if input_shape.len() == 3
+            && grad_shape.len() == 3
+            && let Some(input_data) = input.data.as_slice()
+            && let Some(grad_data) = grad_output.data.as_slice()
+        {
+            let batch = input_shape[0];
+            for out_ch in 0..n_out {
+                for in_ch in 0..n_in {
+                    let mut sum = T::zero();
+                    for batch_index in 0..batch {
+                        for f in 0..n_bins {
+                            let g = grad_data[(batch_index * n_bins + f) * n_out + out_ch];
+                            let x = input_data[(batch_index * n_bins + f) * n_in + in_ch];
+                            sum += (g * x.conj()).re;
+                        }
+                    }
+                    param_grad[[out_ch, in_ch]] += sum;
+                }
+            }
+        } else {
+            for out_ch in 0..n_out {
+                let grad_slice = grad_output.data.index_axis(Axis(2), out_ch);
+                for in_ch in 0..n_in {
+                    let input_slice = input.data.index_axis(Axis(2), in_ch);
+                    let mut sum = T::zero();
+                    for (g, x) in grad_slice.iter().zip(input_slice.iter()) {
+                        sum += (g * x.conj()).re;
+                    }
+                    param_grad[[out_ch, in_ch]] += sum;
+                }
+            }
+        }
+
+        Ok(())
+    }
+
     fn input_channels(&self) -> usize {
         self.param.shape().get(1).copied().unwrap_or(0)
     }

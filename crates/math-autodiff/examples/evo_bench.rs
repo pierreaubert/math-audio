@@ -85,16 +85,7 @@ fn main() {
         );
     });
 
-    let biquad = Biquad::new(
-        NFFT,
-        48_000.0,
-        2,
-        BiquadFilterType::Highpass,
-        1,
-        1,
-        30.0,
-    )
-    .unwrap();
+    let biquad = Biquad::new(NFFT, 48_000.0, 2, BiquadFilterType::Highpass, 1, 1, 30.0).unwrap();
     let spectrum_1ch = make_spectrum(NFFT, 1);
     let biquad_out = biquad.forward(&spectrum_1ch).unwrap();
     let biquad_grad = DiffTensor::from_array(biquad_out.data.clone());

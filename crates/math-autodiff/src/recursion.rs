@@ -12,6 +12,7 @@
 use nalgebra::DMatrix;
 use ndarray::{Array2, Array3, ArrayD, Axis, IxDyn};
 use num_complex::Complex;
+use std::mem::MaybeUninit;
 use std::sync::{Arc, Mutex};
 
 use crate::error::AutodiffError;
@@ -126,6 +127,113 @@ fn conj_transpose_into<T: Scalar>(src: &Array2<Complex<T>>, dst: &mut Array2<Com
     for i in 0..m {
         for j in 0..n {
             dst[[j, i]] = src[[i, j]].conj();
+        }
+    }
+}
+
+/// Maximum channel count served by [`fused_backward_bins`].
+///
+/// Wider systems fall back to the reusable-buffer path in
+/// [`Recursion::backward`]; the bound keeps the per-bin stack temporaries
+/// small (two 16x16 complex matrices).
+const MAX_STACK_CHANNELS: usize = 16;
+
+/// Contiguous slice views for [`fused_backward_bins`].
+///
+/// Source tensors use `(bins, rows, cols)` C-order; destination tensors use
+/// `(cols, bins, rows)` C-order, matching the layouts built by
+/// [`Recursion::backward`].
+struct FusedBinViews<'a, T> {
+    h_ff: &'a [Complex<T>],
+    h_fb: &'a [Complex<T>],
+    a: &'a [Complex<T>],
+    dl_dh_closed: &'a [Complex<T>],
+    h_ff_response: &'a mut [Complex<T>],
+    h_fb_response: &'a mut [Complex<T>],
+    grad_ff: &'a mut [Complex<T>],
+    grad_fb: &'a mut [Complex<T>],
+}
+
+/// Fused per-bin backward solve over contiguous slices.
+///
+/// Computes `dL/dH_ff[f] = A^H @ G` once per bin and reuses it for
+/// `dL/dH_fb[f] = (A^H @ G) @ H_ff^H @ A^H`, scattering both gradients and
+/// the response blocks directly into their destination tensors. Inner
+/// accumulation order matches [`matmul_into`], so results agree with the
+/// buffered path. Each iteration touches only its own disjoint slice regions
+/// plus loop-local temporaries, keeping bins independent.
+#[allow(
+    clippy::many_single_char_names,
+    reason = "matrix-index names match the surrounding recursion math"
+)]
+fn fused_backward_bins<T: Scalar>(
+    views: FusedBinViews<'_, T>,
+    nb: usize,
+    n_in: usize,
+    n_out: usize,
+) {
+    debug_assert!(n_out <= MAX_STACK_CHANNELS && n_in <= MAX_STACK_CHANNELS);
+    let zero = Complex::new(T::zero(), T::zero());
+    let FusedBinViews {
+        h_ff,
+        h_fb,
+        a,
+        dl_dh_closed,
+        h_ff_response,
+        h_fb_response,
+        grad_ff,
+        grad_fb,
+    } = views;
+    for f in 0..nb {
+        let a_base = f * n_out * n_out;
+        let hff_base = f * n_out * n_in;
+        // Loop-local uninitialized scratch: only `[..n_out][..n_in]` is
+        // written below, and only that region is read back, so no per-bin
+        // zeroing is needed and iterations share no state.
+        let mut t1: [[MaybeUninit<Complex<T>>; MAX_STACK_CHANNELS]; MAX_STACK_CHANNELS] =
+            [[MaybeUninit::uninit(); MAX_STACK_CHANNELS]; MAX_STACK_CHANNELS];
+        for i in 0..n_in {
+            let row = (i * nb + f) * n_out;
+            for o in 0..n_out {
+                h_ff_response[row + o] = h_ff[hff_base + o * n_in + i];
+                let mut sum = zero;
+                for k in 0..n_out {
+                    sum += a[a_base + k * n_out + o].conj() * dl_dh_closed[hff_base + k * n_in + i];
+                }
+                t1[o][i].write(sum);
+                grad_ff[row + o] = sum;
+            }
+        }
+        // T2 = T1 @ H_ff^H (n_out x n_out) on the stack.
+        let mut t2: [[MaybeUninit<Complex<T>>; MAX_STACK_CHANNELS]; MAX_STACK_CHANNELS] =
+            [[MaybeUninit::uninit(); MAX_STACK_CHANNELS]; MAX_STACK_CHANNELS];
+        for r in 0..n_out {
+            for k in 0..n_out {
+                let mut sum = zero;
+                for j in 0..n_in {
+                    // SAFETY: `t1[r][j]` was written for all `r < n_out`,
+                    // `j < n_in` in the loop above.
+                    let t = unsafe { t1[r][j].assume_init() };
+                    sum += t * h_ff[hff_base + k * n_in + j].conj();
+                }
+                t2[r][k].write(sum);
+            }
+        }
+        // T3 = T2 @ A^H scattered to grad_fb alongside the H_fb response copy.
+        let hfb_base = f * n_out * n_out;
+        for c in 0..n_out {
+            let row = (c * nb + f) * n_out;
+            for r in 0..n_out {
+                h_fb_response[row + r] = h_fb[hfb_base + r * n_out + c];
+                let mut sum = zero;
+                for k in 0..n_out {
+                    // SAFETY: `t2[r][k]` was written for all `r < n_out`,
+                    // `k < n_out` in the loop above.
+                    let t = unsafe { t2[r][k].assume_init() };
+                    sum += t * a[a_base + c * n_out + k].conj();
+                }
+                grad_fb[row + r] = sum;
+            }
         }
     }
 }
@@ -455,25 +563,17 @@ impl<T: Scalar> DiffModule<T> for Recursion<T> {
 
         // Reusable buffers are sized for the module's fixed channel/bin counts.
         // If the input shape differs from the cached buffer, re-allocate.
-        if self.grad_input.shape() == input_shape {
-            self.grad_input.fill(Complex::new(T::zero(), T::zero()));
-        } else {
+        // (Scratch tensors need no fill: every element is overwritten below.
+        // Only the accumulating non-contiguous grad_input path re-zeroes.)
+        if self.grad_input.shape() != input_shape {
             self.grad_input = ArrayD::zeros(IxDyn(input_shape));
         }
-        self.dl_dh_closed.fill(Complex::new(T::zero(), T::zero()));
-        self.grad_ff.data.fill(Complex::new(T::zero(), T::zero()));
-        self.grad_fb.data.fill(Complex::new(T::zero(), T::zero()));
-        self.h_ff_response
-            .data
-            .fill(Complex::new(T::zero(), T::zero()));
-        self.h_fb_response
-            .data
-            .fill(Complex::new(T::zero(), T::zero()));
 
         // dL/dH_closed[f, o, i] = sum_b grad_output[b, f, o] * conj(input[b, f, i])
         if input_shape.len() == 3
             && let Some(grad_output_data) = grad_output.data.as_slice()
             && let Some(input_data) = input.data.as_slice()
+            && let Some(dl_dh_closed) = self.dl_dh_closed.as_slice_mut()
         {
             let batch = input_shape[0];
             for f in 0..nb {
@@ -485,7 +585,7 @@ impl<T: Scalar> DiffModule<T> for Recursion<T> {
                             let input_index = (batch_index * nb + f) * n_in + i;
                             sum += grad_output_data[grad_index] * input_data[input_index].conj();
                         }
-                        self.dl_dh_closed[[f, o, i]] = sum;
+                        dl_dh_closed[(f * n_out + o) * n_in + i] = sum;
                     }
                 }
             }
@@ -509,74 +609,101 @@ impl<T: Scalar> DiffModule<T> for Recursion<T> {
 
         // Build per-bin dL/dH_ff and dL/dH_fb, populating response/gradient
         // tensors for the feedforward and feedback backward calls in-place.
-        for f in 0..nb {
-            // Fill response tensors for this bin.
-            for i in 0..n_in {
-                for o in 0..n_out {
-                    self.h_ff_response.data[[i, f, o]] = h_ff[[f, o, i]];
-                }
-            }
-            for i in 0..n_out {
-                for o in 0..n_out {
-                    self.h_fb_response.data[[i, f, o]] = h_fb[[f, o, i]];
-                }
-            }
-
-            // Copy this bin's matrices into reusable 2-D buffers.
-            for r in 0..n_out {
-                for c in 0..n_out {
-                    self.a_buf[[r, c]] = a_arr[[f, r, c]];
-                }
-            }
-            conj_transpose_into(&self.a_buf, &mut self.a_h_buf);
-            for r in 0..n_out {
-                for c in 0..n_in {
-                    self.h_ff_f_buf[[r, c]] = h_ff[[f, r, c]];
-                }
-            }
-            conj_transpose_into(&self.h_ff_f_buf, &mut self.h_ff_h_buf);
-            for r in 0..n_out {
-                for c in 0..n_in {
-                    self.dl_dh_closed_f_buf[[r, c]] = self.dl_dh_closed[[f, r, c]];
-                }
-            }
-
-            // dL/dH_ff[f] = A^H @ dL/dH_closed[f]
-            matmul_into(
-                &self.a_h_buf,
-                &self.dl_dh_closed_f_buf,
-                &mut self.dl_dh_ff_bin_buf,
-            );
-            for o in 0..n_out {
+        // Fast path: fused kernel over contiguous slices. Fallback: buffered
+        // 2-D path for wide channel counts or non-contiguous storage.
+        let small = n_out <= MAX_STACK_CHANNELS && n_in <= MAX_STACK_CHANNELS;
+        let views = small
+            .then(|| {
+                Some(FusedBinViews {
+                    h_ff: h_ff.as_slice()?,
+                    h_fb: h_fb.as_slice()?,
+                    a: a_arr.as_slice()?,
+                    dl_dh_closed: self.dl_dh_closed.as_slice()?,
+                    h_ff_response: self.h_ff_response.data.as_slice_mut()?,
+                    h_fb_response: self.h_fb_response.data.as_slice_mut()?,
+                    grad_ff: self.grad_ff.data.as_slice_mut()?,
+                    grad_fb: self.grad_fb.data.as_slice_mut()?,
+                })
+            })
+            .flatten();
+        if let Some(views) = views {
+            fused_backward_bins(views, nb, n_in, n_out);
+        } else {
+            for f in 0..nb {
+                // Fill response tensors for this bin.
                 for i in 0..n_in {
-                    self.grad_ff.data[[i, f, o]] = self.dl_dh_ff_bin_buf[[o, i]];
+                    for o in 0..n_out {
+                        self.h_ff_response.data[[i, f, o]] = h_ff[[f, o, i]];
+                    }
                 }
-            }
+                for i in 0..n_out {
+                    for o in 0..n_out {
+                        self.h_fb_response.data[[i, f, o]] = h_fb[[f, o, i]];
+                    }
+                }
 
-            // dL/dH_fb[f] = A^H @ dL/dH_closed[f] @ H_ff^H @ A^H
-            matmul_into(&self.a_h_buf, &self.dl_dh_closed_f_buf, &mut self.work_buf);
-            matmul_into(&self.work_buf, &self.h_ff_h_buf, &mut self.work2_buf);
-            matmul_into(&self.work2_buf, &self.a_h_buf, &mut self.work_buf);
-            for r in 0..n_out {
-                for c in 0..n_out {
-                    self.grad_fb.data[[c, f, r]] = self.work_buf[[r, c]];
+                // Copy this bin's matrices into reusable 2-D buffers.
+                for r in 0..n_out {
+                    for c in 0..n_out {
+                        self.a_buf[[r, c]] = a_arr[[f, r, c]];
+                    }
+                }
+                conj_transpose_into(&self.a_buf, &mut self.a_h_buf);
+                for r in 0..n_out {
+                    for c in 0..n_in {
+                        self.h_ff_f_buf[[r, c]] = h_ff[[f, r, c]];
+                    }
+                }
+                conj_transpose_into(&self.h_ff_f_buf, &mut self.h_ff_h_buf);
+                for r in 0..n_out {
+                    for c in 0..n_in {
+                        self.dl_dh_closed_f_buf[[r, c]] = self.dl_dh_closed[[f, r, c]];
+                    }
+                }
+
+                // dL/dH_ff[f] = A^H @ dL/dH_closed[f]
+                matmul_into(
+                    &self.a_h_buf,
+                    &self.dl_dh_closed_f_buf,
+                    &mut self.dl_dh_ff_bin_buf,
+                );
+                for o in 0..n_out {
+                    for i in 0..n_in {
+                        self.grad_ff.data[[i, f, o]] = self.dl_dh_ff_bin_buf[[o, i]];
+                    }
+                }
+
+                // dL/dH_fb[f] = A^H @ dL/dH_closed[f] @ H_ff^H @ A^H
+                matmul_into(&self.a_h_buf, &self.dl_dh_closed_f_buf, &mut self.work_buf);
+                matmul_into(&self.work_buf, &self.h_ff_h_buf, &mut self.work2_buf);
+                matmul_into(&self.work2_buf, &self.a_h_buf, &mut self.work_buf);
+                for r in 0..n_out {
+                    for c in 0..n_out {
+                        self.grad_fb.data[[c, f, r]] = self.work_buf[[r, c]];
+                    }
                 }
             }
         }
 
-        // Backward through feedforward submodule.
-        let _ = self
-            .feedforward
-            .backward(&self.identity_ff, &self.h_ff_response, &self.grad_ff)?;
+        // Backward through feedforward submodule (dLoss/dInput is discarded,
+        // so only parameter gradients are accumulated).
+        self.feedforward.backward_params_only(
+            &self.identity_ff,
+            &self.h_ff_response,
+            &self.grad_ff,
+        )?;
 
         // Backward through feedback submodule.
-        let _ = self
-            .feedback
-            .backward(&self.identity_fb, &self.h_fb_response, &self.grad_fb)?;
+        self.feedback.backward_params_only(
+            &self.identity_fb,
+            &self.h_fb_response,
+            &self.grad_fb,
+        )?;
 
         // dL/dinput[b, f, i] = sum_o conj(H_closed[f, o, i]) * grad_output[b, f, o]
         if input_shape.len() == 3
             && let Some(grad_output_data) = grad_output.data.as_slice()
+            && let Some(h_closed_data) = h_closed.as_slice()
         {
             let batch = input_shape[0];
             let grad_input_data = self
@@ -589,8 +716,8 @@ impl<T: Scalar> DiffModule<T> for Recursion<T> {
                         let mut sum = Complex::new(T::zero(), T::zero());
                         for output_channel in 0..n_out {
                             let output_index = (batch_index * nb + f) * n_out + output_channel;
-                            sum += grad_output_data[output_index]
-                                * h_closed[[f, output_channel, input_channel]].conj();
+                            let h_index = (f * n_out + output_channel) * n_in + input_channel;
+                            sum += grad_output_data[output_index] * h_closed_data[h_index].conj();
                         }
                         let input_index = (batch_index * nb + f) * n_in + input_channel;
                         grad_input_data[input_index] = sum;
@@ -598,6 +725,8 @@ impl<T: Scalar> DiffModule<T> for Recursion<T> {
                 }
             }
         } else {
+            // Accumulating path: re-zero the reused buffer first.
+            self.grad_input.fill(Complex::new(T::zero(), T::zero()));
             for i in 0..n_in {
                 for o in 0..n_out {
                     for f in 0..nb {
