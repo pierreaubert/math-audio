@@ -18,10 +18,10 @@ pub enum DetectionMode {
 #[derive(Debug, Clone)]
 pub struct LevelDetector {
     mode: DetectionMode,
-    /// Running sum of squared samples (for RMS).
-    sum_sq: f64,
-    /// Circular buffer of squared samples (for RMS).
-    window_buf: Vec<f32>,
+    /// Complete binary tree of nonnegative f64 energy sums; root is index 1.
+    energy_tree: Vec<f64>,
+    /// Power-of-two leaf capacity, with unused leaves permanently zero.
+    leaf_count: usize,
     /// Write position in the circular buffer.
     window_pos: usize,
     /// Window length in samples.
@@ -39,11 +39,12 @@ impl LevelDetector {
         }
         .max(1);
 
+        let leaf_count = window_len.next_power_of_two();
         Self {
             mode,
-            sum_sq: 0.0,
-            window_buf: if matches!(mode, DetectionMode::Rms { .. }) {
-                vec![0.0; window_len]
+            leaf_count,
+            energy_tree: if matches!(mode, DetectionMode::Rms { .. }) {
+                vec![0.0; leaf_count * 2]
             } else {
                 Vec::new()
             },
@@ -70,23 +71,30 @@ impl LevelDetector {
         match self.mode {
             DetectionMode::Peak => sample.abs(),
             DetectionMode::Rms { .. } => {
-                let sq = (sample * sample) as f64;
-                let oldest = self.window_buf[self.window_pos] as f64;
-                self.sum_sq = (self.sum_sq + sq - oldest).max(0.0);
-                self.window_buf[self.window_pos] = sample * sample;
+                // Convert before squaring: every finite f32 energy fits f64.
+                let sample = f64::from(sample);
+                let mut node = self.leaf_count + self.window_pos;
+                self.energy_tree[node] = sample * sample;
+                // Recompute only ancestors. No subtraction can erase a low
+                // energy sibling when a dominant pulse leaves the window.
+                node /= 2;
+                while node > 0 {
+                    self.energy_tree[node] =
+                        self.energy_tree[node * 2] + self.energy_tree[node * 2 + 1];
+                    node /= 2;
+                }
                 self.window_pos += 1;
                 if self.window_pos >= self.window_len {
                     self.window_pos = 0;
                 }
 
-                (self.sum_sq / self.window_len as f64).sqrt() as f32
+                (self.energy_tree[1] / self.window_len as f64).sqrt() as f32
             }
         }
     }
 
     pub fn reset(&mut self) {
-        self.sum_sq = 0.0;
-        self.window_buf.fill(0.0);
+        self.energy_tree.fill(0.0);
         self.window_pos = 0;
     }
 
@@ -103,7 +111,8 @@ impl LevelDetector {
 
         self.window_len = new_len;
         if matches!(mode, DetectionMode::Rms { .. }) {
-            self.window_buf.resize(new_len, 0.0);
+            self.leaf_count = new_len.next_power_of_two();
+            self.energy_tree.resize(self.leaf_count * 2, 0.0);
         }
         self.reset();
     }

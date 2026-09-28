@@ -89,9 +89,9 @@ impl EbuR128 {
             momentary_ring: SubBlockRing::new(4), // 4 × 100ms = 400ms
             shortterm_ring: SubBlockRing::new(30), // 30 × 100ms = 3s
             gating_blocks: if mode.has(Mode::I) {
-                // Pre-allocate for ~10 minutes (6000 blocks at 10 blocks/sec)
-                // to avoid re-allocations on the audio thread hot path.
-                VecDeque::with_capacity(6_000)
+                // Prepare the complete rolling window so push_back never grows
+                // storage on the audio thread, including after ten minutes.
+                VecDeque::with_capacity(MAX_GATING_BLOCKS)
             } else {
                 VecDeque::new()
             },
@@ -302,6 +302,20 @@ impl EbuR128 {
         let val = self.prev_sample_peak[ch];
         self.prev_sample_peak[ch] = 0.0;
         Ok(val)
+    }
+
+    /// Complete the true-peak FIR response at the end of a finite segment.
+    ///
+    /// Flushes eleven zero-input intervals through only the interpolation filter.
+    /// Loudness clocks, K-weighting, gating and sample peaks are unchanged. Peaks
+    /// remain available to `prev_true_peak`; repeated calls add no response.
+    /// Later input starts a new interpolation segment within the current loudness
+    /// epoch. Does nothing when `Mode::TRUE_PEAK` is disabled. This operation is
+    /// bounded and allocation-free.
+    pub fn finish_true_peak(&mut self) {
+        if let Some(detector) = &mut self.true_peak_detector {
+            detector.finish();
+        }
     }
 
     /// Previous true peak for a given channel (since last snapshot).

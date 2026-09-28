@@ -63,4 +63,14 @@ impl TruePeakDetector {
         self.peak.fill(0.0);
         self.prev_peak.fill(0.0);
     }
+
+    pub(super) fn finish(&mut self) {
+        for ch in 0..self.history.len() {
+            for _ in 1..TRUE_PEAK_FIR_LEN {
+                self.process_frame(ch, 0.0);
+            }
+            self.history[ch].fill(0.0);
+        }
+        self.pos.fill(0);
+    }
 }
