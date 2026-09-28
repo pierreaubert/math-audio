@@ -176,6 +176,7 @@ install-linux-root:
 	   perl curl build-essential gcc g++ pkg-config cmake ninja-build gfortran \
 	   libssl-dev \
 	   ca-certificates \
+	   clang mold \
 	   patchelf libopenblas-dev gfortran \
 	   chromium-browser chromium-chromedriver
 
