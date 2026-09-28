@@ -74,7 +74,7 @@ wasm-bindgen-rayon = "1.2"
 
 # Utilities
 approx = "0.5"
-toml = "0.8"
+toml = "1.1"
 
 # Audio file I/O
 hound = "3.5"
