@@ -389,7 +389,7 @@ pub(super) fn get_all_functions() -> Vec<(String, TestFunction)> {
         ),
         ("griewank".to_string(), functions::griewank),
         ("griewank2".to_string(), functions::griewank2),
-        ("happy_cat".to_string(), functions::happy_cat),
+        ("happy_cat".to_string(), functions::happycat),
         ("happycat".to_string(), functions::happycat),
         ("hartman_3d".to_string(), functions::hartman_3d),
         ("hartman_4d".to_string(), functions::hartman_4d),
