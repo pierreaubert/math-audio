@@ -3,6 +3,7 @@
 //! Stores recently discarded good solutions to maintain population diversity.
 //! Used by SHADE, L-SHADE, and their variants.
 
+use crate::DEArchiveCheckpoint;
 use ndarray::Array1;
 use rand::RngExt;
 
@@ -21,6 +22,29 @@ impl ExternalArchive {
         Self {
             solutions: Vec::with_capacity(max_size),
             max_size,
+        }
+    }
+
+    pub(crate) fn checkpoint_snapshot(&self) -> DEArchiveCheckpoint {
+        DEArchiveCheckpoint {
+            capacity: self.max_size,
+            solutions: self
+                .solutions
+                .iter()
+                .map(|solution| solution.to_vec())
+                .collect(),
+        }
+    }
+
+    pub(crate) fn from_checkpoint(checkpoint: &DEArchiveCheckpoint) -> Self {
+        Self {
+            solutions: checkpoint
+                .solutions
+                .iter()
+                .cloned()
+                .map(Array1::from_vec)
+                .collect(),
+            max_size: checkpoint.capacity,
         }
     }
 

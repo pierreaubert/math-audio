@@ -15,6 +15,9 @@ ndarray = { workspace = true }
 nalgebra = { workspace = true }
 oxiblas-ndarray = { workspace = true }
 rand = { workspace = true }
+chacha20 = { workspace = true }
+sha2 = { workspace = true }
+serde = { workspace = true }
 rayon = { workspace = true }
 clap = { workspace = true }
 thiserror = { workspace = true }
@@ -34,6 +37,7 @@ plotly_static = ["plotly", "dep:plotly_static"]
 [dev-dependencies]
 proptest = { workspace = true }
 criterion = { workspace = true }
+serde_json = { workspace = true }
 
 [[bench]]
 name = "de_bench"

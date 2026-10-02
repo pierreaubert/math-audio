@@ -95,6 +95,10 @@ pub use continuous_area::{
     AreaError, AreaScalarisation, Prior, Quadrature, build_quadrature_points, evaluate_area_loss,
     try_evaluate_area_loss,
 };
+pub use de_checkpoint::{
+    CheckpointFitness, DE_CHECKPOINT_IMPLEMENTATION_ID, DE_CHECKPOINT_VERSION,
+    DEAdaptiveCheckpoint, DEArchiveCheckpoint, DECheckpoint, DETerminalCheckpoint,
+};
 pub use differential_evolution::differential_evolution;
 pub use error::{DEError, Result};
 pub use external_archive::ExternalArchive;
@@ -190,6 +194,9 @@ pub mod surrogate;
 
 mod adaptive_config;
 mod adaptive_state;
+mod de_checkpoint;
+#[cfg(test)]
+mod de_checkpoint_tests;
 mod deconfig;
 mod deconfig_builder;
 mod dereport;
