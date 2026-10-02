@@ -74,6 +74,20 @@ pub enum DEError {
         /// Human-readable description of the invalid setting.
         message: String,
     },
+
+    /// An exact-continuation checkpoint does not match or validate for this run.
+    #[error("invalid DE continuation checkpoint: {message}")]
+    InvalidCheckpoint {
+        /// Human-readable reason the checkpoint cannot be used.
+        message: String,
+    },
+
+    /// Saving an exact-continuation checkpoint failed.
+    #[error("DE continuation checkpoint save failed: {message}")]
+    CheckpointSave {
+        /// Human-readable save failure.
+        message: String,
+    },
 }
 
 /// A specialized `Result` type for DE operations.
