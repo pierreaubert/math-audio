@@ -103,12 +103,42 @@ pub fn wavelet_heatmap_at(
     direct_sample: usize,
     config: &WaveletConfig,
 ) -> WaveletHeatmap {
+    wavelet_heatmap_impl(ir, sample_rate, direct_sample, config, false)
+}
+
+/// Build a report heatmap with dense early-time sampling and an automatic direct reference.
+///
+/// Adds 0.1 ms samples through 15 ms to the usual 1 ms, -5..500 ms grid.
+/// Both regions share one full-grid peak reference. Use at least 800 frames
+/// to retain these samples without max-pooling. Kernel and level units are
+/// identical to [`wavelet_heatmap`]; this increases sampling, not resolving power.
+pub fn wavelet_heatmap_detailed(
+    ir: &[f32],
+    sample_rate: f64,
+    config: &WaveletConfig,
+) -> WaveletHeatmap {
+    let direct = ir
+        .iter()
+        .enumerate()
+        .max_by(|a, b| a.1.abs().total_cmp(&b.1.abs()))
+        .map_or(0, |(i, _)| i);
+    wavelet_heatmap_impl(ir, sample_rate, direct, config, true)
+}
+
+fn wavelet_heatmap_impl(
+    ir: &[f32],
+    sample_rate: f64,
+    direct_sample: usize,
+    config: &WaveletConfig,
+    dense_early: bool,
+) -> WaveletHeatmap {
     let empty = WaveletHeatmap {
         freqs_hz: Vec::new(),
         times_ms: Vec::new(),
         mags_db: Vec::new(),
     };
-    if ir.is_empty() || sample_rate <= 0.0 || direct_sample >= ir.len() {
+    if ir.is_empty() || !sample_rate.is_finite() || sample_rate <= 0.0 || direct_sample >= ir.len()
+    {
         return empty;
     }
     let nyquist = sample_rate * 0.5;
@@ -137,6 +167,21 @@ pub fn wavelet_heatmap_at(
     while c <= t1.min(ir.len() as f64 - 1.0) {
         centres.push(c);
         c += hop;
+    }
+    if dense_early {
+        // Evaluate actual IR samples, not an interpolation of the coarse heatmap.
+        for tenth_ms in -50..=150 {
+            let sample =
+                (direct_sample as f64 + f64::from(tenth_ms) * sample_rate / 10_000.0).round();
+            if sample >= 0.0 && sample < ir.len() as f64 {
+                centres.push(sample);
+            }
+        }
+        for centre in &mut centres {
+            *centre = centre.round();
+        }
+        centres.sort_by(f64::total_cmp);
+        centres.dedup();
     }
     if centres.is_empty() {
         return empty;
