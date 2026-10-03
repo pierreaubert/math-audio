@@ -79,8 +79,8 @@ pub use bayesian::{
     BayesAcquisition, BayesOptCallback, BayesOptConfig, BayesOptConstraint, BayesOptConstraintFn,
     BayesOptIntermediate, BayesOptParetoReport, BayesOptReport, BayesParetoSolution,
     ConstrainedBayesOptCallback, ConstrainedBayesOptConfig, ConstrainedBayesOptIntermediate,
-    ConstrainedBayesOptReport, bayesian_multi_objective, bayesian_optimization,
-    constrained_bayesian_optimization,
+    ConstrainedBayesOptReport, bayesian_multi_objective, bayesian_multi_objective_with_stop,
+    bayesian_optimization, constrained_bayesian_optimization,
 };
 pub use cmaes::{
     CmaCovariance, CmaEsConfig, CmaEsConstraint, CmaEsConstraintFn, CmaEsIntermediate, CmaEsReport,

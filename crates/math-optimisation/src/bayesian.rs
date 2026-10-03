@@ -25,8 +25,11 @@ mod normal;
 mod pareto;
 mod select;
 mod solve;
+mod stop;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_stop;
 mod types;
 
 pub use bayes_opt_config::*;
@@ -168,6 +171,30 @@ pub fn bayesian_multi_objective<F>(f: &F, config: BayesOptConfig) -> Result<Baye
 where
     F: Fn(&Array1<f64>) -> Vec<f64> + Sync,
 {
+    bayesian_multi_objective_with_stop(f, config, &|| false)
+}
+
+/// Minimizes vector objectives with cooperative cancellation during EHVI optimization.
+///
+/// `should_stop` must be fast and safe to call concurrently. The first `true`
+/// is latched. Checks occur before objective admission, between GP likelihood
+/// trials, and between EHVI candidates. A running objective or numerical kernel
+/// is allowed to finish; this API provides no hard latency bound. Parallel
+/// evaluations already admitted are drained and included in the returned report.
+/// A stopped report has `success == false` and message `"stop requested"`.
+/// The scalar iteration callback in `config` is not used for vector objectives.
+///
+/// # Errors
+/// Returns an error for invalid configuration or a failed surrogate fit.
+pub fn bayesian_multi_objective_with_stop<F>(
+    f: &F,
+    config: BayesOptConfig,
+    should_stop: &(dyn Fn() -> bool + Sync),
+) -> Result<BayesOptParetoReport>
+where
+    F: Fn(&Array1<f64>) -> Vec<f64> + Sync,
+{
+    let stop = stop::StopCheck::new(should_stop);
     validate_config(&config)?;
     let n = config.bounds.len();
     let batch_size = config.batch_size.max(1);
@@ -180,10 +207,10 @@ where
     let mut initial = initial_design(&config, initial_samples);
     let mut xs_norm = Vec::with_capacity(config.maxeval);
     let mut values = Vec::with_capacity(config.maxeval);
-    evaluate_multi_and_store(f, &mut initial, &config, &mut xs_norm, &mut values);
+    evaluate_multi_and_store(f, &mut initial, &config, &mut xs_norm, &mut values, &stop);
 
     let mut nit = 0usize;
-    while values.len() < config.maxeval {
+    'optimization: while values.len() < config.maxeval && !stop.requested() {
         let m = values.first().map(|v| v.len()).unwrap_or(0);
         if m == 0 {
             return Err(DEError::InvalidConfig {
@@ -191,12 +218,25 @@ where
             });
         }
 
-        let gps = (0..m)
-            .map(|j| {
-                let yj = values.iter().map(|v| v[j]).collect::<Vec<_>>();
-                fit_gp(&xs_norm, &yj, &lengthscales, fixed_lengthscales, &config)
-            })
-            .collect::<Result<Vec<_>>>()?;
+        let mut gps = Vec::with_capacity(m);
+        for j in 0..m {
+            let yj = values.iter().map(|v| v[j]).collect::<Vec<_>>();
+            let Some(gp) = bayes_opt_config::fit_gp_with_stop(
+                &xs_norm,
+                &yj,
+                &lengthscales,
+                fixed_lengthscales,
+                &config,
+                &stop,
+            )?
+            else {
+                break 'optimization;
+            };
+            gps.push(gp);
+        }
+        if stop.requested() {
+            break;
+        }
 
         let candidates = candidate_pool(&config, candidate_pool_size, &xs_norm, &mut rng);
         if candidates.is_empty() {
@@ -209,16 +249,27 @@ where
         let mut selected = select_ehvi_batch(
             &gps,
             &candidates,
-            &current_front,
-            &reference,
+            select::EhviFront {
+                values: &current_front,
+                reference: &reference,
+            },
             q,
             &config,
             &mut rng,
+            &stop,
         );
-        evaluate_multi_and_store(f, &mut selected, &config, &mut xs_norm, &mut values);
+        if stop.requested() {
+            break;
+        }
+        let expected = values.len() + selected.len();
+        evaluate_multi_and_store(f, &mut selected, &config, &mut xs_norm, &mut values, &stop);
+        if values.len() != expected {
+            break;
+        }
         nit += 1;
     }
 
+    stop.requested();
     let population = xs_norm
         .iter()
         .zip(values.iter())
@@ -234,8 +285,10 @@ where
         population,
         nfev: values.len(),
         nit,
-        success: nit > 0,
-        message: if nit > 0 {
+        success: nit > 0 && !stop.observed(),
+        message: if stop.observed() {
+            String::from("stop requested")
+        } else if nit > 0 {
             String::from("evaluation budget reached")
         } else {
             String::from("initial design consumed evaluation budget")
