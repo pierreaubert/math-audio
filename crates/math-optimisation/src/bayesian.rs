@@ -201,6 +201,17 @@ where
     let initial_samples = derive_initial_samples(n, &config).min(config.maxeval);
     let candidate_pool_size = derive_candidate_pool_size(n, &config).clamp(32, 256);
     let lengthscales = derive_lengthscales(n, &config)?;
+    if stop.requested() {
+        return Ok(BayesOptParetoReport {
+            pareto_front: Vec::new(),
+            population: Vec::new(),
+            nfev: 0,
+            nit: 0,
+            success: false,
+            stop_requested: true,
+            message: String::from("stop requested"),
+        });
+    }
     let fixed_lengthscales = config.lengthscales.is_some();
     let mut rng = make_rng(config.seed);
 
@@ -270,6 +281,7 @@ where
     }
 
     stop.requested();
+    let stop_requested = stop.observed();
     let population = xs_norm
         .iter()
         .zip(values.iter())
@@ -285,8 +297,9 @@ where
         population,
         nfev: values.len(),
         nit,
-        success: nit > 0 && !stop.observed(),
-        message: if stop.observed() {
+        success: nit > 0 && !stop_requested,
+        stop_requested,
+        message: if stop_requested {
             String::from("stop requested")
         } else if nit > 0 {
             String::from("evaluation budget reached")

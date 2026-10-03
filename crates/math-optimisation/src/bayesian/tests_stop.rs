@@ -21,9 +21,11 @@ fn objective(x: &Array1<f64>) -> Vec<f64> {
 
 #[test]
 fn pre_stopped_ehvi_does_not_evaluate() {
+    let mut config = config();
+    config.maxeval = usize::MAX;
     let report = bayesian_multi_objective_with_stop(
         &|_| panic!("pre-stopped run must not evaluate"),
-        config(),
+        config,
         &|| true,
     )
     .unwrap();
@@ -31,6 +33,7 @@ fn pre_stopped_ehvi_does_not_evaluate() {
     assert_eq!(report.nit, 0);
     assert!(report.population.is_empty());
     assert!(!report.success);
+    assert!(report.stop_requested);
     assert_eq!(report.message, "stop requested");
 }
 
@@ -86,7 +89,41 @@ fn ehvi_stop_during_surrogate_work_does_not_admit_next_batch() {
     assert_eq!(report.nfev, 4);
     assert_eq!(report.nit, 0);
     assert!(!report.success);
+    assert!(report.stop_requested);
     assert_eq!(report.message, "stop requested");
+}
+
+#[test]
+fn ehvi_stop_during_later_objective_batch_keeps_partial_results_without_counting_batch() {
+    let evaluations = AtomicUsize::new(0);
+    let stopped = AtomicBool::new(false);
+    let mut config = config();
+    config.maxeval = 10;
+    config.batch_size = 2;
+
+    let report = bayesian_multi_objective_with_stop(
+        &|x| {
+            let evaluation = evaluations.fetch_add(1, Ordering::SeqCst) + 1;
+            if evaluation == 7 {
+                stopped.store(true, Ordering::SeqCst);
+            }
+            objective(x)
+        },
+        config,
+        &|| stopped.load(Ordering::SeqCst),
+    )
+    .unwrap();
+
+    assert_eq!(evaluations.load(Ordering::SeqCst), 7);
+    assert_eq!(report.nfev, 7);
+    assert_eq!(report.population.len(), 7);
+    assert_eq!(report.nit, 1);
+    assert!(!report.success);
+    assert!(report.stop_requested);
+    assert_eq!(report.message, "stop requested");
+    for point in report.population {
+        assert_eq!(point.objectives, objective(&point.x));
+    }
 }
 
 #[test]
@@ -97,6 +134,7 @@ fn no_stop_ehvi_preserves_seeded_results() {
     assert_eq!(ordinary.nfev, controlled.nfev);
     assert_eq!(ordinary.nit, controlled.nit);
     assert_eq!(ordinary.message, controlled.message);
+    assert!(!controlled.stop_requested);
     for (a, b) in ordinary.population.iter().zip(&controlled.population) {
         assert_eq!(a.x, b.x);
         assert_eq!(a.objectives, b.objectives);
@@ -157,4 +195,5 @@ fn ehvi_stop_on_last_evaluation_is_reported() {
     assert_eq!(report.nfev, 1);
     assert_eq!(report.message, "stop requested");
     assert!(!report.success);
+    assert!(report.stop_requested);
 }
