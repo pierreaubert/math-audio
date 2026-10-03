@@ -262,7 +262,7 @@ impl<T: Scalar> FftBuffers<T> {
 
 #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
 #[target_feature(enable = "neon")]
-unsafe fn copy_real_parts_neon(source: &[Complex<T>], destination: &mut [T]) {
+unsafe fn copy_real_parts_neon(source: &[Complex<f64>], destination: &mut [f64]) {
     use std::arch::aarch64::{vld2q_f64, vst1q_f64};
 
     let mut index = 0;
@@ -282,7 +282,7 @@ unsafe fn copy_real_parts_neon(source: &[Complex<T>], destination: &mut [T]) {
 
 #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
 #[target_feature(enable = "neon")]
-unsafe fn store_real_as_complex_neon(source: &[T], destination: &mut [Complex<T>], scale: T) {
+unsafe fn store_real_as_complex_neon(source: &[f64], destination: &mut [Complex<f64>], scale: f64) {
     use std::arch::aarch64::{float64x2x2_t, vdupq_n_f64, vld1q_f64, vmulq_n_f64, vst2q_f64};
 
     let zero = vdupq_n_f64(0.0);

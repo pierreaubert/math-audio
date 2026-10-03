@@ -41,7 +41,7 @@ directories = "6"
 env_logger = "0.11"
 log = "0.4.28"
 thiserror = "2.0.17"
-criterion = "0.8.1"
+criterion = "0.8.2"
 
 # Optimization and math
 ndarray = { version = "0.17", default-features = false, features = ["rayon", "serde"] }
@@ -69,7 +69,7 @@ plotly = { version = "0.14.1" }
 plotly_static = { version = "0.1", features = ["chromedriver", "webdriver_download"] }
 
 # Web/WASM
-wasm-bindgen = "0.2"
+wasm-bindgen = "=0.2.128"
 wasm-bindgen-rayon = "1.2"
 
 # Utilities
