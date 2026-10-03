@@ -35,11 +35,6 @@ where
         config.population_size
     }
     .max(4);
-    let mutation_prob = config
-        .mutation_prob
-        .unwrap_or(1.0 / n as f64)
-        .clamp(0.0, 1.0);
-
     let mut rng: StdRng = match config.seed {
         Some(s) => StdRng::seed_from_u64(s),
         None => {
@@ -54,52 +49,14 @@ where
 
     let mut nit = 0usize;
     while nfev < config.maxeval {
-        let mut offspring: Vec<Individual> = Vec::with_capacity(pop_size);
-        while offspring.len() < pop_size && nfev < config.maxeval {
-            let p1 = tournament_select(&population, &mut rng);
-            let p2 = tournament_select(&population, &mut rng);
-            let (mut c1, mut c2) = if rng.random::<f64>() < config.crossover_prob {
-                sbx_crossover(
-                    &p1.x,
-                    &p2.x,
-                    &config.bounds,
-                    config.eta_c.max(1.0),
-                    &mut rng,
-                )
-            } else {
-                (p1.x.clone(), p2.x.clone())
-            };
-            polynomial_mutation(
-                &mut c1,
-                &config.bounds,
-                mutation_prob,
-                config.eta_m.max(1.0),
-                &mut rng,
-            );
-            polynomial_mutation(
-                &mut c2,
-                &config.bounds,
-                mutation_prob,
-                config.eta_m.max(1.0),
-                &mut rng,
-            );
-
-            offspring.push(evaluate(f, c1));
-            nfev += 1;
-            if offspring.len() < pop_size && nfev < config.maxeval {
-                offspring.push(evaluate(f, c2));
-                nfev += 1;
-            }
-        }
-
-        if offspring.is_empty() {
-            break;
-        }
-        population.extend(offspring);
-        population = environmental_selection(population, pop_size, &config);
+        advance_generation(f, &config, &mut population, &mut rng, &mut nfev);
         nit += 1;
     }
 
+    Ok(make_report(population, nfev, nit))
+}
+
+pub(super) fn make_report(mut population: Vec<Individual>, nfev: usize, nit: usize) -> NsgaReport {
     assign_rank_and_crowding(&mut population);
     let mut final_solutions = to_solutions(&population);
     final_solutions.sort_by(compare_solutions);
@@ -109,7 +66,7 @@ where
         .cloned()
         .collect::<Vec<_>>();
 
-    Ok(NsgaReport {
+    NsgaReport {
         pareto_front,
         population: final_solutions,
         nfev,
@@ -120,14 +77,14 @@ where
         } else {
             String::from("initial population evaluated")
         },
-    })
+    }
 }
 
-fn initial_population<F>(
+pub(super) fn initial_population<F>(
     f: &F,
     config: &NsgaConfig,
     pop_size: usize,
-    rng: &mut StdRng,
+    rng: &mut impl rand::Rng,
 ) -> Vec<Individual>
 where
     F: Fn(&Array1<f64>) -> Vec<f64> + Sync,
@@ -160,7 +117,7 @@ where
     }
 }
 
-fn tournament_select<'a>(population: &'a [Individual], rng: &mut StdRng) -> &'a Individual {
+fn tournament_select<'a>(population: &'a [Individual], rng: &mut impl rand::Rng) -> &'a Individual {
     let a = rng.random_range(0..population.len());
     let b = rng.random_range(0..population.len());
     let ia = &population[a];
@@ -351,4 +308,54 @@ fn to_solutions(population: &[Individual]) -> Vec<ParetoSolution> {
             crowding_distance: ind.crowding_distance,
         })
         .collect()
+}
+
+pub(super) fn advance_generation<F>(
+    f: &F,
+    config: &NsgaConfig,
+    population: &mut Vec<Individual>,
+    rng: &mut impl rand::Rng,
+    nfev: &mut usize,
+) where
+    F: Fn(&Array1<f64>) -> Vec<f64> + Sync,
+{
+    let pop_size = population.len();
+    let mutation_prob = config
+        .mutation_prob
+        .unwrap_or(1.0 / config.bounds.len() as f64)
+        .clamp(0.0, 1.0);
+    let mut offspring: Vec<Individual> = Vec::with_capacity(pop_size);
+    while offspring.len() < pop_size && *nfev < config.maxeval {
+        let p1 = tournament_select(population, rng);
+        let p2 = tournament_select(population, rng);
+        let (mut c1, mut c2) = if rng.random::<f64>() < config.crossover_prob {
+            sbx_crossover(&p1.x, &p2.x, &config.bounds, config.eta_c.max(1.0), rng)
+        } else {
+            (p1.x.clone(), p2.x.clone())
+        };
+        polynomial_mutation(
+            &mut c1,
+            &config.bounds,
+            mutation_prob,
+            config.eta_m.max(1.0),
+            rng,
+        );
+        polynomial_mutation(
+            &mut c2,
+            &config.bounds,
+            mutation_prob,
+            config.eta_m.max(1.0),
+            rng,
+        );
+
+        offspring.push(evaluate(f, c1));
+        *nfev += 1;
+        if offspring.len() < pop_size && *nfev < config.maxeval {
+            offspring.push(evaluate(f, c2));
+            *nfev += 1;
+        }
+    }
+
+    population.extend(offspring);
+    *population = environmental_selection(std::mem::take(population), pop_size, config);
 }
