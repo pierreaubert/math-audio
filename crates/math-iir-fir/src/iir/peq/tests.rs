@@ -18,10 +18,56 @@ use super::misc::k_weighting_db;
 mod peq_tests {
     use super::super::*;
     use super::*;
+    use base64::Engine as _;
     use ndarray::array;
 
     fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
         (a - b).abs() <= tol
+    }
+
+    #[test]
+    fn aupreset_payload_preserves_band_values() {
+        let peq = vec![(
+            1.0,
+            Biquad::new(BiquadFilterType::Peak, 1000.0, 48000.0, 1.0, 3.0),
+        )];
+        let xml = peq_format_aupreset(&peq, "Known band");
+        assert!(xml.contains("<integer>1</integer>"));
+        let data = xml
+            .split_once("<data>")
+            .unwrap()
+            .1
+            .split_once("</data>")
+            .unwrap()
+            .0;
+        let encoded: String = data.split_whitespace().collect();
+        let payload = base64::engine::general_purpose::STANDARD
+            .decode(encoded)
+            .unwrap();
+
+        assert_eq!(payload.len(), 20 + 80 * 8);
+        assert_eq!(
+            &payload[..16],
+            &[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 81, 0, 0, 0, 0]
+        );
+        let preamp = f32::from_be_bytes(payload[16..20].try_into().unwrap());
+        assert!(preamp.is_finite());
+        assert!((-60.0..=0.0).contains(&preamp));
+        let parameters: std::collections::BTreeMap<i32, f32> = payload[20..]
+            .chunks_exact(8)
+            .map(|entry| {
+                (
+                    i32::from_be_bytes(entry[..4].try_into().unwrap()),
+                    f32::from_be_bytes(entry[4..].try_into().unwrap()),
+                )
+            })
+            .collect();
+        assert_eq!(parameters.len(), 80);
+        assert_eq!(parameters[&1000], 0.0); // First band enabled.
+        assert_eq!(parameters[&1001], 1.0); // Second band disabled.
+        assert_eq!(parameters[&2000], 0.0); // Parametric EQ.
+        assert_eq!(parameters[&3000], 1000.0);
+        assert_eq!(parameters[&4000], 3.0);
     }
 
     #[test]
