@@ -124,6 +124,36 @@ pub(super) fn fit_gp(
     GaussianProcess::fit(xs_norm, ys, &lengthscales, kernel_variance, config.noise)
 }
 
+pub(super) fn fit_gp_with_stop(
+    xs_norm: &[Array1<f64>],
+    ys: &[f64],
+    initial_lengthscales: &[f64],
+    fixed_lengthscales: bool,
+    config: &BayesOptConfig,
+    stop: &super::stop::StopCheck<'_>,
+) -> Result<Option<GaussianProcess>> {
+    if stop.requested() {
+        return Ok(None);
+    }
+    let kernel_variance = config.kernel_variance.max(1e-12);
+    let lengthscales = if fixed_lengthscales {
+        initial_lengthscales.to_vec()
+    } else {
+        super::consts::learn_lengthscales_with_stop(
+            xs_norm,
+            ys,
+            initial_lengthscales,
+            kernel_variance,
+            config.noise,
+            stop,
+        )?
+    };
+    if stop.requested() {
+        return Ok(None);
+    }
+    GaussianProcess::fit(xs_norm, ys, &lengthscales, kernel_variance, config.noise).map(Some)
+}
+
 pub(super) fn initial_design(config: &BayesOptConfig, initial_samples: usize) -> Vec<Array1<f64>> {
     let mut samples = Vec::with_capacity(initial_samples);
     if let Some(ref x0) = config.x0 {
