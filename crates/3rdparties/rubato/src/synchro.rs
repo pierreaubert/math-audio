@@ -1,0 +1,888 @@
+use crate::error::ResamplerConstructionError;
+use crate::sinc::make_sincs;
+use crate::windows::WindowFunction;
+use num_complex::Complex;
+use num_integer as integer;
+use num_traits::Zero;
+use std::fmt;
+use std::sync::Arc;
+
+use audioadapter::{Adapter, AdapterMut};
+
+use crate::{get_offsets, get_partial_len, update_mask, Indexing};
+
+use crate::error::ResampleResult;
+use crate::{calculate_cutoff, validate_buffers, Adjustable, Resampler, Resizable, Sample};
+use realfft::{ComplexToReal, RealFftPlanner, RealToComplex};
+
+/// A helper for resampling a single chunk of data.
+struct FftResampler<T> {
+    fft_size_in: usize,
+    fft_size_out: usize,
+    cutoff: f32,
+    filter_f: Vec<Complex<T>>,
+    fft: Arc<dyn RealToComplex<T>>,
+    ifft: Arc<dyn ComplexToReal<T>>,
+    scratch_fw: Vec<Complex<T>>,
+    scratch_inv: Vec<Complex<T>>,
+    input_buf: Vec<T>,
+    input_f: Vec<Complex<T>>,
+    output_f: Vec<Complex<T>>,
+    output_buf: Vec<T>,
+}
+
+/// An enum for specifying which side of a synchronous resampler should be fixed size.
+/// This is similar to [FixedAsync](crate::FixedAsync) that is used for the asynchronous resamplers.
+/// The difference is asynchronous resamplers must allow one side to vary,
+/// and can therefore not support the `Both` option.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum FixedSync {
+    /// Input size is fixed, output size varies.
+    Input,
+    /// Output size is fixed, input size varies.
+    Output,
+    /// Both input and output sizes are fixed.
+    Both,
+}
+
+/// A synchronous resampler that uses FFT.
+///
+/// The resampling is done by FFT:ing the input data. The spectrum is then extended or
+/// truncated as well as multiplied with an antialiasing filter
+/// before it's inverse transformed to get the resampled waveforms.
+pub struct Fft<T> {
+    nbr_channels: usize,
+    chunk_size_in: usize,
+    chunk_size_out: usize,
+    fft_size_in: usize,
+    fft_size_out: usize,
+    overlaps: Vec<Vec<T>>,
+    input_scratch: Vec<Vec<T>>,
+    output_scratch: Vec<Vec<T>>,
+    channel_mask: Vec<bool>,
+    saved_frames: usize,
+    resampler: FftResampler<T>,
+    fixed: FixedSync,
+}
+
+impl<T> fmt::Debug for Fft<T> {
+    fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt.debug_struct("Fft")
+            .field("nbr_channels", &self.nbr_channels)
+            .field("chunk_size_in", &self.chunk_size_in)
+            .field("chunk_size_out", &self.chunk_size_out)
+            .field("fft_size_in", &self.fft_size_in)
+            .field("fft_size_out", &self.fft_size_out)
+            .field("overlaps[0].len()", &self.overlaps[0].len())
+            .field("input_scratch[0].len()", &self.input_scratch[0].len())
+            .field("output_scratch[0].len()", &self.output_scratch[0].len())
+            .field("channel_mask", &self.channel_mask)
+            .field("saved_frames", &self.saved_frames)
+            .field("fixed", &self.fixed)
+            .finish()
+    }
+}
+
+fn validate_sample_rates(input: usize, output: usize) -> Result<(), ResamplerConstructionError> {
+    if input == 0 || output == 0 {
+        return Err(ResamplerConstructionError::InvalidSampleRate { input, output });
+    }
+    Ok(())
+}
+
+impl<T> FftResampler<T>
+where
+    T: Sample,
+{
+    pub fn new(fft_size_in: usize, fft_size_out: usize, window: WindowFunction) -> Self {
+        // calculate antialiasing cutoff
+        let cutoff = if fft_size_in > fft_size_out {
+            calculate_cutoff::<f32>(fft_size_out, window) * fft_size_out as f32 / fft_size_in as f32
+        } else {
+            calculate_cutoff::<f32>(fft_size_in, window)
+        };
+        debug!(
+            "Create new FftResampler, fft_size_in: {}, fft_size_out: {}, cutoff: {}, window: {:?}",
+            fft_size_in, fft_size_out, cutoff, window
+        );
+        let sinc = make_sincs::<T>(fft_size_in, 1, cutoff, window);
+        let mut filter_t: Vec<T> = vec![T::zero(); 2 * fft_size_in];
+        let mut filter_f: Vec<Complex<T>> = vec![Complex::zero(); fft_size_in + 1];
+        for (n, f) in filter_t.iter_mut().enumerate().take(fft_size_in) {
+            *f = sinc[0][n] / T::coerce(2 * fft_size_in);
+        }
+
+        let input_f: Vec<Complex<T>> = vec![Complex::zero(); fft_size_in + 1];
+        let input_buf: Vec<T> = vec![T::zero(); 2 * fft_size_in];
+        let output_f: Vec<Complex<T>> = vec![Complex::zero(); fft_size_out + 1];
+        let output_buf: Vec<T> = vec![T::zero(); 2 * fft_size_out];
+        let mut planner = RealFftPlanner::<T>::new();
+        let fft = planner.plan_fft_forward(2 * fft_size_in);
+        let ifft = planner.plan_fft_inverse(2 * fft_size_out);
+        fft.process(&mut filter_t, &mut filter_f).unwrap();
+        let scratch_fw = fft.make_scratch_vec();
+        let scratch_inv = ifft.make_scratch_vec();
+
+        FftResampler {
+            fft_size_in,
+            fft_size_out,
+            cutoff,
+            filter_f,
+            fft,
+            ifft,
+            scratch_fw,
+            scratch_inv,
+            input_buf,
+            input_f,
+            output_f,
+            output_buf,
+        }
+    }
+
+    /// Resample a small chunk.
+    fn resample_unit(&mut self, wave_in: &[T], wave_out: &mut [T], overlap: &mut [T]) {
+        // Copy to input buffer and clear padding area.
+        self.input_buf[0..self.fft_size_in].copy_from_slice(wave_in);
+        for item in self
+            .input_buf
+            .iter_mut()
+            .skip(self.fft_size_in)
+            .take(self.fft_size_in)
+        {
+            *item = T::zero();
+        }
+
+        // FFT and store result in history, update index.
+        self.fft
+            .process_with_scratch(&mut self.input_buf, &mut self.input_f, &mut self.scratch_fw)
+            .unwrap();
+
+        let new_len = if self.fft_size_in < self.fft_size_out {
+            self.fft_size_in + 1
+        } else {
+            self.fft_size_out
+        };
+
+        // Multiply with filter FT.
+        self.input_f
+            .iter_mut()
+            .take(new_len)
+            .zip(self.filter_f.iter())
+            .for_each(|(spec, filt)| *spec *= filt);
+
+        // copy to modified spectrum
+        self.output_f[0..new_len].copy_from_slice(&self.input_f[0..new_len]);
+        for val in self.output_f[new_len..].iter_mut() {
+            *val = Complex::zero();
+        }
+        // IFFT result, store result and overlap.
+        self.ifft
+            .process_with_scratch(
+                &mut self.output_f,
+                &mut self.output_buf,
+                &mut self.scratch_inv,
+            )
+            .unwrap();
+        for (n, item) in wave_out.iter_mut().enumerate().take(self.fft_size_out) {
+            *item = self.output_buf[n] + overlap[n];
+        }
+        overlap.copy_from_slice(&self.output_buf[self.fft_size_out..]);
+    }
+}
+
+impl<T> Fft<T>
+where
+    T: Sample,
+{
+    /// Create a new `Fft` synchronous resampler with default settings.
+    ///
+    /// This is the recommended constructor for most uses. It uses a
+    /// [BlackmanHarris2](WindowFunction::BlackmanHarris2) anti-aliasing window and
+    /// automatically chooses the number of FFT sub-chunks to target a sub-chunk size of
+    /// roughly 256 frames, which keeps the resampler delay low while maintaining good quality.
+    ///
+    /// For control over the anti-aliasing window and the number of sub-chunks, use
+    /// [new_custom](Fft::new_custom).
+    ///
+    /// The parameters are the same as for [new_custom](Fft::new_custom), without `sub_chunks`
+    /// and `window`:
+    /// - `sample_rate_input`: Input sample rate, must be > 0.
+    /// - `sample_rate_output`: Output sample rate, must be > 0.
+    /// - `chunk_size`: desired chunk size in frames.
+    /// - `nbr_channels`: number of channels in input/output.
+    /// - `fixed`: Deciding whether input size, output size, or both should be fixed.
+    pub fn new(
+        sample_rate_input: usize,
+        sample_rate_output: usize,
+        chunk_size: usize,
+        nbr_channels: usize,
+        fixed: FixedSync,
+    ) -> Result<Self, ResamplerConstructionError> {
+        // Target a sub-chunk size of roughly 256 frames to keep the delay low.
+        let sub_chunks = (chunk_size / 256).max(1);
+        Self::new_custom(
+            sample_rate_input,
+            sample_rate_output,
+            chunk_size,
+            sub_chunks,
+            nbr_channels,
+            WindowFunction::BlackmanHarris2,
+            fixed,
+        )
+    }
+
+    /// Create a new `Fft` synchronous resampler with full control over the anti-aliasing
+    /// window and the number of FFT sub-chunks.
+    ///
+    /// The `Fft` resampler supports fixed input size, fixed output size, and both.
+    /// With fixed input or output size, the fixed side accepts or returns the chosen number of frames,
+    /// while the size on the opposite side varies from call to call.
+    /// When both are fixed, the chunk size is fixed on both sides.
+    /// In this mode, the chunk size is not arbitrarily selectable.
+    /// Instead, it is automatically calculated based on the provided value as a reference.
+    ///
+    /// The resampler introduces a delay equal to half the internal FFT block size,
+    /// expressed as a number of output frames.
+    /// This delay can be queried via [Resampler::output_delay].
+    ///
+    /// The `sub_chunks` parameter controls how many sub-chunks each processing chunk is divided into.
+    /// A higher value uses a smaller FFT block size, which reduces the delay proportionally.
+    /// However, a smaller FFT block also lowers the cutoff frequency of the anti-aliasing filter,
+    /// which may affect quality at high frequencies.
+    ///
+    /// The actual number of sub-chunks used may differ from the requested value,
+    /// since the FFT block size must be a valid multiple of the minimum block size
+    /// for the given sample rate pair.
+    ///
+    /// A sub-chunk size (i.e. `chunk_size / sub_chunks`) between roughly 100 and 1000 frames
+    /// is generally a good target. The best value depends on the delay tolerance and quality
+    /// requirements of the application. If uncertain, start with a sub-chunk size of a few hundred
+    /// frames — meaning `sub_chunks = chunk_size / desired_sub_chunk_size` — and adjust as needed.
+    ///
+    /// The requested value is treated as a hint: the actual sub-chunk size is rounded up to the
+    /// nearest integer multiple of the minimum valid block size for the given sample rate pair.
+    /// The minimum block size is determined by the GCD (Greatest Common Divisor) of the two
+    /// sample rates: `rate / gcd(rate_in, rate_out)` for each side.
+    /// For example, a 44100 → 48000 resampler has a GCD of 300, giving minimum blocks of 147
+    /// (input) and 160 (output), so sub-chunk sizes can only be multiples of those values.
+    /// A 48000 → 96000 resampler has a GCD of 48000, giving minimum blocks of 1 and 2,
+    /// so the sub-chunk size can be chosen almost freely.
+    /// A value of `0` is treated as `1`.
+    ///
+    /// Parameters are:
+    /// - `sample_rate_input`: Input sample rate, must be > 0.
+    /// - `sample_rate_output`: Output sample rate, must be > 0.
+    /// - `chunk_size`: desired chunk size in frames.
+    /// - `sub_chunks`: desired number of sub chunks to use for processing.
+    /// - `nbr_channels`: number of channels in input/output.
+    /// - `window`: the anti-aliasing window function to use.
+    /// - `fixed`: Deciding whether input size, output size, or both should be fixed.
+    pub fn new_custom(
+        sample_rate_input: usize,
+        sample_rate_output: usize,
+        chunk_size: usize,
+        sub_chunks: usize,
+        nbr_channels: usize,
+        window: WindowFunction,
+        fixed: FixedSync,
+    ) -> Result<Self, ResamplerConstructionError> {
+        validate_sample_rates(sample_rate_input, sample_rate_output)?;
+
+        if chunk_size == 0 {
+            return Err(ResamplerConstructionError::InvalidChunkSize(chunk_size));
+        }
+
+        // Set sub chunks to 1 of 0 is given.
+        let sub_chunks = sub_chunks.max(1);
+
+        let gcd = integer::gcd(sample_rate_input, sample_rate_output);
+
+        let fft_chunks = match fixed {
+            FixedSync::Input => {
+                let min_chunk_in = sample_rate_input / gcd;
+                let wanted_subsize = chunk_size / sub_chunks;
+                wanted_subsize.div_ceil(min_chunk_in)
+            }
+            FixedSync::Output => {
+                let min_chunk_out = sample_rate_output / gcd;
+                let wanted_subsize = chunk_size / sub_chunks;
+                wanted_subsize.div_ceil(min_chunk_out)
+            }
+            FixedSync::Both => {
+                let min_chunk_in = sample_rate_input / gcd;
+                chunk_size.div_ceil(min_chunk_in)
+            }
+        }
+        // Asking for more sub chunks than there are frames rounds down to zero blocks,
+        // which is not a usable resampler. Fall back to a single minimum sized block.
+        .max(1);
+        let fft_size_out = fft_chunks * sample_rate_output / gcd;
+        let fft_size_in = fft_chunks * sample_rate_input / gcd;
+
+        let resampler = FftResampler::<T>::new(fft_size_in, fft_size_out, window);
+
+        debug!(
+            "Create new Fft with fixed {:?}, sample_rate_input: {}, sample_rate_output: {} chunk_size: {}, channels: {}, fft_size_in: {}, fft_size_out: {}",
+            fixed, sample_rate_input, sample_rate_output, chunk_size, nbr_channels, fft_size_in, fft_size_out
+        );
+
+        let overlaps: Vec<Vec<T>> = vec![vec![T::zero(); fft_size_out]; nbr_channels];
+
+        let saved_frames = 0;
+
+        let (chunk_size_in, chunk_size_out) =
+            Self::calc_chunk_sizes(fft_size_in, fft_size_out, chunk_size, saved_frames, &fixed);
+
+        let needed_input_buffer_size = Self::input_frames_max(
+            &fixed,
+            chunk_size_in,
+            chunk_size_out,
+            fft_size_in,
+            fft_size_out,
+        ) + fft_size_in;
+        let needed_output_buffer_size = Self::output_frames_max(
+            &fixed,
+            chunk_size_in,
+            chunk_size_out,
+            fft_size_in,
+            fft_size_out,
+        ) + fft_size_out;
+        let input_scratch: Vec<Vec<T>> =
+            vec![vec![T::zero(); needed_input_buffer_size]; nbr_channels];
+        let output_scratch: Vec<Vec<T>> =
+            vec![vec![T::zero(); needed_output_buffer_size]; nbr_channels];
+
+        let channel_mask = vec![true; nbr_channels];
+
+        Ok(Fft {
+            nbr_channels,
+            chunk_size_in,
+            chunk_size_out,
+            fft_size_in,
+            fft_size_out,
+            overlaps,
+            input_scratch,
+            output_scratch,
+            saved_frames,
+            resampler,
+            channel_mask,
+            fixed,
+        })
+    }
+
+    /// The FFT block size on the input side, in frames.
+    ///
+    /// This is the number of frames the resampler transforms at a time,
+    /// determined by the sample rates and the requested `chunk_size`.
+    /// It is not the same as the chunk size, unless the resampler was created
+    /// with [FixedSync::Both] and processes a single block per chunk.
+    /// The resampler delay is half of [fft_size_out](Fft::fft_size_out),
+    /// see [Resampler::output_delay].
+    pub fn fft_size_in(&self) -> usize {
+        self.fft_size_in
+    }
+
+    /// The FFT block size on the output side, in frames.
+    ///
+    /// The counterpart of [fft_size_in](Fft::fft_size_in), in the same ratio to
+    /// it as the output sample rate is to the input sample rate.
+    pub fn fft_size_out(&self) -> usize {
+        self.fft_size_out
+    }
+
+    /// The relative cutoff frequency of the anti-aliasing filter.
+    ///
+    /// The value is relative to the Nyquist frequency of the *input* rate,
+    /// where `1.0` means the cutoff sits right at Nyquist.
+    /// Multiply by `sample_rate_input / 2` to get the cutoff in Hz.
+    ///
+    /// The cutoff is determined by the FFT block size and the window function.
+    /// A larger block moves it closer to Nyquist.
+    /// When downsampling it is scaled down to keep it below the lower Nyquist
+    /// frequency of the two sample rates.
+    pub fn cutoff(&self) -> f32 {
+        self.resampler.cutoff
+    }
+
+    fn calc_chunk_sizes(
+        fft_size_in: usize,
+        fft_size_out: usize,
+        chunk_size: usize,
+        saved_frames: usize,
+        fixed: &FixedSync,
+    ) -> (usize, usize) {
+        match fixed {
+            FixedSync::Input => {
+                let subchunks_available = (chunk_size + saved_frames) / fft_size_in;
+                let frames_available = subchunks_available * fft_size_out;
+                (chunk_size, frames_available)
+            }
+            FixedSync::Output => {
+                // Saturating, since more frames may be saved than the chunk needs.
+                let subchunks_needed = chunk_size
+                    .saturating_sub(saved_frames)
+                    .div_ceil(fft_size_out);
+                let frames_needed = subchunks_needed * fft_size_in;
+                (frames_needed, chunk_size)
+            }
+            FixedSync::Both => {
+                let subchunks_needed = chunk_size.div_ceil(fft_size_in);
+                let frames_needed_in = subchunks_needed * fft_size_in;
+                let frames_needed_out = subchunks_needed * fft_size_out;
+                (frames_needed_in, frames_needed_out)
+            }
+        }
+    }
+
+    fn update_chunk_sizes(&mut self) {
+        match self.fixed {
+            FixedSync::Input => {
+                (self.chunk_size_in, self.chunk_size_out) = Self::calc_chunk_sizes(
+                    self.fft_size_in,
+                    self.fft_size_out,
+                    self.chunk_size_in,
+                    self.saved_frames,
+                    &self.fixed,
+                )
+            }
+            FixedSync::Output => {
+                (self.chunk_size_in, self.chunk_size_out) = Self::calc_chunk_sizes(
+                    self.fft_size_in,
+                    self.fft_size_out,
+                    self.chunk_size_out,
+                    self.saved_frames,
+                    &self.fixed,
+                )
+            }
+            FixedSync::Both => {}
+        }
+    }
+
+    fn input_frames_max(
+        fixed: &FixedSync,
+        chunk_size_in: usize,
+        chunk_size_out: usize,
+        fft_size_in: usize,
+        fft_size_out: usize,
+    ) -> usize {
+        match fixed {
+            FixedSync::Both | FixedSync::Input => chunk_size_in,
+            FixedSync::Output => chunk_size_out.div_ceil(fft_size_out) * fft_size_in,
+        }
+    }
+
+    fn output_frames_max(
+        fixed: &FixedSync,
+        chunk_size_in: usize,
+        chunk_size_out: usize,
+        fft_size_in: usize,
+        fft_size_out: usize,
+    ) -> usize {
+        match fixed {
+            FixedSync::Both | FixedSync::Output => chunk_size_out,
+            FixedSync::Input => {
+                let max_stored_frames = fft_size_in - 1;
+                let max_available_frames = max_stored_frames + chunk_size_in;
+                let max_subchunks_to_process = max_available_frames / fft_size_in;
+                max_subchunks_to_process * fft_size_out
+            }
+        }
+    }
+}
+
+impl<T> Resampler<T> for Fft<T>
+where
+    T: Sample,
+{
+    fn process_into_buffer(
+        &mut self,
+        buffer_in: &dyn Adapter<T>,
+        buffer_out: &mut dyn AdapterMut<T>,
+        indexing: Option<&Indexing>,
+    ) -> ResampleResult<(usize, usize)> {
+        // read the optional indexing struct
+        update_mask(&indexing, &mut self.channel_mask)?;
+        let (input_offset, output_offset) = get_offsets(&indexing);
+
+        // figure out how many frames to read
+        let partial_input_len = get_partial_len(&indexing);
+        let frames_to_read = if let Some(frames) = partial_input_len {
+            frames.min(self.chunk_size_in)
+        } else {
+            self.chunk_size_in
+        };
+
+        validate_buffers(
+            buffer_in,
+            buffer_out,
+            self.nbr_channels,
+            frames_to_read + input_offset,
+            self.chunk_size_out + output_offset,
+        )?;
+
+        trace!("Start processing, {:?}", self);
+
+        let (subchunks_to_process, output_scratch_offset) = match self.fixed {
+            FixedSync::Input => {
+                // Fixed input. Buffer input in the internal buffer, and resample directly to start of output
+                let available_input_frames = self.saved_frames + self.chunk_size_in;
+                let nbr_chunks_ready = self.chunk_size_out / self.fft_size_out;
+                let input_frames_to_process = nbr_chunks_ready * self.fft_size_in;
+                trace!("Fixed input, {} frames available", available_input_frames);
+
+                // Copy new samples to internal buffer.
+                for (chan, active) in self.channel_mask.iter().enumerate() {
+                    if *active {
+                        buffer_in.copy_from_channel_to_slice(
+                            chan,
+                            input_offset,
+                            &mut self.input_scratch[chan]
+                                [self.saved_frames..self.saved_frames + frames_to_read],
+                        );
+                        if frames_to_read < self.chunk_size_in {
+                            for value in self.input_scratch[chan][self.saved_frames + frames_to_read
+                                ..self.saved_frames + self.chunk_size_in]
+                                .iter_mut()
+                            {
+                                *value = T::zero();
+                            }
+                        }
+                    }
+                }
+                self.saved_frames = available_input_frames - input_frames_to_process;
+                (nbr_chunks_ready, 0)
+            }
+            FixedSync::Output | FixedSync::Both => {
+                // Copy new samples to internal buffer.
+                trace!("Read {} input frames", frames_to_read);
+                for (chan, active) in self.channel_mask.iter().enumerate() {
+                    if *active {
+                        buffer_in.copy_from_channel_to_slice(
+                            chan,
+                            input_offset,
+                            &mut self.input_scratch[chan][..frames_to_read],
+                        );
+                        if frames_to_read < self.chunk_size_in {
+                            for value in self.input_scratch[chan]
+                                [frames_to_read..self.chunk_size_in]
+                                .iter_mut()
+                            {
+                                *value = T::zero();
+                            }
+                        }
+                    }
+                }
+                (self.chunk_size_in / self.fft_size_in, self.saved_frames)
+            }
+        };
+
+        trace!(
+            "Process {} input frames in {} subchunks",
+            self.chunk_size_in,
+            subchunks_to_process
+        );
+
+        // Resample between input and output scratch buffers
+        for (chan, active) in self.channel_mask.iter().enumerate() {
+            if *active {
+                //debug_assert!(self.chunk_size_out <= wave_out[chan].as_mut().len());
+                for (in_chunk, out_chunk) in self.input_scratch[chan]
+                    .chunks(self.fft_size_in)
+                    .take(subchunks_to_process)
+                    .zip(
+                        self.output_scratch[chan][output_scratch_offset..]
+                            .chunks_mut(self.fft_size_out),
+                    )
+                {
+                    self.resampler
+                        .resample_unit(in_chunk, out_chunk, &mut self.overlaps[chan]);
+                    trace!("channel {}, resample subchunk", chan);
+                }
+            }
+        }
+
+        // Write to output
+        for (chan, active) in self.channel_mask.iter().enumerate() {
+            if *active {
+                buffer_out.copy_from_slice_to_channel(
+                    chan,
+                    output_offset,
+                    &self.output_scratch[chan][..self.chunk_size_out],
+                );
+            }
+        }
+
+        // Update scratch buffers
+        match self.fixed {
+            FixedSync::Input => {
+                // Copy saved input frames to start of internal buffer
+                let nbr_input_frames_used = subchunks_to_process * self.fft_size_in;
+                for (chan, active) in self.channel_mask.iter().enumerate() {
+                    if *active {
+                        self.input_scratch[chan].copy_within(
+                            nbr_input_frames_used..(nbr_input_frames_used + self.saved_frames),
+                            0,
+                        );
+                    }
+                }
+            }
+
+            FixedSync::Output => {
+                // Copy saved frames to start of internal output buffer for next round.
+                let available_output_frames =
+                    self.saved_frames + self.fft_size_out * subchunks_to_process;
+                self.saved_frames = available_output_frames - self.chunk_size_out;
+                trace!(
+                    "Fixed output, available output frames: {}, saved frames for next: {}",
+                    available_output_frames,
+                    self.saved_frames
+                );
+                for (chan, active) in self.channel_mask.iter().enumerate() {
+                    if *active {
+                        self.output_scratch[chan].copy_within(
+                            self.chunk_size_out..(self.chunk_size_out + self.saved_frames),
+                            0,
+                        );
+                    }
+                }
+            }
+            FixedSync::Both => {
+                // No need to copy anything
+            }
+        };
+
+        let input_size = self.chunk_size_in;
+        let output_size = self.chunk_size_out;
+        self.update_chunk_sizes();
+        Ok((input_size, output_size))
+    }
+
+    fn input_frames_max(&self) -> usize {
+        Self::input_frames_max(
+            &self.fixed,
+            self.chunk_size_in,
+            self.chunk_size_out,
+            self.fft_size_in,
+            self.fft_size_out,
+        )
+    }
+
+    fn input_frames_next(&self) -> usize {
+        self.chunk_size_in
+    }
+
+    fn nbr_channels(&self) -> usize {
+        self.nbr_channels
+    }
+
+    fn output_frames_max(&self) -> usize {
+        Self::output_frames_max(
+            &self.fixed,
+            self.chunk_size_in,
+            self.chunk_size_out,
+            self.fft_size_in,
+            self.fft_size_out,
+        )
+    }
+
+    fn output_frames_next(&self) -> usize {
+        self.chunk_size_out
+    }
+
+    fn output_delay(&self) -> usize {
+        self.fft_size_out / 2
+    }
+
+    fn resample_ratio(&self) -> f64 {
+        self.fft_size_out as f64 / self.fft_size_in as f64
+    }
+
+    fn reset(&mut self) {
+        self.overlaps
+            .iter_mut()
+            .for_each(|ch| ch.iter_mut().for_each(|s| *s = T::zero()));
+        self.input_scratch
+            .iter_mut()
+            .for_each(|ch| ch.iter_mut().for_each(|s| *s = T::zero()));
+        self.output_scratch
+            .iter_mut()
+            .for_each(|ch| ch.iter_mut().for_each(|s| *s = T::zero()));
+        self.channel_mask.iter_mut().for_each(|val| *val = true);
+        self.saved_frames = 0;
+        self.update_chunk_sizes();
+    }
+
+    fn as_adjustable(&mut self) -> Option<&mut dyn Adjustable<T>> {
+        None
+    }
+
+    fn as_resizable(&mut self) -> Option<&mut dyn Resizable<T>> {
+        None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::synchro::{Fft, FftResampler, FixedSync};
+    use crate::tests::expected_output_value;
+    use crate::Indexing;
+    use crate::Resampler;
+    use crate::WindowFunction;
+    use crate::{
+        assert_fb_len, assert_fi_len, assert_fo_len, check_input_offset, check_masked,
+        check_output, check_output_offset, check_ratio, check_reset,
+    };
+    use approx::assert_abs_diff_eq;
+    use audioadapter_buffers::direct::SequentialSliceOfVecs;
+    use test_case::test_matrix;
+
+    #[test_log::test]
+    fn resample_unit() {
+        let mut resampler = FftResampler::<f64>::new(147, 1000, WindowFunction::BlackmanHarris2);
+        let mut wave_in = vec![0.0; 147];
+
+        wave_in[0] = 0.3;
+        wave_in[1] = 0.7;
+        wave_in[2] = 1.0;
+        wave_in[3] = 1.0;
+        wave_in[4] = 0.7;
+        wave_in[5] = 0.3;
+
+        let mut wave_out = vec![0.0; 1000];
+        let mut overlap = vec![0.0; 1000];
+        resampler.resample_unit(&wave_in, &mut wave_out, &mut overlap);
+        let vecsum = wave_out.iter().sum::<f64>();
+        let maxval = wave_out.iter().cloned().fold(f64::NAN, f64::max);
+        assert!((vecsum - 4.0 * 1000.0 / 147.0).abs() < 1.0e-6);
+        assert!((maxval - 1.0).abs() < 0.1);
+    }
+
+    #[test_log::test(test_matrix([FixedSync::Input, FixedSync::Output, FixedSync::Both]))]
+    fn fft_more_sub_chunks_than_frames(fixed: FixedSync) {
+        // Asking for more sub chunks than the chunk has frames rounds the sub chunk
+        // size down to zero. That used to give zero FFT blocks, and a panic on the
+        // first division by the block size.
+        let resampler = Fft::<f64>::new_custom(
+            44100,
+            48000,
+            100,
+            1000,
+            2,
+            WindowFunction::BlackmanHarris2,
+            fixed,
+        )
+        .unwrap();
+        assert_eq!(resampler.fft_size_in(), 147);
+        assert_eq!(resampler.fft_size_out(), 160);
+    }
+
+    #[test_log::test(test_matrix(
+        [512, 1024, 4096],
+        [(44100, 48000), (48000, 44100), (44100, 88200), (88200, 44100), (44100, 192000), (192000, 44100)],
+        [FixedSync::Input, FixedSync::Output, FixedSync::Both]
+    ))]
+    fn fft_sizes_and_cutoff(chunksize: usize, rates: (usize, usize), fixed: FixedSync) {
+        let (input_rate, output_rate) = rates;
+        let resampler = Fft::<f64>::new(input_rate, output_rate, chunksize, 2, fixed).unwrap();
+
+        // The two block sizes are in the same ratio as the sample rates,
+        // and the delay is half the output block.
+        assert_abs_diff_eq!(
+            resampler.fft_size_out() as f64 / resampler.fft_size_in() as f64,
+            output_rate as f64 / input_rate as f64,
+            epsilon = 1e-9
+        );
+        assert_eq!(resampler.output_delay(), resampler.fft_size_out() / 2);
+
+        // The cutoff must stay below the lower of the two Nyquist frequencies,
+        // expressed relative to the input Nyquist frequency.
+        let limit = (output_rate as f32 / input_rate as f32).min(1.0);
+        assert!(resampler.cutoff() > 0.5 * limit);
+        assert!(resampler.cutoff() < limit);
+    }
+
+    #[test_log::test(test_matrix(
+        [512, 1024, 4096],
+        [(44100, 48000), (48000, 44100), (44100, 88200), (88200, 44100), (44100, 192000), (192000, 44100), (44100, 44110)],
+        [FixedSync::Input, FixedSync::Output, FixedSync::Both]
+    ))]
+    fn fft_output(chunksize: usize, rates: (usize, usize), fixed: FixedSync) {
+        let (input_rate, output_rate) = rates;
+        let mut resampler = Fft::<f64>::new(input_rate, output_rate, chunksize, 2, fixed).unwrap();
+        check_output!(resampler, f64);
+    }
+
+    #[test_log::test(test_matrix(
+        [512, 1024, 4096],
+        [(44100, 48000), (48000, 44100), (44100, 88200), (88200, 44100), (44100, 192000), (192000, 44100), (44100, 44110)],
+        [FixedSync::Input, FixedSync::Output, FixedSync::Both]
+    ))]
+    fn fft_ratio(chunksize: usize, rates: (usize, usize), fixed: FixedSync) {
+        let (input_rate, output_rate) = rates;
+        let mut resampler = Fft::<f64>::new(input_rate, output_rate, chunksize, 2, fixed).unwrap();
+        check_ratio!(resampler, 100000 / chunksize, 0.05, f64);
+    }
+    #[test_log::test(test_matrix(
+        [512, 1024, 4096],
+        [(44100, 48000), (48000, 44100), (44100, 88200), (88200, 44100), (44100, 192000), (192000, 44100), (44100, 44110)],
+        [FixedSync::Input, FixedSync::Output, FixedSync::Both]
+    ))]
+    fn fft_len(chunksize: usize, rates: (usize, usize), fixed: FixedSync) {
+        let (input_rate, output_rate) = rates;
+        let resampler = Fft::<f64>::new(input_rate, output_rate, chunksize, 2, fixed).unwrap();
+        match fixed {
+            FixedSync::Input => {
+                assert_fi_len!(resampler, chunksize);
+            }
+            FixedSync::Output => {
+                assert_fo_len!(resampler, chunksize);
+            }
+            FixedSync::Both => {
+                assert_fb_len!(resampler);
+            }
+        }
+    }
+
+    #[test_log::test(test_matrix(
+        [512, 1024, 4096],
+        [(44100, 48000), (48000, 44100), (44100, 88200), (88200, 44100), (44100, 192000), (192000, 44100), (44100, 44110)],
+        [FixedSync::Input, FixedSync::Output, FixedSync::Both]
+    ))]
+    fn fft_reset(chunksize: usize, rates: (usize, usize), fixed: FixedSync) {
+        let (input_rate, output_rate) = rates;
+        let mut resampler = Fft::<f64>::new(input_rate, output_rate, chunksize, 2, fixed).unwrap();
+        check_reset!(resampler);
+    }
+
+    #[test_log::test(test_matrix(
+        [512, 1024, 4096],
+        [(44100, 48000), (48000, 44100), (44100, 88200), (88200, 44100), (44100, 192000), (192000, 44100), (44100, 44110)],
+        [FixedSync::Input, FixedSync::Output, FixedSync::Both]
+    ))]
+    fn fft_input_offset(chunksize: usize, rates: (usize, usize), fixed: FixedSync) {
+        let (input_rate, output_rate) = rates;
+        let mut resampler = Fft::<f64>::new(input_rate, output_rate, chunksize, 2, fixed).unwrap();
+        check_input_offset!(resampler);
+    }
+
+    #[test_log::test(test_matrix(
+        [512, 1024, 4096],
+        [(44100, 48000), (48000, 44100), (44100, 88200), (88200, 44100), (44100, 192000), (192000, 44100), (44100, 44110)],
+        [FixedSync::Input, FixedSync::Output, FixedSync::Both]
+    ))]
+    fn fft_output_offset(chunksize: usize, rates: (usize, usize), fixed: FixedSync) {
+        let (input_rate, output_rate) = rates;
+        let mut resampler = Fft::<f64>::new(input_rate, output_rate, chunksize, 2, fixed).unwrap();
+        check_output_offset!(resampler);
+    }
+
+    #[test_log::test(test_matrix(
+        [FixedSync::Input, FixedSync::Output, FixedSync::Both]
+    ))]
+    fn fft_masked(fixed: FixedSync) {
+        // Use new_custom here to exercise the expert constructor and a non-default window.
+        let mut resampler =
+            Fft::<f64>::new_custom(44100, 48000, 1024, 2, 2, WindowFunction::Hann, fixed).unwrap();
+        check_masked!(resampler);
+    }
+}
