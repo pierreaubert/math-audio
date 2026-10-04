@@ -510,7 +510,7 @@ mod tests {
 
     #[test]
     fn test_prime_delays() {
-        let delays = prime_delays(8, 48000);
+        let delays = prime_delays(8, 48000.0);
         assert_eq!(delays.len(), 8);
         // All should be prime
         for &d in &delays {
