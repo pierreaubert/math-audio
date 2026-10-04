@@ -1,8 +1,7 @@
 use ndarray::Array1;
 use rand::RngExt;
-use rand::rngs::StdRng;
 
-pub(super) fn random_in_bounds(bounds: &[(f64, f64)], rng: &mut StdRng) -> Array1<f64> {
+pub(super) fn random_in_bounds(bounds: &[(f64, f64)], rng: &mut impl rand::Rng) -> Array1<f64> {
     Array1::from(
         bounds
             .iter()
@@ -29,7 +28,7 @@ pub(super) fn sbx_crossover(
     p2: &Array1<f64>,
     bounds: &[(f64, f64)],
     eta_c: f64,
-    rng: &mut StdRng,
+    rng: &mut impl rand::Rng,
 ) -> (Array1<f64>, Array1<f64>) {
     let mut c1 = p1.clone();
     let mut c2 = p2.clone();
@@ -58,7 +57,7 @@ pub(super) fn polynomial_mutation(
     bounds: &[(f64, f64)],
     mutation_prob: f64,
     eta_m: f64,
-    rng: &mut StdRng,
+    rng: &mut impl rand::Rng,
 ) {
     for i in 0..x.len() {
         if rng.random::<f64>() > mutation_prob {

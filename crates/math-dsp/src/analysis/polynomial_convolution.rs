@@ -1,0 +1,479 @@
+//! Matrix-free polynomial convolution for offline nonlinear response identification.
+//!
+//! The model is `y = sum(h[k] * x.powi(k + 1))`, with causal finite kernels
+//! and ordinary linear convolution. The supplied output length may truncate
+//! the convolution tail or append exact zeros for a recording guard interval.
+//! Its adjoint uses the same retained support. This operator
+//! neither fits a model nor establishes identifiability, harmonic support,
+//! calibration, or a physical distortion metric. Callers must validate those
+//! separately. Construction plans FFTs; repeated applications reuse buffers.
+
+// Rust guideline compliant 2026-02-21
+use rustfft::{Fft, FftPlanner, num_complex::Complex};
+use std::sync::Arc;
+
+/// Offline FFT operator and adjoint for causal polynomial convolution.
+///
+/// Coefficients are order-major: all first-order taps, then second-order taps,
+/// through the requested order. Buffers are private and reused. This type is
+/// intended for a worker thread, rather than an audio callback.
+pub struct PolynomialConvolutionOperator {
+    spectra: Vec<Vec<Complex<f64>>>,
+    forward_fft: Arc<dyn Fft<f64>>,
+    inverse_fft: Arc<dyn Fft<f64>>,
+    work: Vec<Complex<f64>>,
+    sum: Vec<Complex<f64>>,
+    scratch: Vec<Complex<f64>>,
+    coefficients: Vec<f64>,
+    support: usize,
+    output_len: usize,
+    full_len: usize,
+    buffer_bytes: usize,
+}
+
+impl std::fmt::Debug for PolynomialConvolutionOperator {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PolynomialConvolutionOperator")
+            .field("orders", &self.spectra.len())
+            .field("support", &self.support)
+            .field("output_len", &self.output_len)
+            .field("fft_len", &self.work.len())
+            .finish_non_exhaustive()
+    }
+}
+
+impl PolynomialConvolutionOperator {
+    /// Prepare spectra and reusable buffers within explicit shape limits.
+    ///
+    /// `max_fft_samples` is checked before FFT planning or buffer allocation.
+    /// Orders one through five match the experimental ESS polynomial model.
+    /// Input amplitude is retained, rather than normalized independently.
+    /// `max_buffer_bytes` bounds this operator's vectors, including temporary
+    /// powers and FFT scratch. FFT planner storage and allocator overhead are
+    /// excluded; these limits are not a process RSS or wall-time guarantee.
+    ///
+    /// # Errors
+    /// Rejects empty/non-finite input, invalid dimensions, unsupported order,
+    /// arithmetic overflow, excessive FFT size, or non-finite input powers.
+    pub fn new(
+        input: &[f64],
+        orders: usize,
+        support: usize,
+        output_len: usize,
+        max_fft_samples: usize,
+        max_buffer_bytes: usize,
+    ) -> Result<Self, String> {
+        if input.is_empty() || input.iter().any(|x| !x.is_finite()) {
+            return Err("polynomial input must be nonempty and finite".into());
+        }
+        // Five is the highest order validated by the ESS diagnostic corpus.
+        if !(1..=5).contains(&orders) || support == 0 || output_len == 0 {
+            return Err("polynomial orders/support/output length are invalid".into());
+        }
+        let full_len = input
+            .len()
+            .checked_add(support - 1)
+            .ok_or("polynomial convolution length overflow")?;
+        if output_len > isize::MAX as usize / std::mem::size_of::<f64>() {
+            return Err("polynomial output length exceeds addressable vector storage".into());
+        }
+        let fft_len = full_len
+            .checked_next_power_of_two()
+            .ok_or("polynomial FFT length overflow")?;
+        if fft_len > max_fft_samples {
+            return Err("polynomial FFT sample limit exceeded".into());
+        }
+        let coefficient_len = orders
+            .checked_mul(support)
+            .ok_or("polynomial coefficient length overflow")?;
+        let checked_bytes = |scratch_len: usize| -> Result<usize, String> {
+            let complex_count = fft_len
+                .checked_mul(orders + 2)
+                .and_then(|count| count.checked_add(scratch_len))
+                .ok_or("polynomial buffer length overflow")?;
+            let bytes = complex_count
+                .checked_mul(std::mem::size_of::<Complex<f64>>())
+                .and_then(|bytes| {
+                    coefficient_len
+                        .checked_add(input.len())
+                        .and_then(|count| count.checked_mul(std::mem::size_of::<f64>()))
+                        .and_then(|extra| bytes.checked_add(extra))
+                })
+                .ok_or("polynomial buffer byte count overflow")?;
+            if bytes > max_buffer_bytes || bytes > isize::MAX as usize {
+                return Err("polynomial buffer byte limit exceeded".into());
+            }
+            Ok(bytes)
+        };
+        checked_bytes(0)?;
+        let mut planner = FftPlanner::<f64>::new();
+        let forward_fft = planner.plan_fft_forward(fft_len);
+        let inverse_fft = planner.plan_fft_inverse(fft_len);
+        let scratch_len = forward_fft
+            .get_inplace_scratch_len()
+            .max(inverse_fft.get_inplace_scratch_len());
+        let buffer_bytes = checked_bytes(scratch_len)?;
+        let mut scratch = vec![Complex::default(); scratch_len];
+        let mut spectra = Vec::with_capacity(orders);
+        let mut powers = input.to_vec();
+        for order in 0..orders {
+            let mut spectrum = vec![Complex::default(); fft_len];
+            for (value, power) in spectrum.iter_mut().zip(&powers) {
+                value.re = *power;
+            }
+            forward_fft.process_with_scratch(&mut spectrum, &mut scratch);
+            if spectrum
+                .iter()
+                .any(|z| !z.re.is_finite() || !z.im.is_finite())
+            {
+                return Err("polynomial input spectrum is non-finite".into());
+            }
+            spectra.push(spectrum);
+            if order + 1 < orders {
+                for (power, x) in powers.iter_mut().zip(input) {
+                    *power *= x;
+                    if !power.is_finite() {
+                        return Err("polynomial input power is non-finite".into());
+                    }
+                }
+            }
+        }
+        Ok(Self {
+            spectra,
+            forward_fft,
+            inverse_fft,
+            work: vec![Complex::default(); fft_len],
+            sum: vec![Complex::default(); fft_len],
+            scratch,
+            coefficients: vec![0.0; coefficient_len],
+            support,
+            output_len,
+            full_len,
+            buffer_bytes,
+        })
+    }
+
+    /// Return the number of order-major kernel coefficients.
+    #[must_use]
+    pub fn coefficient_len(&self) -> usize {
+        self.coefficients.len()
+    }
+
+    /// Return the vector storage bound including construction's temporary input powers.
+    #[must_use]
+    pub fn buffer_bytes(&self) -> usize {
+        self.buffer_bytes
+    }
+
+    /// Return the exact number of retained output samples.
+    #[must_use]
+    pub fn output_len(&self) -> usize {
+        self.output_len
+    }
+
+    /// Apply the model while preserving the output on an error.
+    ///
+    /// # Errors
+    /// Rejects mismatched dimensions, non-finite coefficients, or overflow.
+    pub fn apply(&mut self, coefficients: &[f64], output: &mut [f64]) -> Result<(), String> {
+        if coefficients.len() != self.coefficient_len() || output.len() != self.output_len {
+            return Err("polynomial forward dimensions mismatch".into());
+        }
+        if coefficients.iter().any(|x| !x.is_finite()) {
+            return Err("polynomial coefficients must be finite".into());
+        }
+        self.sum.fill(Complex::default());
+        for (kernel, spectrum) in coefficients.chunks_exact(self.support).zip(&self.spectra) {
+            self.work.fill(Complex::default());
+            for (value, coefficient) in self.work.iter_mut().zip(kernel) {
+                value.re = *coefficient;
+            }
+            self.forward_fft
+                .process_with_scratch(&mut self.work, &mut self.scratch);
+            for ((sum, kernel_bin), input_bin) in self.sum.iter_mut().zip(&self.work).zip(spectrum)
+            {
+                *sum += *kernel_bin * *input_bin;
+            }
+        }
+        self.inverse_fft
+            .process_with_scratch(&mut self.sum, &mut self.scratch);
+        let scale = 1.0 / self.work.len() as f64;
+        let retained_len = self.output_len.min(self.full_len);
+        if self.sum[..retained_len]
+            .iter()
+            .any(|z| !(z.re * scale).is_finite())
+        {
+            return Err("polynomial forward result is non-finite".into());
+        }
+        output.fill(0.0);
+        for (value, sample) in output.iter_mut().zip(&self.sum[..retained_len]) {
+            *value = sample.re * scale;
+        }
+        Ok(())
+    }
+
+    /// Apply the transpose of the retained-output model, preserving output on errors.
+    ///
+    /// # Errors
+    /// Rejects mismatched dimensions, non-finite samples, or overflow.
+    pub fn apply_adjoint(&mut self, samples: &[f64], output: &mut [f64]) -> Result<(), String> {
+        if samples.len() != self.output_len || output.len() != self.coefficient_len() {
+            return Err("polynomial adjoint dimensions mismatch".into());
+        }
+        if samples.iter().any(|x| !x.is_finite()) {
+            return Err("polynomial adjoint samples must be finite".into());
+        }
+        self.sum.fill(Complex::default());
+        let retained_len = self.output_len.min(self.full_len);
+        for (value, sample) in self.sum.iter_mut().zip(&samples[..retained_len]) {
+            value.re = *sample;
+        }
+        self.forward_fft
+            .process_with_scratch(&mut self.sum, &mut self.scratch);
+        let scale = 1.0 / self.work.len() as f64;
+        for (kernel, spectrum) in self
+            .coefficients
+            .chunks_exact_mut(self.support)
+            .zip(&self.spectra)
+        {
+            for ((value, input_bin), sample_bin) in
+                self.work.iter_mut().zip(spectrum).zip(&self.sum)
+            {
+                *value = input_bin.conj() * *sample_bin;
+            }
+            self.inverse_fft
+                .process_with_scratch(&mut self.work, &mut self.scratch);
+            for (value, sample) in kernel.iter_mut().zip(&self.work) {
+                *value = sample.re * scale;
+            }
+        }
+        if self.coefficients.iter().any(|x| !x.is_finite()) {
+            return Err("polynomial adjoint result is non-finite".into());
+        }
+        output.copy_from_slice(&self.coefficients);
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn direct(input: &[f64], taps: &[f64], support: usize, len: usize) -> Vec<f64> {
+        let mut y = vec![0.0; len];
+        for (order, kernel) in taps.chunks_exact(support).enumerate() {
+            for (delay, tap) in kernel.iter().enumerate() {
+                for (time, x) in input.iter().enumerate() {
+                    if time + delay < len {
+                        y[time + delay] += tap * x.powi(order as i32 + 1);
+                    }
+                }
+            }
+        }
+        y
+    }
+
+    #[test]
+    fn fft_matches_signed_direct_convolution_and_transpose_for_truncated_and_guarded_tails() {
+        let x: Vec<f64> = (0..37)
+            .map(|i| ((i * 17 % 29) as f64 - 14.0) / 19.0)
+            .collect();
+        for orders in 1..=5 {
+            for support in [1, 7, 43] {
+                for len in [1, x.len(), x.len() + support - 1, x.len() + support + 193] {
+                    let h: Vec<f64> = (0..orders * support)
+                        .map(|i| ((i * 13 % 17) as f64 - 8.0) / 23.0)
+                        .collect();
+                    let v: Vec<f64> = (0..len)
+                        .map(|i| ((i * 7 % 19) as f64 - 9.0) / 11.0)
+                        .collect();
+                    let expected = direct(&x, &h, support, len);
+                    let mut operator =
+                        PolynomialConvolutionOperator::new(&x, orders, support, len, 128, 1 << 20)
+                            .unwrap();
+                    let mut actual = vec![0.0; len];
+                    operator.apply(&h, &mut actual).unwrap();
+                    for (a, b) in actual.iter().zip(&expected) {
+                        assert!((a - b).abs() < 2e-13, "{a} != {b}");
+                    }
+                    let mut transpose = vec![0.0; h.len()];
+                    operator.apply_adjoint(&v, &mut transpose).unwrap();
+                    // Each transpose component is independently measured using one
+                    // time-domain unit kernel, not the FFT implementation.
+                    for (index, a) in transpose.iter().enumerate() {
+                        let mut unit = vec![0.0; h.len()];
+                        unit[index] = 1.0;
+                        let b: f64 = direct(&x, &unit, support, len)
+                            .iter()
+                            .zip(&v)
+                            .map(|(a, b)| a * b)
+                            .sum();
+                        assert!((a - b).abs() < 2e-13, "adjoint {a} != {b}");
+                    }
+                    let left: f64 = actual.iter().zip(&v).map(|(a, b)| a * b).sum();
+                    let right: f64 = h.iter().zip(&transpose).map(|(a, b)| a * b).sum();
+                    assert!((left - right).abs() < 2e-12);
+                    operator.apply(&h, &mut actual).unwrap();
+                    for (a, b) in actual.iter().zip(&expected) {
+                        assert!((a - b).abs() < 2e-13);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn guard_interval_is_exactly_zero_and_cannot_alias_into_adjoint() {
+        let input = [0.3, -0.6, 0.2];
+        let taps = [0.8, -0.2, 0.4, 0.1];
+        let mut short = PolynomialConvolutionOperator::new(&input, 2, 2, 4, 4, 1 << 20).unwrap();
+        // The guard extends past the FFT length; it must not require larger FFTs.
+        let mut guarded =
+            PolynomialConvolutionOperator::new(&input, 2, 2, 101, 4, 1 << 20).unwrap();
+        assert_eq!(short.buffer_bytes(), guarded.buffer_bytes());
+        let mut output = vec![99.0; 101];
+        guarded.apply(&taps, &mut output).unwrap();
+        let expected = direct(&input, &taps, 2, 101);
+        assert!(
+            output
+                .iter()
+                .zip(expected)
+                .all(|(a, b)| (a - b).abs() < 1e-14)
+        );
+        assert!(output[4..].iter().all(|sample| sample.to_bits() == 0));
+        let mut samples = vec![1e100; 101];
+        samples[..4].copy_from_slice(&[0.7, -0.4, 0.9, -0.1]);
+        let mut actual = vec![0.0; 4];
+        let mut reference = vec![0.0; 4];
+        guarded.apply_adjoint(&samples, &mut actual).unwrap();
+        short.apply_adjoint(&samples[..4], &mut reference).unwrap();
+        assert_eq!(actual, reference);
+        samples[..4].fill(0.0);
+        guarded.apply_adjoint(&samples, &mut actual).unwrap();
+        assert!(actual.iter().all(|value| *value == 0.0));
+        // Even ignored guard samples must be finite under the public input contract.
+        samples[100] = f64::NAN;
+        actual.fill(7.0);
+        assert!(guarded.apply_adjoint(&samples, &mut actual).is_err());
+        assert_eq!(actual, vec![7.0; 4]);
+    }
+
+    #[test]
+    fn recording_scale_48khz_sweep_matches_sparse_time_domain_model() {
+        assert_recording_scale_operator(96_000, 512, 131_072, 32 * 1024 * 1024);
+    }
+
+    #[test]
+    fn long_recording_48khz_with_one_second_kernels_matches_sparse_model() {
+        assert_recording_scale_operator(480_000, 48_000, 1_048_576, 256 * 1024 * 1024);
+    }
+
+    fn assert_recording_scale_operator(
+        input_len: usize,
+        support: usize,
+        fft_len: usize,
+        buffer_limit: usize,
+    ) {
+        let sample_rate = 48_000.0;
+        let duration = input_len as f64 / sample_rate;
+        let output_len = input_len + support - 1;
+        // The fifth polynomial order stays below Nyquist over this 40-4000 Hz sweep.
+        let logarithmic_ratio = 100.0_f64.ln();
+        let input: Vec<f64> = (0..input_len)
+            .map(|i| {
+                let time = i as f64 / sample_rate;
+                let phase = std::f64::consts::TAU * 40.0 * duration / logarithmic_ratio
+                    * (logarithmic_ratio * time / duration).exp_m1();
+                0.5 * phase.sin()
+            })
+            .collect();
+        let mut taps = vec![0.0; 5 * support];
+        let mut expected = vec![0.0; output_len];
+        // Evaluate only these independently specified signed/delayed taps;
+        // no FFT, stored spectra, or production adjoint enters this oracle.
+        for order in 1..=5 {
+            for (delay, gain) in [
+                (0, 0.2 / order as f64),
+                (support / 3, -0.07),
+                (support - 1, 0.03),
+            ] {
+                taps[(order - 1) * support + delay] = gain;
+                for (i, x) in input.iter().enumerate() {
+                    expected[i + delay] += gain * x.powi(order as i32);
+                }
+            }
+        }
+        let mut operator = PolynomialConvolutionOperator::new(
+            &input,
+            5,
+            support,
+            output_len,
+            fft_len,
+            buffer_limit,
+        )
+        .unwrap();
+        assert!(operator.buffer_bytes() <= buffer_limit);
+        let mut actual = vec![0.0; output_len];
+        operator.apply(&taps, &mut actual).unwrap();
+        let maximum_error = actual
+            .iter()
+            .zip(&expected)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0, f64::max);
+        assert!(maximum_error < 2e-13, "maximum error {maximum_error}");
+        let samples: Vec<f64> = (0..output_len).map(|i| (i as f64 * 0.123).sin()).collect();
+        let mut adjoint = vec![0.0; taps.len()];
+        operator.apply_adjoint(&samples, &mut adjoint).unwrap();
+        let oracle_dot: f64 = expected.iter().zip(&samples).map(|(a, b)| a * b).sum();
+        let adjoint_dot: f64 = taps.iter().zip(&adjoint).map(|(a, b)| a * b).sum();
+        assert!((oracle_dot - adjoint_dot).abs() < 1e-10);
+        println!(
+            "input_samples={input_len} kernel_support={support} fft_samples={fft_len} vector_bytes={} maximum_error={maximum_error:.17e} adjoint_dot_error={:.17e}",
+            operator.buffer_bytes(),
+            (oracle_dot - adjoint_dot).abs()
+        );
+    }
+
+    #[test]
+    fn invalid_shapes_and_numerics_fail_without_replacing_caller_output() {
+        for (input, orders, support, len, cap) in [
+            (vec![], 1, 1, 1, 1),
+            (vec![f64::NAN], 1, 1, 1, 1),
+            (vec![1.0], 6, 1, 1, 1),
+            (vec![1.0], 1, 0, 1, 1),
+            (vec![1.0], 1, 1, 0, 2),
+            (vec![1.0], 1, 1, usize::MAX, 2),
+            (vec![1.0; 8], 1, 2, 8, 8),
+            (vec![f64::MAX], 2, 1, 1, 1),
+            (vec![1.0], 1, usize::MAX, 1, 8),
+        ] {
+            assert!(
+                PolynomialConvolutionOperator::new(&input, orders, support, len, cap, 1 << 20)
+                    .is_err()
+            );
+        }
+        let mut operator =
+            PolynomialConvolutionOperator::new(&[1.0, -1.0], 2, 2, 3, 4, 1 << 20).unwrap();
+        let bytes = operator.buffer_bytes();
+        assert!(PolynomialConvolutionOperator::new(&[1.0, -1.0], 2, 2, 3, 4, bytes - 1).is_err());
+        assert!(PolynomialConvolutionOperator::new(&[1.0, -1.0], 2, 2, 3, 4, bytes).is_ok());
+        let mut output = vec![7.0; 3];
+        assert!(operator.apply(&[f64::NAN; 4], &mut output).is_err());
+        assert_eq!(output, vec![7.0; 3]);
+        assert!(operator.apply(&[f64::MAX; 4], &mut output).is_err());
+        assert_eq!(output, vec![7.0; 3]);
+        let mut coefficients = vec![7.0; 4];
+        assert!(
+            operator
+                .apply_adjoint(&[f64::INFINITY; 3], &mut coefficients)
+                .is_err()
+        );
+        assert_eq!(coefficients, vec![7.0; 4]);
+        assert!(
+            operator
+                .apply_adjoint(&[f64::MAX; 3], &mut coefficients)
+                .is_err()
+        );
+        assert_eq!(coefficients, vec![7.0; 4]);
+    }
+}

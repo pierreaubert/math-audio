@@ -135,36 +135,34 @@ impl<T: FilterFloat> Lr8Crossover<T> {
         }
     }
 
-    /// Reset all filter states without reallocating channel storage.
+    /// Reset all filter states to zero without reallocating channel storage.
     pub fn reset(&mut self) {
-        self.reset_at_frequency(self.freq);
-    }
-
-    /// Reset state at an exact frequency without reallocating channel storage.
-    ///
-    /// Unlike parameter automation, reset does not skip small frequency changes.
-    pub fn reset_at_frequency(&mut self, freq: T) {
-        self.freq = freq;
         let [q1, q2] = butterworth4_q_values::<T>();
         let qs = [q1, q2, q1, q2];
         for ch in 0..self.channels {
             for (stage, &q) in qs.iter().enumerate() {
                 self.lowpass[ch][stage] = Biquad::new(
                     BiquadFilterType::Lowpass,
-                    freq,
+                    self.freq,
                     self.sample_rate,
                     q,
                     T::zero(),
                 );
                 self.highpass[ch][stage] = Biquad::new(
                     BiquadFilterType::Highpass,
-                    freq,
+                    self.freq,
                     self.sample_rate,
                     q,
                     T::zero(),
                 );
             }
         }
+    }
+
+    /// Reset state and set the exact cutoff, including changes below the live-update threshold.
+    pub fn reset_at_frequency(&mut self, freq: T) {
+        self.freq = freq;
+        self.reset();
     }
 
     /// Re-initialize for a new sample rate and/or channel count.
@@ -394,6 +392,25 @@ mod tests {
         let (low, high) = xo.process(1.0f32, 0);
         assert!(low.is_finite());
         assert!(high.is_finite());
+    }
+
+    #[test]
+    fn reset_at_sub_threshold_frequency_matches_fresh_crossover() {
+        let target = 1000.05_f32;
+        let mut reset = Lr8Crossover::new(1000.0_f32, 48_000.0, 2);
+        for _ in 0..256 {
+            reset.process(0.4, 0);
+            reset.process(-0.3, 1);
+        }
+        reset.reset_at_frequency(target);
+        let mut fresh = Lr8Crossover::new(target, 48_000.0, 2);
+        assert_eq!(reset.frequency(), target);
+        for frame in 0..128 {
+            let sample = (frame as f32 * 0.073).sin();
+            for channel in 0..2 {
+                assert_eq!(reset.process(sample, channel), fresh.process(sample, channel));
+            }
+        }
     }
 }
 

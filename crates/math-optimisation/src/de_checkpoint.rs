@@ -184,7 +184,7 @@ fn calculate_running_build_identity() -> Result<String, String> {
     Ok(format!("sha256:{}", format_digest(hasher.finalize())))
 }
 
-fn format_digest(digest: impl IntoIterator<Item = u8>) -> String {
+pub(crate) fn format_digest(digest: impl IntoIterator<Item = u8>) -> String {
     let mut result = String::with_capacity(64);
     for byte in digest {
         use std::fmt::Write;

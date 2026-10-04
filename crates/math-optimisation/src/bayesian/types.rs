@@ -75,8 +75,10 @@ pub struct BayesOptParetoReport {
     pub nfev: usize,
     /// BO batches completed after the initial design.
     pub nit: usize,
-    /// Whether at least one surrogate-guided iteration completed.
+    /// Whether at least one surrogate-guided iteration completed without a stop request.
     pub success: bool,
+    /// Whether the cooperative stop predicate was observed and latched.
+    pub stop_requested: bool,
     /// Human-readable termination message.
     pub message: String,
 }

@@ -96,7 +96,6 @@ pub fn wavelet_heatmap(ir: &[f32], sample_rate: f64, config: &WaveletConfig) -> 
 }
 
 /// Build the heatmap around an explicit direct sample.
-#[allow(clippy::cast_precision_loss)]
 pub fn wavelet_heatmap_at(
     ir: &[f32],
     sample_rate: f64,
@@ -125,6 +124,10 @@ pub fn wavelet_heatmap_detailed(
     wavelet_heatmap_impl(ir, sample_rate, direct, config, true)
 }
 
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "Sample indices are bounded by the input slice and converted for the time grid"
+)]
 fn wavelet_heatmap_impl(
     ir: &[f32],
     sample_rate: f64,
@@ -411,6 +414,108 @@ mod tests {
     fn empty_input_yields_empty_heatmap() {
         let heat = wavelet_heatmap(&[], 48000.0, &WaveletConfig::default());
         assert!(heat.freqs_hz.is_empty());
+    }
+
+    #[test]
+    fn detailed_sampling_preserves_coarse_cells_and_relative_peak() {
+        let sample_rate = 48_000.0;
+        let mut ir = vec![0.0; 28_800];
+        ir[480] = 1.0;
+        let config = WaveletConfig {
+            max_freqs: 1024,
+            max_frames: 1024,
+            ..WaveletConfig::default()
+        };
+        let coarse = wavelet_heatmap(&ir, sample_rate, &config);
+        let detailed = wavelet_heatmap_detailed(&ir, sample_rate, &config);
+        assert_eq!(coarse.freqs_hz, detailed.freqs_hz);
+        assert!(detailed.times_ms.len() > coarse.times_ms.len());
+        assert!(
+            detailed
+                .times_ms
+                .windows(2)
+                .all(|times| times[0] < times[1])
+        );
+        for (column, time) in coarse.times_ms.iter().enumerate() {
+            let detailed_column = detailed
+                .times_ms
+                .iter()
+                .position(|candidate| candidate == time)
+                .expect("the dense grid retains every coarse cell at 48 kHz");
+            for (coarse_row, detailed_row) in coarse.mags_db.iter().zip(&detailed.mags_db) {
+                assert_eq!(coarse_row[column], detailed_row[detailed_column]);
+            }
+        }
+        assert!(detailed.mags_db.iter().flatten().any(|value| *value == 0.0));
+    }
+
+    #[test]
+    fn detailed_early_times_are_actual_samples_at_multiple_rates() {
+        for sample_rate in [44_100.0, 48_000.0, 96_000.0] {
+            let direct = (sample_rate / 100.0) as usize;
+            let mut ir = vec![0.0; (sample_rate * 0.04) as usize];
+            ir[direct] = 1.0;
+            let config = WaveletConfig {
+                max_freqs: 1,
+                max_frames: 1024,
+                ..WaveletConfig::default()
+            };
+            let detailed = wavelet_heatmap_detailed(&ir, sample_rate, &config);
+            assert!(
+                detailed
+                    .times_ms
+                    .windows(2)
+                    .all(|times| times[0] < times[1])
+            );
+            for tenth_ms in -50..=150 {
+                let expected_sample =
+                    (direct as f64 + f64::from(tenth_ms) * sample_rate / 10_000.0).round();
+                let expected_time = (expected_sample - direct as f64) * 1000.0 / sample_rate;
+                assert!(detailed.times_ms.contains(&expected_time));
+            }
+            for time in &detailed.times_ms {
+                let sample = direct as f64 + time * sample_rate / 1000.0;
+                assert!((sample - sample.round()).abs() < 1e-9);
+            }
+        }
+    }
+
+    #[test]
+    fn detailed_sampling_obeys_caps_and_display_floor_for_silence() {
+        let config = WaveletConfig {
+            max_freqs: 7,
+            max_frames: 11,
+            ..WaveletConfig::default()
+        };
+        let heatmap = wavelet_heatmap_detailed(&vec![0.0; 28_800], 48_000.0, &config);
+        assert_eq!(heatmap.freqs_hz.len(), 7);
+        assert_eq!(heatmap.times_ms.len(), 11);
+        assert!(heatmap.mags_db.iter().all(|row| row.len() == 11));
+        assert!(
+            heatmap
+                .mags_db
+                .iter()
+                .flatten()
+                .all(|value| f64::from(*value) == WAVELET_DB_MIN)
+        );
+    }
+
+    #[test]
+    fn nonfinite_rates_refuse_before_grid_construction() {
+        for sample_rate in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let config = WaveletConfig::default();
+            let ir = [1.0];
+            assert!(
+                wavelet_heatmap(&ir, sample_rate, &config)
+                    .freqs_hz
+                    .is_empty()
+            );
+            assert!(
+                wavelet_heatmap_detailed(&ir, sample_rate, &config)
+                    .freqs_hz
+                    .is_empty()
+            );
+        }
     }
 
     #[test]

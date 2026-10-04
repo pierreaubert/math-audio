@@ -23,7 +23,25 @@ pub(super) fn learn_lengthscales(
     kernel_variance: f64,
     noise: f64,
 ) -> Result<Vec<f64>> {
-    if x.len() < 3 || initial.is_empty() {
+    learn_lengthscales_with_stop(
+        x,
+        y,
+        initial,
+        kernel_variance,
+        noise,
+        &super::stop::StopCheck::new(&|| false),
+    )
+}
+
+pub(super) fn learn_lengthscales_with_stop(
+    x: &[Array1<f64>],
+    y: &[f64],
+    initial: &[f64],
+    kernel_variance: f64,
+    noise: f64,
+    stop: &super::stop::StopCheck<'_>,
+) -> Result<Vec<f64>> {
+    if stop.requested() || x.len() < 3 || initial.is_empty() {
         return Ok(initial.to_vec());
     }
 
@@ -45,6 +63,9 @@ pub(super) fn learn_lengthscales(
             let mut best_for_dim = best;
             let mut best_log_value = base;
             for direction in [-1.0, 1.0] {
+                if stop.requested() {
+                    return Ok(log_lengthscales(&log_ls));
+                }
                 let mut trial = log_ls.clone();
                 trial[d] = (base + direction * step).clamp(log_min, log_max);
                 if (trial[d] - base).abs() < 1e-12 {
