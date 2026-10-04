@@ -47,15 +47,29 @@ fn solve_factor(
         } else {
             row + 1..dimension
         };
+        // Neumaier accumulation retains cancellation lost by repeated subtraction.
+        // A fused multiply-add also retains each finite product's rounding error.
+        // This improves accuracy; it does not certify the factor's conditioning.
+        let mut value = input[row];
+        let mut correction = 0.0;
         for column in columns {
             let index = if transpose {
                 column * dimension + row
             } else {
                 row * dimension + column
             };
-            work[row] -= factor[index] * work[column];
+            let coefficient = -factor[index];
+            let product = coefficient * work[column];
+            let total = value + product;
+            let addition_error = if value.abs() >= product.abs() {
+                (value - total) + product
+            } else {
+                (product - total) + value
+            };
+            correction += addition_error + coefficient.mul_add(work[column], -product);
+            value = total;
         }
-        work[row] /= factor[row * dimension + row];
+        work[row] = (value + correction) / factor[row * dimension + row];
         if !work[row].is_finite() {
             return Err("triangular solve produced a nonfinite coefficient".into());
         }
@@ -308,6 +322,37 @@ mod tests {
         let left: f64 = x.iter().zip(y).map(|(a, b)| a * b).sum();
         let right: f64 = g.iter().zip(transpose).map(|(a, b)| a * b).sum();
         assert!((left - right).abs() < 1e-14);
+    }
+    #[test]
+    fn triangular_rows_retain_unit_terms_between_large_signed_products() {
+        // These integer equations have exactly representable solutions. Ordinary
+        // sequential subtraction loses the unit term between opposite 2^53 terms.
+        let large = 9007199254740992.0;
+        let factor = [
+            1., large, 1., -large, 0., 1., 0., 0., 0., 0., 1., 0., 0., 0., 0., 1.,
+        ];
+        let mut work = [0.; 4];
+        solve_factor(&factor, &mut work, &[0., 1., 1., 1.], false).unwrap();
+        assert_eq!(work, [-1., 1., 1., 1.]);
+        let transpose_factor = [
+            1., 0., 0., large, 0., 1., 0., 1., 0., 0., 1., -large, 0., 0., 0., 1.,
+        ];
+        solve_factor(&transpose_factor, &mut work, &[1., 1., 1., 0.], true).unwrap();
+        assert_eq!(work, [1., 1., 1., -1.]);
+    }
+    #[test]
+    fn triangular_rows_retain_product_rounding_residuals() {
+        // (1 + 2^-27)*(1 - 2^-27) = 1 - 2^-54 exactly. The rounded
+        // product alone is one; the solve must retain the nonzero residual.
+        let a = 1. + 2.0_f64.powi(-27);
+        let b = 1. - 2.0_f64.powi(-27);
+        let residual = 2.0_f64.powi(-54);
+        let factor = [1., a, 0., 1.];
+        let mut work = [0.; 2];
+        solve_factor(&factor, &mut work, &[1., b], false).unwrap();
+        assert_eq!(work, [residual, b]);
+        solve_factor(&factor, &mut work, &[b, 1.], true).unwrap();
+        assert_eq!(work, [b, residual]);
     }
     #[test]
     fn invalid_factors_limits_and_overflow_preserve_output() {
