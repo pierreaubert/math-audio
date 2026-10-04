@@ -192,6 +192,8 @@ pub struct DesignResourceEstimate {
     pub design_matrix_bytes: usize,
     /// Square triangular factor bytes.
     pub triangular_factor_bytes: usize,
+    /// Retained row-major factor capacity kept by the prepared design.
+    pub prepared_factor_capacity_bytes: usize,
     /// Peak estimate for QR's in-place matrix and extracted triangular factor.
     pub qr_phase_bytes: usize,
     /// Peak estimate for retained factor, SVD matrix and bidiagonal vectors.
@@ -199,7 +201,14 @@ pub struct DesignResourceEstimate {
     /// Fixed extra workspace allowance; this is not an allocator or RSS guarantee.
     pub fixed_workspace_reserve_bytes: usize,
     /// Conservative estimated maximum of QR and SVD phase allocations.
+    /// Also includes the fixed reuse-fit baseline, but excludes convolution
+    /// operators, FFT planner internals, allocator overhead and process RSS.
     pub preflight_peak_bytes: usize,
+    /// Fixed per-fit baseline for a borrowed/reused design: prepared factor,
+    /// copied solver factor, solver/target/prediction/tap vectors, two stacked
+    /// operator vectors, two right-map vectors, and the fixed workspace reserve.
+    /// Convolution operator buffers are checked and added during each fit.
+    pub reusable_fit_fixed_bytes: usize,
     /// Estimated-allocation ceiling applied by this API.
     pub working_set_limit_bytes: usize,
 }
@@ -482,7 +491,7 @@ pub fn prepare_parallel_hammerstein_design<'a>(
             "training design has fewer rows than finite-kernel coefficients",
         ));
     }
-    let preflight = estimate_design_resources(rows, columns)?;
+    let mut preflight = estimate_design_resources(rows, columns)?;
     if preflight.preflight_peak_bytes > PARALLEL_HAMMERSTEIN_MAX_WORKING_BYTES {
         return Err(PolynomialFitError::new(
             ErrorKind::ResourceLimit,
@@ -556,6 +565,27 @@ pub fn prepare_parallel_hammerstein_design<'a>(
             PolynomialFitError::new(ErrorKind::Allocation, "triangular factor allocation failed")
         })?;
     let actual_factor_bytes = bytes_for(factor_row_major.capacity())?;
+    preflight.prepared_factor_capacity_bytes = actual_factor_bytes;
+    preflight.reusable_fit_fixed_bytes = reusable_fit_fixed_bytes(
+        rows,
+        columns,
+        actual_factor_bytes,
+        bytes_for(factor_entries)?,
+    )?;
+    preflight.preflight_peak_bytes = preflight
+        .qr_phase_bytes
+        .max(preflight.svd_phase_bytes)
+        .checked_add(FIXED_WORKSPACE_RESERVE_BYTES)
+        .ok_or_else(|| {
+            PolynomialFitError::new(ErrorKind::ResourceLimit, "factorization estimate overflow")
+        })?
+        .max(preflight.reusable_fit_fixed_bytes);
+    if preflight.preflight_peak_bytes > PARALLEL_HAMMERSTEIN_MAX_WORKING_BYTES {
+        return Err(PolynomialFitError::new(
+            ErrorKind::ResourceLimit,
+            "prepared factor plus one bounded fit exceeds the original 1.5 GiB working-set ceiling",
+        ));
+    }
     let actual_svd_phase_bytes = bytes_for(r_matrix.len())?
         .checked_add(actual_factor_bytes)
         .and_then(|bytes| bytes.checked_add(bytes_for(columns.checked_mul(8)?).ok()?))
@@ -570,6 +600,21 @@ pub fn prepare_parallel_hammerstein_design<'a>(
         return Err(PolynomialFitError::new(
             ErrorKind::ResourceLimit,
             "actual triangular factor capacity exceeds the SVD working-set ceiling",
+        ));
+    }
+    preflight.svd_phase_bytes = actual_svd_phase_bytes - FIXED_WORKSPACE_RESERVE_BYTES;
+    preflight.preflight_peak_bytes = preflight
+        .qr_phase_bytes
+        .max(preflight.svd_phase_bytes)
+        .checked_add(FIXED_WORKSPACE_RESERVE_BYTES)
+        .ok_or_else(|| {
+            PolynomialFitError::new(ErrorKind::ResourceLimit, "factorization estimate overflow")
+        })?
+        .max(preflight.reusable_fit_fixed_bytes);
+    if preflight.preflight_peak_bytes > PARALLEL_HAMMERSTEIN_MAX_WORKING_BYTES {
+        return Err(PolynomialFitError::new(
+            ErrorKind::ResourceLimit,
+            "actual prepared-factor phases exceed the original 1.5 GiB working-set ceiling",
         ));
     }
     for row in 0..columns {
@@ -675,6 +720,36 @@ pub fn prepare_parallel_hammerstein_design<'a>(
 
 /// Fit captures using a previously frozen input-only design.
 ///
+/// This compatibility wrapper consumes the prepared design. Call
+/// [`fit_parallel_hammerstein_reusing_design`] to fit multiple capture sets
+/// against one input-only factorization.
+///
+/// # Errors
+/// Returns the same validation, resource, allocation, operator, and numerical
+/// errors as [`fit_parallel_hammerstein_reusing_design`].
+pub fn fit_parallel_hammerstein(
+    prepared: PreparedParallelHammersteinDesign<'_>,
+    training_captures: &[CapturedTrainingOutput<'_>],
+    held_out_records: &[HeldOutRecord<'_>],
+    cancelled: impl FnMut() -> bool,
+) -> Result<ParallelHammersteinOutcome, PolynomialFitError> {
+    fit_parallel_hammerstein_reusing_design(
+        &prepared,
+        training_captures,
+        held_out_records,
+        cancelled,
+    )
+}
+
+/// Fit one capture set while borrowing a prepared, immutable input-only design.
+///
+/// This entrypoint reuses the already-built QR/SVD factor and content identity.
+/// Each fit makes one checked copy of the triangular factor for its solver map;
+/// the original factor remains available for later cases. The resource estimate
+/// includes both factors and the fixed solver workspaces. FFT operator buffers
+/// are admitted against the remaining budget as they are created. These
+/// estimates do not bound process RSS or FFT planner internals.
+///
 /// Training output values are first read here, after input scaling, QR and SVD
 /// diagnostics have completed. The returned candidate uses the fixed run05 LSQR
 /// and residual gates. A passing result still lacks certified conditioning,
@@ -684,8 +759,8 @@ pub fn prepare_parallel_hammerstein_design<'a>(
 /// # Errors
 /// Rejects capture count/rate/shape errors, non-finite samples, sample/resource
 /// limit violations, allocation errors, operator errors, or numerical overflow.
-pub fn fit_parallel_hammerstein(
-    prepared: PreparedParallelHammersteinDesign<'_>,
+pub fn fit_parallel_hammerstein_reusing_design(
+    prepared: &PreparedParallelHammersteinDesign<'_>,
     training_captures: &[CapturedTrainingOutput<'_>],
     held_out_records: &[HeldOutRecord<'_>],
     mut cancelled: impl FnMut() -> bool,
@@ -740,9 +815,9 @@ pub fn fit_parallel_hammerstein(
             diagnostics: empty_fit_diagnostics(diagnostics),
         }));
     }
-    validate_captures(&prepared, training_captures, held_out_records)?;
+    validate_captures(prepared, training_captures, held_out_records)?;
 
-    let total_samples = total_decoded_samples(&prepared, training_captures, held_out_records)?;
+    let total_samples = total_decoded_samples(prepared, training_captures, held_out_records)?;
     if total_samples > MAX_DECODED_SAMPLES {
         return Err(PolynomialFitError::new(
             ErrorKind::ResourceLimit,
@@ -753,23 +828,55 @@ pub fn fit_parallel_hammerstein(
     let rhs_bytes = bytes_for(prepared.rows)?;
     let prediction_bytes = rhs_bytes;
     let taps_bytes = bytes_for(prepared.columns)?;
-    let factor_bytes = bytes_for(prepared.factor_row_major.capacity())?;
-    let mut used_bytes = FIXED_WORKSPACE_RESERVE_BYTES
-        .checked_add(factor_bytes)
+    let retained_factor_bytes = bytes_for(prepared.factor_row_major.capacity())?;
+    let factor_copy_minimum_bytes = bytes_for(prepared.factor_row_major.len())?;
+    let stacked_workspace_bytes = bytes_for(prepared.columns.checked_mul(2).ok_or_else(|| {
+        PolynomialFitError::new(
+            ErrorKind::ResourceLimit,
+            "stacked coefficient workspace overflow",
+        )
+    })?)?;
+    let right_map_workspace_bytes = stacked_workspace_bytes;
+    let reusable_fit_fixed_bytes = reusable_fit_fixed_bytes(
+        prepared.rows,
+        prepared.columns,
+        retained_factor_bytes,
+        factor_copy_minimum_bytes,
+    )?;
+    if reusable_fit_fixed_bytes > PARALLEL_HAMMERSTEIN_MAX_WORKING_BYTES {
+        return Err(PolynomialFitError::new(
+            ErrorKind::ResourceLimit,
+            "reusable fit baseline exceeds the original 1.5 GiB working-set ceiling",
+        ));
+    }
+    let non_operator_bytes = FIXED_WORKSPACE_RESERVE_BYTES
+        .checked_add(retained_factor_bytes)
+        .and_then(|bytes| bytes.checked_add(factor_copy_minimum_bytes))
         .and_then(|bytes| bytes.checked_add(solver_bytes))
         .and_then(|bytes| bytes.checked_add(rhs_bytes))
         .and_then(|bytes| bytes.checked_add(prediction_bytes))
         .and_then(|bytes| bytes.checked_add(taps_bytes))
+        .and_then(|bytes| bytes.checked_add(stacked_workspace_bytes))
+        .and_then(|bytes| bytes.checked_add(right_map_workspace_bytes))
         .ok_or_else(|| {
             PolynomialFitError::new(
                 ErrorKind::ResourceLimit,
                 "fit working-set estimate overflow",
             )
         })?;
+    let fit_factor =
+        copy_factor_with_capacity_limit(&prepared.factor_row_major, factor_copy_minimum_bytes)?;
+    let fit_factor_bytes = bytes_for(fit_factor.capacity())?;
+    let mut used_bytes = non_operator_bytes
+        .checked_sub(factor_copy_minimum_bytes)
+        .and_then(|bytes| bytes.checked_add(fit_factor_bytes))
+        .ok_or_else(|| {
+            PolynomialFitError::new(ErrorKind::ResourceLimit, "fit vector accounting overflow")
+        })?;
     if used_bytes > PARALLEL_HAMMERSTEIN_MAX_WORKING_BYTES {
         return Err(PolynomialFitError::new(
             ErrorKind::ResourceLimit,
-            "fit vectors exceed the original 1.5 GiB working-set ceiling",
+            "actual reused-factor fit capacities exceed the original 1.5 GiB ceiling",
         ));
     }
     let mut operators = Vec::new();
@@ -811,18 +918,9 @@ pub fn fit_parallel_hammerstein(
             })?;
         operators.push(operator);
     }
-    let stacked_workspace_bytes = bytes_for(prepared.columns.checked_mul(2).ok_or_else(|| {
-        PolynomialFitError::new(
-            ErrorKind::ResourceLimit,
-            "stacked coefficient workspace overflow",
-        )
-    })?)?;
-    used_bytes = used_bytes
-        .checked_add(operator_bytes)
-        .and_then(|bytes| bytes.checked_add(stacked_workspace_bytes))
-        .ok_or_else(|| {
-            PolynomialFitError::new(ErrorKind::ResourceLimit, "operator working-set overflow")
-        })?;
+    used_bytes = used_bytes.checked_add(operator_bytes).ok_or_else(|| {
+        PolynomialFitError::new(ErrorKind::ResourceLimit, "operator working-set overflow")
+    })?;
     if used_bytes > PARALLEL_HAMMERSTEIN_MAX_WORKING_BYTES {
         return Err(PolynomialFitError::new(
             ErrorKind::ResourceLimit,
@@ -836,32 +934,37 @@ pub fn fit_parallel_hammerstein(
         prepared.order_scales,
         stacked_workspace_bytes,
     )?;
-    let remaining = PARALLEL_HAMMERSTEIN_MAX_WORKING_BYTES.saturating_sub(used_bytes);
-    let remaining_for_map = remaining.saturating_add(factor_bytes);
-    let mut mapped =
-        UpperTriangularRightOperator::new(base, prepared.factor_row_major, remaining_for_map)
-            .map_err(|_| {
+    let map_capacity_limit = fit_factor_bytes
+        .checked_add(right_map_workspace_bytes)
+        .ok_or_else(|| {
+            PolynomialFitError::new(ErrorKind::ResourceLimit, "right-map limit overflow")
+        })?;
+    let mut mapped = UpperTriangularRightOperator::new(base, fit_factor, map_capacity_limit)
+        .map_err(|_| {
+            PolynomialFitError::new(
+                ErrorKind::ResourceLimit,
+                "triangular right-map exceeds its remaining storage budget",
+            )
+        })?;
+    let right_map_bytes = mapped.buffer_bytes();
+    let actual_map_workspace_bytes =
+        right_map_bytes
+            .checked_sub(fit_factor_bytes)
+            .ok_or_else(|| {
                 PolynomialFitError::new(
                     ErrorKind::ResourceLimit,
-                    "triangular right-map exceeds its remaining storage budget",
+                    "right-map factor capacity accounting underflow",
                 )
             })?;
-    let right_map_bytes = mapped.buffer_bytes();
-    let additional_map_bytes = right_map_bytes.checked_sub(factor_bytes).ok_or_else(|| {
-        PolynomialFitError::new(
+    if actual_map_workspace_bytes > right_map_workspace_bytes {
+        return Err(PolynomialFitError::new(
             ErrorKind::ResourceLimit,
-            "right-map factor accounting underflow",
-        )
-    })?;
-    used_bytes = used_bytes
-        .checked_add(additional_map_bytes)
-        .ok_or_else(|| {
-            PolynomialFitError::new(ErrorKind::ResourceLimit, "right-map storage overflow")
-        })?;
-    let remaining = PARALLEL_HAMMERSTEIN_MAX_WORKING_BYTES.saturating_sub(used_bytes);
-    let mut target = zeroed_vec(prepared.rows, remaining)?;
+            "actual right-map workspace exceeds its declared fit budget",
+        ));
+    }
+    let mut target = zeroed_vec(prepared.rows, rhs_bytes)?;
     copy_training_captures(&mut target, training_captures, prepared.output_samples);
-    let mut predictions = zeroed_vec(prepared.rows, remaining.saturating_sub(rhs_bytes))?;
+    let mut predictions = zeroed_vec(prepared.rows, prediction_bytes)?;
     let solver_result = solve_lsqr(
         &mut mapped,
         &target,
@@ -870,10 +973,7 @@ pub fn fit_parallel_hammerstein(
             btol: LSQR_TOLERANCE,
             condition_limit: 0.0,
             max_iterations: LSQR_MAX_ITERATIONS,
-            max_buffer_bytes: remaining
-                .saturating_sub(rhs_bytes)
-                .saturating_sub(prediction_bytes)
-                .saturating_sub(taps_bytes),
+            max_buffer_bytes: solver_bytes,
         },
         &mut cancelled,
     )
@@ -906,10 +1006,8 @@ pub fn fit_parallel_hammerstein(
             diagnostics: fit_diagnostics,
         }));
     }
-    let mut taps_order_major = zeroed_vec(
-        prepared.columns,
-        remaining.saturating_sub(rhs_bytes + prediction_bytes),
-    )?;
+    let mut taps_order_major = zeroed_vec(prepared.columns, taps_bytes)?;
+    let actual_taps_bytes = bytes_for(taps_order_major.capacity())?;
     mapped
         .map_coefficients(&solver_result.solution, &mut taps_order_major)
         .map_err(|_| {
@@ -959,7 +1057,8 @@ pub fn fit_parallel_hammerstein(
         }
         let remaining = PARALLEL_HAMMERSTEIN_MAX_WORKING_BYTES
             .saturating_sub(FIXED_WORKSPACE_RESERVE_BYTES)
-            .saturating_sub(taps_bytes);
+            .saturating_sub(retained_factor_bytes)
+            .saturating_sub(actual_taps_bytes);
         let mut operator = PolynomialConvolutionOperator::new(
             record.reference,
             ORDER_COUNT,
@@ -1042,6 +1141,22 @@ impl StackedPolynomialOperator {
         let vector_cap = workspace_bytes.saturating_sub(vector_bytes);
         let mut physical_coefficients = zeroed_vec(columns, vector_cap)?;
         let mut coefficient_work = zeroed_vec(columns, vector_cap)?;
+        let actual_workspace_bytes = physical_coefficients
+            .capacity()
+            .checked_add(coefficient_work.capacity())
+            .and_then(|elements| elements.checked_mul(std::mem::size_of::<f64>()))
+            .ok_or_else(|| {
+                PolynomialFitError::new(
+                    ErrorKind::ResourceLimit,
+                    "stacked workspace capacity overflow",
+                )
+            })?;
+        if actual_workspace_bytes > workspace_bytes {
+            return Err(PolynomialFitError::new(
+                ErrorKind::ResourceLimit,
+                "actual stacked workspace exceeds its declared fit budget",
+            ));
+        }
         physical_coefficients.fill(0.0);
         coefficient_work.fill(0.0);
         Ok(Self {
@@ -1156,21 +1271,60 @@ fn estimate_design_resources(
         .ok_or_else(|| {
             PolynomialFitError::new(ErrorKind::ResourceLimit, "SVD phase estimate overflow")
         })?;
+    let reusable_fit_fixed_bytes = reusable_fit_fixed_bytes(
+        rows,
+        columns,
+        triangular_factor_bytes,
+        triangular_factor_bytes,
+    )?;
     let preflight_peak_bytes = qr_phase_bytes
         .max(svd_phase_bytes)
         .checked_add(FIXED_WORKSPACE_RESERVE_BYTES)
         .ok_or_else(|| {
             PolynomialFitError::new(ErrorKind::ResourceLimit, "factorization estimate overflow")
-        })?;
+        })?
+        .max(reusable_fit_fixed_bytes);
     Ok(DesignResourceEstimate {
         design_matrix_bytes,
         triangular_factor_bytes,
+        prepared_factor_capacity_bytes: triangular_factor_bytes,
         qr_phase_bytes,
         svd_phase_bytes,
         fixed_workspace_reserve_bytes: FIXED_WORKSPACE_RESERVE_BYTES,
         preflight_peak_bytes,
+        reusable_fit_fixed_bytes,
         working_set_limit_bytes: PARALLEL_HAMMERSTEIN_MAX_WORKING_BYTES,
     })
+}
+
+fn reusable_fit_fixed_bytes(
+    rows: usize,
+    columns: usize,
+    retained_factor_bytes: usize,
+    fit_factor_copy_bytes: usize,
+) -> Result<usize, PolynomialFitError> {
+    let solver_bytes = lsqr_buffer_bytes(rows, columns)?;
+    let row_vectors = bytes_for(rows.checked_mul(2).ok_or_else(|| {
+        PolynomialFitError::new(ErrorKind::ResourceLimit, "fit row-vector size overflow")
+    })?)?;
+    let coefficient_workspaces = bytes_for(columns.checked_mul(5).ok_or_else(|| {
+        PolynomialFitError::new(
+            ErrorKind::ResourceLimit,
+            "fit coefficient workspace size overflow",
+        )
+    })?)?;
+    FIXED_WORKSPACE_RESERVE_BYTES
+        .checked_add(retained_factor_bytes)
+        .and_then(|bytes| bytes.checked_add(fit_factor_copy_bytes))
+        .and_then(|bytes| bytes.checked_add(solver_bytes))
+        .and_then(|bytes| bytes.checked_add(row_vectors))
+        .and_then(|bytes| bytes.checked_add(coefficient_workspaces))
+        .ok_or_else(|| {
+            PolynomialFitError::new(
+                ErrorKind::ResourceLimit,
+                "reusable fit preflight estimate overflow",
+            )
+        })
 }
 
 fn input_design_sha256(
@@ -1600,6 +1754,31 @@ fn zeroed_vec(length: usize, max_bytes: usize) -> Result<Vec<f64>, PolynomialFit
     Ok(values)
 }
 
+fn copy_factor_with_capacity_limit(
+    factor: &[f64],
+    max_bytes: usize,
+) -> Result<Vec<f64>, PolynomialFitError> {
+    let requested_bytes = bytes_for(factor.len())?;
+    if requested_bytes > max_bytes || requested_bytes > isize::MAX as usize {
+        return Err(PolynomialFitError::new(
+            ErrorKind::ResourceLimit,
+            "fit factor copy exceeds its declared capacity budget",
+        ));
+    }
+    let mut copy = Vec::new();
+    copy.try_reserve_exact(factor.len()).map_err(|_| {
+        PolynomialFitError::new(ErrorKind::Allocation, "fit factor copy allocation failed")
+    })?;
+    if bytes_for(copy.capacity())? > max_bytes {
+        return Err(PolynomialFitError::new(
+            ErrorKind::ResourceLimit,
+            "actual fit factor copy capacity exceeds its declared budget",
+        ));
+    }
+    copy.extend_from_slice(factor);
+    Ok(copy)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1701,6 +1880,19 @@ mod tests {
             prepared.resource_estimate().preflight_peak_bytes
                 <= PARALLEL_HAMMERSTEIN_MAX_WORKING_BYTES
         );
+        let resource_estimate = prepared.resource_estimate();
+        let two_factor_stores = resource_estimate
+            .prepared_factor_capacity_bytes
+            .checked_add(resource_estimate.triangular_factor_bytes)
+            .unwrap();
+        assert!(
+            resource_estimate.reusable_fit_fixed_bytes
+                >= resource_estimate.fixed_workspace_reserve_bytes + two_factor_stores
+        );
+        assert!(
+            resource_estimate.preflight_peak_bytes >= resource_estimate.reusable_fit_fixed_bytes
+        );
+        let prepared_design_hash = prepared.diagnostics.input_design_sha256.clone();
         let fft_len = (INPUT_SAMPLES + SUPPORT - 1).next_power_of_two();
         let operators = references
             .iter()
@@ -1784,7 +1976,8 @@ mod tests {
         }];
         let output_samples = prepared.output_samples;
         let outcome =
-            fit_parallel_hammerstein(prepared, &training_records, &held, || false).unwrap();
+            fit_parallel_hammerstein_reusing_design(&prepared, &training_records, &held, || false)
+                .unwrap();
         let ParallelHammersteinOutcome::NumericalOnly(candidate) = outcome else {
             panic!("expected numerical candidate, got {outcome:#?}");
         };
@@ -1846,6 +2039,10 @@ mod tests {
             decoded.diagnostics.design.input_design_sha256
         );
         assert_eq!(
+            candidate.diagnostics.design.input_design_sha256,
+            prepared_design_hash
+        );
+        assert_eq!(
             candidate.diagnostics.design.status,
             decoded.diagnostics.design.status
         );
@@ -1887,6 +2084,58 @@ mod tests {
             );
             assert_eq!(actual.residual_gates_passed, expected.residual_gates_passed);
         }
+
+        let second_taps: Vec<f64> = taps
+            .iter()
+            .enumerate()
+            .map(|(index, tap)| 1.4 * tap + 0.005 * index as f64)
+            .collect();
+        let second_training: Vec<Vec<f64>> = inputs
+            .iter()
+            .map(|input| direct_output(input, &second_taps, GUARD))
+            .collect();
+        let second_training_records: Vec<CapturedTrainingOutput<'_>> = second_training
+            .iter()
+            .map(|samples| CapturedTrainingOutput {
+                samples,
+                sample_rate_hz: 4_000,
+            })
+            .collect();
+        let second_held_output = direct_output(&held_input, &second_taps, GUARD);
+        let second_held = [HeldOutRecord {
+            reference: &held_input,
+            reference_sample_rate_hz: 4_000,
+            capture: &second_held_output,
+            capture_sample_rate_hz: 4_000,
+        }];
+        let second_outcome = fit_parallel_hammerstein_reusing_design(
+            &prepared,
+            &second_training_records,
+            &second_held,
+            || false,
+        )
+        .unwrap();
+        let ParallelHammersteinOutcome::NumericalOnly(second_candidate) = second_outcome else {
+            panic!("second fit on a reused design was refused: {second_outcome:#?}");
+        };
+        assert_eq!(
+            second_candidate.diagnostics.design.input_design_sha256,
+            prepared_design_hash
+        );
+        assert_eq!(
+            second_candidate.diagnostics.design.input_design_sha256,
+            candidate.diagnostics.design.input_design_sha256
+        );
+        for (actual, expected) in second_candidate.taps_order_major.iter().zip(&second_taps) {
+            assert_abs_diff_eq!(*actual, *expected, epsilon = 1.0e-8);
+        }
+        assert!(
+            candidate
+                .taps_order_major
+                .iter()
+                .zip(&second_candidate.taps_order_major)
+                .any(|(first, second)| (first - second).abs() > 1.0e-3)
+        );
     }
 
     #[test]
