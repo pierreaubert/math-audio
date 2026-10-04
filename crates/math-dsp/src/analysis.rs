@@ -31,6 +31,7 @@ mod microphone_compensation;
 mod misc;
 mod plan;
 pub mod polynomial_convolution;
+pub mod right_preconditioner;
 mod smooth;
 #[cfg(test)]
 mod tests;
