@@ -25,6 +25,7 @@ mod compute;
 mod estimate;
 mod interpolate;
 mod load;
+pub mod lsqr;
 mod measurement;
 mod microphone_compensation;
 mod misc;
