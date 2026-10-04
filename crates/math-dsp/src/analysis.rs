@@ -56,7 +56,8 @@ pub use parallel_hammerstein::{
     FitUnavailableReason, HeldOutRecord, ParallelHammersteinCandidate,
     ParallelHammersteinFitOptions, ParallelHammersteinOutcome, PolynomialFitDiagnostics,
     PolynomialFitError, PreparedParallelHammersteinDesign, QualificationStatus, SolverDiagnostics,
-    TrainingInputReference, fit_parallel_hammerstein, prepare_parallel_hammerstein_design,
+    TrainingInputReference, fit_parallel_hammerstein, fit_parallel_hammerstein_reusing_design,
+    prepare_parallel_hammerstein_design,
 };
 pub(crate) use plan::deconvolve_sweep_f64_spectrum;
 pub use plan::*;
