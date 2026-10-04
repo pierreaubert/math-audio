@@ -308,7 +308,16 @@ fn checksum(state: &Snapshot) -> String {
     // Clear the checksum field to avoid hashing the checksum itself.
     let mut payload = state.clone();
     payload.checksum.clear();
-    format!("{:x}", Sha256::digest(format!("{payload:?}").as_bytes()))
+    digest_hex(format!("{payload:?}").as_bytes())
+}
+
+fn digest_hex(payload: &[u8]) -> String {
+    let mut result = String::with_capacity(64);
+    for byte in Sha256::digest(payload) {
+        use std::fmt::Write;
+        write!(&mut result, "{byte:02x}").expect("writing digest to String cannot fail");
+    }
+    result
 }
 
 #[expect(
@@ -397,6 +406,14 @@ fn restore(
 #[cfg(test)]
 mod validation_tests {
     use super::*;
+
+    #[test]
+    fn checksum_uses_lowercase_sha256_bytes() {
+        assert_eq!(
+            digest_hex(b"abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+    }
 
     #[test]
     fn malformed_state_with_valid_checksum_is_refused_before_objective() {
