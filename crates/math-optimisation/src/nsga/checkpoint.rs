@@ -308,7 +308,7 @@ fn checksum(state: &Snapshot) -> String {
     // Clear the checksum field to avoid hashing the checksum itself.
     let mut payload = state.clone();
     payload.checksum.clear();
-    format!("{:x}", Sha256::digest(format!("{payload:?}").as_bytes()))
+    crate::de_checkpoint::format_digest(Sha256::digest(format!("{payload:?}").as_bytes()))
 }
 
 #[expect(

@@ -15,14 +15,10 @@ ndarray = { workspace = true }
 nalgebra = { workspace = true }
 oxiblas-ndarray = { workspace = true }
 rand = { workspace = true }
-<<<<<<< HEAD
+# Checkpoint RNG state must retain the same ChaCha implementation
+# (workspace pins chacha20 =0.10.2 with the `rng` feature).
 chacha20 = { workspace = true }
 sha2 = { workspace = true }
-=======
-# Checkpoint RNG state must retain the same ChaCha implementation.
-chacha20 = { version = "=0.10.2", default-features = false, features = ["rng"] }
-sha2 = "0.10.9"
->>>>>>> 7d91fdd (Declare checkpoint dependencies in current optimisation crate)
 serde = { workspace = true }
 rayon = { workspace = true }
 clap = { workspace = true }
