@@ -328,6 +328,16 @@ where
         active_channels_mask: Option<&[bool]>,
     ) -> ResampleResult<(usize, usize)> {
         let expected_output_len = (self.resample_ratio() * input_len as f64).ceil() as usize;
+        if input_len == 0 {
+            return Ok((0, 0));
+        }
+        let frames_to_trim = self.output_delay();
+        let output_with_delay = expected_output_len.checked_add(frames_to_trim).ok_or(
+            ResampleError::InsufficientOutputBufferSize {
+                expected: usize::MAX,
+                actual: buffer_out.frames(),
+            },
+        )?;
 
         let mut indexing = Indexing {
             input_offset: 0,
@@ -338,52 +348,55 @@ where
 
         let mut frames_left = input_len;
         let mut output_len = 0;
-        let mut frames_to_trim = self.output_delay();
         debug!(
             "resamping {} input frames to {} output frames, delay to trim off {} frames",
             input_len, expected_output_len, frames_to_trim
         );
 
-        let next_nbr_input_frames = self.input_frames_next();
-        while frames_left > next_nbr_input_frames {
+        while frames_left > self.input_frames_next() {
             debug!("process, {} input frames left", frames_left);
             let (nbr_in, nbr_out) =
                 self.process_into_buffer(buffer_in, buffer_out, Some(&indexing))?;
+            if nbr_in == 0 && nbr_out == 0 {
+                return Err(ResampleError::NoProgress);
+            }
             frames_left -= nbr_in;
             output_len += nbr_out;
             indexing.input_offset += nbr_in;
             indexing.output_offset += nbr_out;
-            if frames_to_trim > 0 && output_len > frames_to_trim {
-                debug!(
-                    "output, {} is longer than delay to trim, {}, trimming..",
-                    output_len, frames_to_trim
-                );
-                // move useful output data to start of output buffer
-                buffer_out.copy_frames_within(frames_to_trim, 0, frames_to_trim);
-                // update counters
-                output_len -= frames_to_trim;
-                indexing.output_offset -= frames_to_trim;
-                frames_to_trim = 0;
-            }
         }
         if frames_left > 0 {
             debug!("process the last partial chunk, len {}", frames_left);
             indexing.partial_len = Some(frames_left);
-            let (_nbr_in, nbr_out) =
+            let (nbr_in, nbr_out) =
                 self.process_into_buffer(buffer_in, buffer_out, Some(&indexing))?;
+            if nbr_in == 0 && nbr_out == 0 {
+                return Err(ResampleError::NoProgress);
+            }
             output_len += nbr_out;
             indexing.output_offset += nbr_out;
         }
         indexing.partial_len = Some(0);
-        while output_len < expected_output_len {
+        while output_len < output_with_delay {
             debug!(
                 "output is still too short, {} < {}, pump zeros..",
-                output_len, expected_output_len
+                output_len, output_with_delay
             );
-            let (_nbr_in, nbr_out) =
+            let (nbr_in, nbr_out) =
                 self.process_into_buffer(buffer_in, buffer_out, Some(&indexing))?;
+            if nbr_in == 0 && nbr_out == 0 {
+                return Err(ResampleError::NoProgress);
+            }
             output_len += nbr_out;
             indexing.output_offset += nbr_out;
+        }
+        if frames_to_trim > 0 {
+            buffer_out
+                .copy_frames_within(frames_to_trim, 0, expected_output_len)
+                .ok_or(ResampleError::InsufficientOutputBufferSize {
+                    expected: output_with_delay,
+                    actual: buffer_out.frames(),
+                })?;
         }
         Ok((input_len, expected_output_len))
     }
@@ -797,6 +810,202 @@ pub mod tests {
                     output.read_sample(chan, frame),
                     output2.read_sample(chan, frame)
                 );
+            }
+        }
+    }
+
+    #[test_log::test]
+    fn process_all_matches_incremental_output_after_delay_trim() {
+        for fixed in [FixedAsync::Input, FixedAsync::Output] {
+            for ratio in [12_345.678 / 48_000.0, 1.0, 2.0] {
+                for input_len in [1, 31, 1024, 4096, 8193] {
+                    let new_resampler = || {
+                        Async::<f64>::new_sinc(
+                            ratio,
+                            1.0,
+                            &SincInterpolationParameters::new(256, WindowFunction::BlackmanHarris2),
+                            1024,
+                            2,
+                            fixed,
+                        )
+                        .unwrap()
+                    };
+                    let ramp: Vec<f64> = (0..input_len).map(|frame| frame as f64 / 10.0).collect();
+                    let mut impulses = vec![0.0; input_len];
+                    impulses[0] = 1.0;
+                    impulses[input_len - 1] = 1.0;
+                    let input_data = vec![ramp, impulses];
+                    let input = SequentialSliceOfVecs::new(&input_data, 2, input_len).unwrap();
+
+                    let mut whole = new_resampler();
+                    let expected_len = (input_len as f64 * ratio).ceil() as usize;
+                    let output = whole.process_all(&input, input_len, None).unwrap();
+                    assert_eq!(output.frames(), expected_len);
+
+                    let mut incremental = new_resampler();
+                    let delay = incremental.output_delay();
+                    let mut streamed = vec![Vec::new(), Vec::new()];
+                    let mut start = 0;
+                    for _ in 0..256 {
+                        if start == input_len {
+                            break;
+                        }
+                        let needed = incremental.input_frames_next();
+                        assert!(needed > 0, "incremental input request made no progress");
+                        let valid = (input_len - start).min(needed);
+                        let mut block = vec![vec![0.0; needed]; 2];
+                        for channel in 0..2 {
+                            block[channel][..valid]
+                                .copy_from_slice(&input_data[channel][start..start + valid]);
+                        }
+                        let adapter = SequentialSliceOfVecs::new(&block, 2, needed).unwrap();
+                        let partial = Indexing::new().partial_len(valid);
+                        let indexing = (valid < needed).then_some(&partial);
+                        let processed = incremental.process(&adapter, indexing).unwrap();
+                        start += valid;
+                        for (channel, samples) in streamed.iter_mut().enumerate() {
+                            samples.extend((0..processed.frames()).map(|frame| {
+                                processed.read_sample(channel, frame).unwrap()
+                            }));
+                        }
+                    }
+                    assert_eq!(start, input_len, "incremental input did not complete");
+                    for _ in 0..256 {
+                        if streamed[0].len() >= delay + expected_len {
+                            break;
+                        }
+                        let needed = incremental.input_frames_next();
+                        assert!(needed > 0, "incremental drain requested no input frames");
+                        let silence = vec![vec![0.0; needed]; 2];
+                        let adapter = SequentialSliceOfVecs::new(&silence, 2, needed).unwrap();
+                        let partial = Indexing::new().partial_len(0);
+                        let processed = incremental.process(&adapter, Some(&partial)).unwrap();
+                        assert!(processed.frames() > 0, "incremental drain made no output progress");
+                        for (channel, samples) in streamed.iter_mut().enumerate() {
+                            samples.extend((0..processed.frames()).map(|frame| {
+                                processed.read_sample(channel, frame).unwrap()
+                            }));
+                        }
+                    }
+                    assert!(streamed[0].len() >= delay + expected_len);
+
+                    for channel in 0..2 {
+                        for frame in 0..expected_len {
+                            let actual = output.read_sample(channel, frame).unwrap();
+                            let expected = streamed[channel][delay + frame];
+                            assert!(
+                                (actual - expected).abs() < 1e-12,
+                                "fixed={fixed:?} ratio={ratio} input_len={input_len} channel={channel} frame={frame} actual={actual} expected={expected}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test_log::test]
+    fn process_all_empty_clip_returns_empty_output() {
+        let mut resampler = test_sinc_resampler();
+        let data = vec![Vec::<f64>::new(), Vec::<f64>::new()];
+        let input = SequentialSliceOfVecs::new(&data, 2, 0).unwrap();
+        let output = resampler.process_all(&input, 0, None).unwrap();
+        assert_eq!(output.frames(), 0);
+    }
+
+    #[test_log::test]
+    fn process_all_preserves_active_channel_mask() {
+        let mut resampler = test_sinc_resampler();
+        let input_len = 4096;
+        let data = vec![vec![1.0; input_len], vec![1.0; input_len]];
+        let input = SequentialSliceOfVecs::new(&data, 2, input_len).unwrap();
+        let output = resampler
+            .process_all(&input, input_len, Some(&[true, false]))
+            .unwrap();
+        assert!(
+            (0..output.frames()).any(|frame| output.read_sample(0, frame).unwrap().abs() > 0.5)
+        );
+        assert!(
+            (0..output.frames()).all(|frame| output.read_sample(1, frame).unwrap() == 0.0)
+        );
+    }
+
+    #[cfg(feature = "fft_resampler")]
+    #[test_log::test]
+    fn process_all_fft_matches_incremental_output_after_delay_trim() {
+        for (source_rate, target_rate) in [(48_000, 44_100), (44_100, 48_000)] {
+            for input_len in [31, 1024, 4096] {
+                let new_resampler = || {
+                    Fft::<f64>::new(source_rate, target_rate, 1024, 2, FixedSync::Input).unwrap()
+                };
+                let ramp: Vec<f64> = (0..input_len).map(|frame| frame as f64 / 10.0).collect();
+                let mut impulses = vec![0.0; input_len];
+                impulses[0] = 1.0;
+                impulses[input_len - 1] = 1.0;
+                let data = vec![ramp, impulses];
+                let input = SequentialSliceOfVecs::new(&data, 2, input_len).unwrap();
+                let mut whole = new_resampler();
+                let output = whole.process_all(&input, input_len, None).unwrap();
+                let expected_len =
+                    (input_len as f64 * target_rate as f64 / source_rate as f64).ceil() as usize;
+                assert_eq!(output.frames(), expected_len);
+
+                let mut incremental = new_resampler();
+                let delay = incremental.output_delay();
+                let mut streamed = vec![Vec::new(), Vec::new()];
+                let mut start = 0;
+                for _ in 0..256 {
+                    if start == input_len {
+                        break;
+                    }
+                    let needed = incremental.input_frames_next();
+                    assert!(needed > 0);
+                    let valid = (input_len - start).min(needed);
+                    let mut block = vec![vec![0.0; needed]; 2];
+                    for channel in 0..2 {
+                        block[channel][..valid].copy_from_slice(&data[channel][start..start + valid]);
+                    }
+                    let adapter = SequentialSliceOfVecs::new(&block, 2, needed).unwrap();
+                    let partial = Indexing::new().partial_len(valid);
+                    let processed = incremental
+                        .process(&adapter, (valid < needed).then_some(&partial))
+                        .unwrap();
+                    start += valid;
+                    for (channel, samples) in streamed.iter_mut().enumerate() {
+                        samples.extend((0..processed.frames()).map(|frame| {
+                            processed.read_sample(channel, frame).unwrap()
+                        }));
+                    }
+                }
+                assert_eq!(start, input_len);
+                for _ in 0..256 {
+                    if streamed[0].len() >= delay + expected_len {
+                        break;
+                    }
+                    let needed = incremental.input_frames_next();
+                    assert!(needed > 0);
+                    let silence = vec![vec![0.0; needed]; 2];
+                    let adapter = SequentialSliceOfVecs::new(&silence, 2, needed).unwrap();
+                    let partial = Indexing::new().partial_len(0);
+                    let processed = incremental.process(&adapter, Some(&partial)).unwrap();
+                    assert!(processed.frames() > 0, "FFT drain made no output progress");
+                    for (channel, samples) in streamed.iter_mut().enumerate() {
+                        samples.extend((0..processed.frames()).map(|frame| {
+                            processed.read_sample(channel, frame).unwrap()
+                        }));
+                    }
+                }
+                assert!(streamed[0].len() >= delay + expected_len);
+                for channel in 0..2 {
+                    for frame in 0..expected_len {
+                        let actual = output.read_sample(channel, frame).unwrap();
+                        let expected = streamed[channel][delay + frame];
+                        assert!(
+                            (actual - expected).abs() < 1e-12,
+                            "FFT {source_rate}->{target_rate} len={input_len} channel={channel} frame={frame} actual={actual} expected={expected}"
+                        );
+                    }
+                }
             }
         }
     }

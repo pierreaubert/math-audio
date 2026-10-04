@@ -165,6 +165,8 @@ pub enum ResampleError {
         max: usize,
         requested: usize,
     },
+    /// A resampler returned neither consumed input nor produced output.
+    NoProgress,
 }
 
 impl fmt::Display for ResampleError {
@@ -227,6 +229,7 @@ impl fmt::Display for ResampleError {
                     requested, max
                 )
             }
+            Self::NoProgress => write!(f, "Resampler made no input or output progress"),
         }
     }
 }
