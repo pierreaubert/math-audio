@@ -318,10 +318,22 @@ mod tests {
 
     #[test]
     fn recording_scale_48khz_sweep_matches_sparse_time_domain_model() {
+        assert_recording_scale_operator(96_000, 512, 131_072, 32 * 1024 * 1024);
+    }
+
+    #[test]
+    fn long_recording_48khz_with_one_second_kernels_matches_sparse_model() {
+        assert_recording_scale_operator(480_000, 48_000, 1_048_576, 256 * 1024 * 1024);
+    }
+
+    fn assert_recording_scale_operator(
+        input_len: usize,
+        support: usize,
+        fft_len: usize,
+        buffer_limit: usize,
+    ) {
         let sample_rate = 48_000.0;
-        let duration = 2.0;
-        let input_len = 96_000;
-        let support = 512;
+        let duration = input_len as f64 / sample_rate;
         let output_len = input_len + support - 1;
         // The fifth polynomial order stays below Nyquist over this 40-4000 Hz sweep.
         let logarithmic_ratio = 100.0_f64.ln();
@@ -338,7 +350,11 @@ mod tests {
         // Evaluate only these independently specified signed/delayed taps;
         // no FFT, stored spectra, or production adjoint enters this oracle.
         for order in 1..=5 {
-            for (delay, gain) in [(0, 0.2 / order as f64), (173, -0.07), (511, 0.03)] {
+            for (delay, gain) in [
+                (0, 0.2 / order as f64),
+                (support / 3, -0.07),
+                (support - 1, 0.03),
+            ] {
                 taps[(order - 1) * support + delay] = gain;
                 for (i, x) in input.iter().enumerate() {
                     expected[i + delay] += gain * x.powi(order as i32);
@@ -350,11 +366,11 @@ mod tests {
             5,
             support,
             output_len,
-            131_072,
-            32 * 1024 * 1024,
+            fft_len,
+            buffer_limit,
         )
         .unwrap();
-        assert!(operator.buffer_bytes() <= 32 * 1024 * 1024);
+        assert!(operator.buffer_bytes() <= buffer_limit);
         let mut actual = vec![0.0; output_len];
         operator.apply(&taps, &mut actual).unwrap();
         let maximum_error = actual
@@ -369,6 +385,11 @@ mod tests {
         let oracle_dot: f64 = expected.iter().zip(&samples).map(|(a, b)| a * b).sum();
         let adjoint_dot: f64 = taps.iter().zip(&adjoint).map(|(a, b)| a * b).sum();
         assert!((oracle_dot - adjoint_dot).abs() < 1e-10);
+        println!(
+            "input_samples={input_len} kernel_support={support} fft_samples={fft_len} vector_bytes={} maximum_error={maximum_error:.17e} adjoint_dot_error={:.17e}",
+            operator.buffer_bytes(),
+            (oracle_dot - adjoint_dot).abs()
+        );
     }
 
     #[test]
