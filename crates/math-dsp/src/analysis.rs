@@ -29,6 +29,7 @@ mod measurement;
 mod microphone_compensation;
 mod misc;
 mod plan;
+pub mod polynomial_convolution;
 mod smooth;
 #[cfg(test)]
 mod tests;
