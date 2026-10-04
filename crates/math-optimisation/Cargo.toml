@@ -15,6 +15,10 @@ ndarray = { workspace = true }
 nalgebra = { workspace = true }
 oxiblas-ndarray = { workspace = true }
 rand = { workspace = true }
+# Checkpoint RNG state must retain the same ChaCha implementation.
+chacha20 = { version = "=0.10.2", default-features = false, features = ["rng"] }
+sha2 = "0.10.9"
+serde = { workspace = true }
 rayon = { workspace = true }
 clap = { workspace = true }
 thiserror = { workspace = true }
@@ -34,6 +38,7 @@ plotly_static = ["plotly", "dep:plotly_static"]
 [dev-dependencies]
 proptest = { workspace = true }
 criterion = { workspace = true }
+serde_json = { workspace = true, features = ["float_roundtrip"] }
 
 [[bench]]
 name = "de_bench"

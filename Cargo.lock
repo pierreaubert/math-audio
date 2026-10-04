@@ -1976,6 +1976,7 @@ dependencies = [
 name = "math-optimisation"
 version = "0.5.15"
 dependencies = [
+ "chacha20",
  "clap",
  "criterion",
  "directories",
@@ -1988,6 +1989,9 @@ dependencies = [
  "proptest",
  "rand 0.10.3",
  "rayon",
+ "serde",
+ "serde_json",
+ "sha2",
  "thiserror 2.0.21",
 ]
 
