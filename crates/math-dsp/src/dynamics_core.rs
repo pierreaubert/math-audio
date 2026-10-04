@@ -28,7 +28,7 @@ use misc::time_to_coeff;
 pub struct DynamicsCore {
     mode: DynamicsMode,
     channels: usize,
-    sample_rate: u32,
+    sample_rate: f64,
 
     // === Envelope ===
     envelope: Vec<f32>,
@@ -75,7 +75,8 @@ impl DynamicsCore {
     ///
     /// Pre-allocates all Vecs. Initializes coefficients for the given sample rate.
     /// LookaheadBuffer is sized for max 20ms capacity.
-    pub fn new(mode: DynamicsMode, channels: usize, sample_rate: u32) -> Self {
+    pub fn new(mode: DynamicsMode, channels: usize, sample_rate: impl Into<f64>) -> Self {
+        let sample_rate = sample_rate.into();
         let detection_mode = DetectionMode::Peak;
         let max_lookahead_samples =
             (MAX_LOOKAHEAD_MS * 0.001 * sample_rate as f32).round() as usize;
@@ -144,7 +145,8 @@ impl DynamicsCore {
     ///
     /// This method rebuilds buffers and filter state, so it is not real-time
     /// safe. Call it from setup or a manager thread, not from the audio callback.
-    pub fn initialize(&mut self, sample_rate: u32) {
+    pub fn initialize(&mut self, sample_rate: impl Into<f64>) {
+        let sample_rate = sample_rate.into();
         self.sample_rate = sample_rate;
 
         // Recompute envelope coefficients
@@ -587,12 +589,12 @@ impl DynamicsCore {
 
     fn rebuild_sidechain_hpf_internal(&mut self) {
         let fc = self.sidechain_hpf_hz.max(0.0);
-        if fc > 0.0 && self.sample_rate > 0 {
+        if fc > 0.0 && self.sample_rate > 0.0 {
             let order = match self.sidechain_hpf_order_index {
                 1 => 4,
                 _ => 2,
             };
-            let peq = peq_butterworth_highpass(order, fc as f64, self.sample_rate as f64);
+            let peq = peq_butterworth_highpass(order, f64::from(fc), self.sample_rate);
             let sections: Vec<Biquad> = peq.into_iter().map(|(_, bq)| bq).collect();
             self.sidechain_hpf_biquads = (0..self.channels).map(|_| sections.clone()).collect();
         } else {
@@ -602,7 +604,7 @@ impl DynamicsCore {
 
     fn rebuild_sidechain_tilt_internal(&mut self) {
         let tilt = self.sidechain_tilt_db;
-        if tilt.abs() < 0.01 || self.sample_rate == 0 {
+        if tilt.abs() < 0.01 || self.sample_rate <= 0.0 {
             self.sidechain_tilt_biquads.clear();
             return;
         }

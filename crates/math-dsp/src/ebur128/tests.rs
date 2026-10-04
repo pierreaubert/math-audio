@@ -1,4 +1,5 @@
 use super::ebu_r128::EbuR128;
+use super::kweight_filter::KWeightFilter;
 use super::misc::energy_to_loudness;
 use super::misc::loudness_to_energy;
 use super::mode::Mode;
@@ -330,6 +331,9 @@ fn invalid_sample_rate_rejected() {
     assert!(EbuR128::new(2, 2_822_401, Mode::all()).is_err());
     assert!(EbuR128::new(2, 16, Mode::all()).is_ok());
     assert!(EbuR128::new(2, 2_822_400, Mode::all()).is_ok());
+    assert!(EbuR128::new(2, f64::NAN, Mode::all()).is_err());
+    assert!(EbuR128::new(2, f64::INFINITY, Mode::all()).is_err());
+    assert!(EbuR128::new(2, 15.999, Mode::all()).is_err());
 
     // A low-but-valid rate must not produce NaN loudness.
     let mut meter = EbuR128::new(2, 16, Mode::all()).unwrap();
@@ -337,6 +341,16 @@ fn invalid_sample_rate_rejected() {
     meter.add_frames_f32(&samples).unwrap();
     assert!(!meter.loudness_momentary().unwrap().is_nan());
     assert!(!meter.loudness_global().unwrap().is_nan());
+}
+
+#[test]
+fn fractional_sample_rate_reaches_k_weighting_without_quantization() {
+    let meter = EbuR128::new(2, 48_000.5, Mode::M).unwrap();
+    assert_eq!(meter.sample_rate, 48_000.5);
+    assert_eq!(meter.sub_block_frames, 4_800);
+    let exact = KWeightFilter::new(48_000.5);
+    let rounded = KWeightFilter::new(48_000.0);
+    assert_ne!(exact.stage1.b0, rounded.stage1.b0);
 }
 
 #[test]

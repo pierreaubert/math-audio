@@ -29,7 +29,8 @@ impl DualRelease {
     /// * `fast_ms` — fast release time (e.g., 50ms)
     /// * `slow_ms` — slow release time (e.g., 500ms)
     /// * `sample_rate` — audio sample rate
-    pub fn new(fast_ms: f32, slow_ms: f32, sample_rate: u32) -> Self {
+    pub fn new(fast_ms: f32, slow_ms: f32, sample_rate: impl Into<f64>) -> Self {
+        let sample_rate = sample_rate.into();
         Self {
             fast_coeff: Self::time_to_coeff(fast_ms, sample_rate),
             slow_coeff: Self::time_to_coeff(slow_ms, sample_rate),
@@ -40,11 +41,11 @@ impl DualRelease {
         }
     }
 
-    fn time_to_coeff(time_ms: f32, sample_rate: u32) -> f32 {
+    fn time_to_coeff(time_ms: f32, sample_rate: f64) -> f32 {
         if time_ms <= 0.0 {
             0.0
         } else {
-            (-1.0 / (time_ms * 0.001 * sample_rate as f32)).exp()
+            (-1.0 / (f64::from(time_ms) * 0.001 * sample_rate)).exp() as f32
         }
     }
 
@@ -77,7 +78,8 @@ impl DualRelease {
     }
 
     /// Update the fast and slow release times.
-    pub fn set_times(&mut self, fast_ms: f32, slow_ms: f32, sample_rate: u32) {
+    pub fn set_times(&mut self, fast_ms: f32, slow_ms: f32, sample_rate: impl Into<f64>) {
+        let sample_rate = sample_rate.into();
         self.fast_coeff = Self::time_to_coeff(fast_ms, sample_rate);
         self.slow_coeff = Self::time_to_coeff(slow_ms, sample_rate);
     }

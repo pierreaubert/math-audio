@@ -26,11 +26,12 @@ pub struct LevelDetector {
     window_pos: usize,
     /// Window length in samples.
     window_len: usize,
-    sample_rate: u32,
+    sample_rate: f64,
 }
 
 impl LevelDetector {
-    pub fn new(mode: DetectionMode, sample_rate: u32) -> Self {
+    pub fn new(mode: DetectionMode, sample_rate: impl Into<f64>) -> Self {
+        let sample_rate = sample_rate.into();
         let window_len = match mode {
             DetectionMode::Peak => 0,
             DetectionMode::Rms { window_ms } => {
@@ -121,7 +122,7 @@ impl LevelDetector {
         self.mode
     }
 
-    pub fn sample_rate(&self) -> u32 {
+    pub fn sample_rate(&self) -> f64 {
         self.sample_rate
     }
 }

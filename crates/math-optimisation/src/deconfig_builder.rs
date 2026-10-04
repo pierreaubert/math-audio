@@ -50,6 +50,11 @@ impl DEConfigBuilder {
         self.cfg.maxiter = v;
         self
     }
+    /// Delays the unchanged population convergence test until generation `v`.
+    pub fn min_convergence_iter(mut self, v: usize) -> Self {
+        self.cfg.min_convergence_iter = v;
+        self
+    }
     /// Sets the population size multiplier.
     ///
     /// # Panics

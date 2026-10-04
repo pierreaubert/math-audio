@@ -208,7 +208,7 @@ fn reset_and_mode_changes_restore_fresh_state_across_window_sizes() {
             detector.reset();
             let mut fresh =
                 tree::LevelDetector::new(tree::DetectionMode::Rms { window_ms: millis }, rate);
-            assert_eq!(detector.sample_rate(), rate);
+            assert_eq!(detector.sample_rate(), f64::from(rate));
             assert_eq!(detector.mode(), fresh.mode());
             for frame in 0..count * 2 + 17 {
                 let sample = (frame as f64 * 0.13).sin() as f32 * 0.7;

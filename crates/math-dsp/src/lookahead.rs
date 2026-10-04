@@ -32,7 +32,8 @@ impl LookaheadBuffer {
     }
 
     /// Create from a delay time in milliseconds.
-    pub fn from_ms(delay_ms: f32, sample_rate: u32, channels: usize) -> Self {
+    pub fn from_ms(delay_ms: f32, sample_rate: impl Into<f64>, channels: usize) -> Self {
+        let sample_rate = sample_rate.into();
         let samples = (delay_ms * 0.001 * sample_rate as f32).round() as usize;
         Self::new(samples, channels)
     }
@@ -49,7 +50,8 @@ impl LookaheadBuffer {
     }
 
     /// Set delay from milliseconds.
-    pub fn set_delay_ms(&mut self, delay_ms: f32, sample_rate: u32) {
+    pub fn set_delay_ms(&mut self, delay_ms: f32, sample_rate: impl Into<f64>) {
+        let sample_rate = sample_rate.into();
         let samples = (delay_ms * 0.001 * sample_rate as f32).round() as usize;
         self.set_delay(samples);
     }

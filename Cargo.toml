@@ -133,6 +133,7 @@ unused_result_ok = "warn"
 literal_string_with_formatting_args = "allow"
 
 [patch.crates-io]
+nalgebra = { git = "https://github.com/pierreaubert/nalgebra.git", rev = "a42573dbc9649af62fb07b469c98c852e62720fd" }
 webdriver-downloader = { version = "0.16.4", git = "https://github.com/pierreaubert/webdriver-downloader", rev = "472b2bcc2695cfcd0d5d508fd065c915fb1c7272" }
 
 [profile.release]
