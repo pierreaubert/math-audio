@@ -418,6 +418,22 @@ mod tests {
         assert!(band0[0].is_finite());
         assert!(band1[0].is_finite());
     }
+
+    #[test]
+    fn reset_at_sub_threshold_frequency_matches_fresh_crossover() {
+        let target = 1000.000_5_f32;
+        let mut reset = Lr4Crossover::new(1000.0_f32, 48_000.0, 1);
+        for _ in 0..256 {
+            reset.process(0.4, 0);
+        }
+        reset.reset_at_frequency(target);
+        let mut fresh = Lr4Crossover::new(target, 48_000.0, 1);
+        assert_eq!(reset.frequency(), target);
+        for frame in 0..128 {
+            let sample = (frame as f32 * 0.073).sin();
+            assert_eq!(reset.process(sample, 0), fresh.process(sample, 0));
+        }
+    }
 }
 
 #[cfg(test)]

@@ -6,6 +6,9 @@
 //! NSGA-III.
 
 mod assign;
+mod checkpoint;
+#[cfg(test)]
+mod checkpoint_tests;
 mod compare;
 mod individual;
 mod misc;
@@ -18,3 +21,9 @@ mod types;
 pub use individual::*;
 pub use nsga_config::*;
 pub use types::*;
+
+#[doc(inline)]
+pub use checkpoint::{
+    NsgaCheckpoint, NsgaCheckpointAction, NsgaCheckpointError, NsgaCheckpointOutcome,
+    nsga_checkpointed,
+};

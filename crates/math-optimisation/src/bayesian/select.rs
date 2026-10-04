@@ -124,20 +124,35 @@ pub(super) fn select_qei_batch(
         .collect()
 }
 
+pub(super) struct EhviFront<'a> {
+    pub(super) values: &'a [Vec<f64>],
+    pub(super) reference: &'a [f64],
+}
+
 pub(super) fn select_ehvi_batch(
     gps: &[GaussianProcess],
     candidates: &[Array1<f64>],
-    current_front: &[Vec<f64>],
-    reference: &[f64],
+    front: EhviFront<'_>,
     q: usize,
     config: &BayesOptConfig,
     rng: &mut StdRng,
+    stop: &super::stop::StopCheck<'_>,
 ) -> Vec<Array1<f64>> {
+    let EhviFront {
+        values: current_front,
+        reference,
+    } = front;
+    if stop.requested() {
+        return Vec::new();
+    }
     let candidate_norms = candidates
         .iter()
         .map(|x| normalize(x, &config.bounds))
         .collect::<Vec<_>>();
     let lower = hypervolume_integration_lower(current_front, gps, &candidate_norms, reference);
+    if stop.requested() {
+        return Vec::new();
+    }
     let hv_samples = HypervolumeSamples::new(current_front, &lower, reference, EHVI_HV_DRAWS, rng);
     if hv_samples.points.is_empty() {
         return candidates.iter().take(q).cloned().collect();
@@ -152,6 +167,9 @@ pub(super) fn select_ehvi_batch(
         let mut best_score = f64::NEG_INFINITY;
 
         for &idx in &available {
+            if stop.requested() {
+                return Vec::new();
+            }
             let mut batch = selected_indices
                 .iter()
                 .map(|&i| candidate_norms[i].clone())

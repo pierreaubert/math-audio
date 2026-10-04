@@ -25,10 +25,14 @@ mod compute;
 mod estimate;
 mod interpolate;
 mod load;
+pub mod lsqr;
 mod measurement;
 mod microphone_compensation;
 mod misc;
+pub mod parallel_hammerstein;
 mod plan;
+pub mod polynomial_convolution;
+pub mod right_preconditioner;
 mod smooth;
 #[cfg(test)]
 mod tests;
@@ -45,6 +49,16 @@ pub use estimate::*;
 pub use measurement::*;
 pub use microphone_compensation::*;
 pub use misc::*;
+#[doc(inline)]
+pub use parallel_hammerstein::{
+    CapturedTrainingOutput, DesignNumericalDiagnostics, DesignNumericalStatus,
+    DesignResourceEstimate, FitRecordDiagnostics, FitSolverStop, FitUnavailable,
+    FitUnavailableReason, HeldOutRecord, ParallelHammersteinCandidate,
+    ParallelHammersteinFitOptions, ParallelHammersteinOutcome, PolynomialFitDiagnostics,
+    PolynomialFitError, PreparedParallelHammersteinDesign, QualificationStatus, SolverDiagnostics,
+    TrainingInputReference, fit_parallel_hammerstein, fit_parallel_hammerstein_reusing_design,
+    prepare_parallel_hammerstein_design,
+};
 pub(crate) use plan::deconvolve_sweep_f64_spectrum;
 pub use plan::*;
 pub use smooth::*;

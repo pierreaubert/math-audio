@@ -36,17 +36,21 @@ pub(super) fn evaluate_multi_and_store<F>(
     config: &BayesOptConfig,
     xs_norm: &mut Vec<Array1<f64>>,
     values: &mut Vec<Vec<f64>>,
+    stop: &super::stop::StopCheck<'_>,
 ) where
     F: Fn(&Array1<f64>) -> Vec<f64> + Sync,
 {
+    let evaluate = |x: &Array1<f64>| (!stop.requested()).then(|| f(x));
     let ys = if config.parallel.enabled && candidates.len() >= 4 {
-        candidates.par_iter().map(f).collect::<Vec<_>>()
+        candidates.par_iter().map(evaluate).collect::<Vec<_>>()
     } else {
-        candidates.iter().map(f).collect::<Vec<_>>()
+        candidates.iter().map(evaluate).collect::<Vec<_>>()
     };
 
     for (x, y) in candidates.iter().zip(ys) {
-        xs_norm.push(normalize(x, &config.bounds));
-        values.push(y);
+        if let Some(y) = y {
+            xs_norm.push(normalize(x, &config.bounds));
+            values.push(y);
+        }
     }
 }

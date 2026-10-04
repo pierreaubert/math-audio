@@ -395,6 +395,25 @@ mod tests {
         assert!(low.is_finite());
         assert!(high.is_finite());
     }
+
+    #[test]
+    fn reset_at_sub_threshold_frequency_matches_fresh_crossover() {
+        let target = 1000.05_f32;
+        let mut reset = Lr8Crossover::new(1000.0_f32, 48_000.0, 2);
+        for _ in 0..256 {
+            reset.process(0.4, 0);
+            reset.process(-0.3, 1);
+        }
+        reset.reset_at_frequency(target);
+        let mut fresh = Lr8Crossover::new(target, 48_000.0, 2);
+        assert_eq!(reset.frequency(), target);
+        for frame in 0..128 {
+            let sample = (frame as f32 * 0.073).sin();
+            for channel in 0..2 {
+                assert_eq!(reset.process(sample, channel), fresh.process(sample, channel));
+            }
+        }
+    }
 }
 
 #[cfg(test)]
