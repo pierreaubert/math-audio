@@ -6,6 +6,37 @@ use rand::SeedableRng;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 #[cfg(test)]
+mod convergence_floor_tests {
+    use super::*;
+
+    #[test]
+    fn delayed_convergence_uses_existing_generation_budget_and_reports_actual_evaluations() {
+        let constant = |_x: &Array1<f64>| 1.0;
+        let bounds = &[(-1.0, 1.0)];
+        let normal = DEConfigBuilder::new()
+            .seed(4)
+            .popsize(4)
+            .maxiter(5)
+            .build()
+            .unwrap();
+        let delayed = DEConfigBuilder::new()
+            .seed(4)
+            .popsize(4)
+            .maxiter(5)
+            .min_convergence_iter(3)
+            .build()
+            .unwrap();
+        let first = crate::differential_evolution(&constant, bounds, normal).unwrap();
+        let later = crate::differential_evolution(&constant, bounds, delayed).unwrap();
+        assert_eq!(first.nit, 1);
+        assert_eq!(later.nit, 3);
+        assert!(later.success);
+        assert!(later.nfev > first.nfev);
+        assert!(later.nfev <= 4 + 1 + 5 * 4);
+    }
+}
+
+#[cfg(test)]
 mod strategy_tests {
     use super::*;
 

@@ -1027,7 +1027,10 @@ where
                     }
                 }
 
-                if !callback_stopped && pop_std <= convergence_threshold {
+                if !callback_stopped
+                    && iter >= self.config.min_convergence_iter
+                    && pop_std <= convergence_threshold
+                {
                     success = true;
                     message = format!(
                         "Converged: std(pop_f)={:.3e} <= threshold={:.3e}",
@@ -1569,6 +1572,9 @@ where
             config.penalty_eq.len(),
         );
         append_fingerprint_float(&mut fingerprint, "tol", config.tol);
+        if config.min_convergence_iter != 0 {
+            fingerprint.push_str(&format!(";min_convergence_iter={}", config.min_convergence_iter));
+        }
         append_fingerprint_float(&mut fingerprint, "atol", config.atol);
         append_fingerprint_float(&mut fingerprint, "recombination", config.recombination);
         fingerprint.push_str(&format!(";seed={:?}", config.seed));

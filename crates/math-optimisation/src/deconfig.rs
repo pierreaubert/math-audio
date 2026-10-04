@@ -18,6 +18,9 @@ use ndarray::Array1;
 pub struct DEConfig {
     /// Maximum number of generations (iterations).
     pub maxiter: usize,
+    /// Earliest generation at which the usual population convergence test may stop.
+    /// Zero preserves the historical behavior. This never changes `maxiter`.
+    pub min_convergence_iter: usize,
     /// Population size multiplier (total NP = popsize * n_params_free).
     pub popsize: usize,
     /// Relative tolerance for convergence (population energy std dev).
@@ -66,6 +69,7 @@ impl Default for DEConfig {
     fn default() -> Self {
         Self {
             maxiter: 1000,
+            min_convergence_iter: 0,
             popsize: 15,
             tol: 1e-2,
             atol: 0.0,
