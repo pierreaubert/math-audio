@@ -139,7 +139,9 @@ impl<T: FilterFloat> Lr4Crossover<T> {
         }
     }
 
-    /// Reset state and set the exact cutoff, including changes below the live-update threshold.
+    /// Reset state at an exact frequency without reallocating channel storage.
+    ///
+    /// Unlike parameter automation, reset does not skip small frequency changes.
     pub fn reset_at_frequency(&mut self, freq: T) {
         self.freq = freq;
         self.reset();
@@ -243,14 +245,18 @@ impl<T: FilterFloat> MultibandLr4Crossover<T> {
         }
     }
 
-    /// Reset every section at the exact supplied cutoff without changing the band count.
+    /// Reset every crossover at exact frequencies while preserving allocated storage.
     ///
     /// # Panics
-    /// Panics if `freqs` does not contain one cutoff per existing section.
-    pub fn reset_at_frequencies(&mut self, freqs: &[T]) {
-        assert_eq!(freqs.len(), self.crossovers.len());
-        for (xo, &freq) in self.crossovers.iter_mut().zip(freqs) {
-            xo.reset_at_frequency(freq);
+    /// Panics if the frequency count differs from the prepared crossover count.
+    pub fn reset_at_frequencies(&mut self, frequencies: &[T]) {
+        assert_eq!(
+            frequencies.len(),
+            self.crossovers.len(),
+            "reset frequency count must match prepared crossovers"
+        );
+        for (crossover, &frequency) in self.crossovers.iter_mut().zip(frequencies) {
+            crossover.reset_at_frequency(frequency);
         }
         self.scratch.fill(T::zero());
         self.carry.fill(T::zero());
@@ -412,20 +418,102 @@ mod tests {
         assert!(band0[0].is_finite());
         assert!(band1[0].is_finite());
     }
+}
+
+#[cfg(test)]
+mod reset_tests {
+    use super::*;
+
+    fn check_reset<T: FilterFloat>() {
+        for rate in [44_100.0, 48_000.0, 96_000.0] {
+            let initial: T = lit(1_000.0);
+            let requested: T = lit(1_000.000_5);
+            let mut actual = Lr4Crossover::new(initial, lit(rate), 2);
+            for index in 0..128 {
+                actual.process(lit((index as f64 * 0.071).sin()), index % 2);
+            }
+            let low_storage = actual.lowpass.as_ptr();
+            let high_storage = actual.highpass.as_ptr();
+            actual.reset_at_frequency(requested);
+            assert_eq!(actual.lowpass.as_ptr(), low_storage);
+            assert_eq!(actual.highpass.as_ptr(), high_storage);
+            assert_eq!(actual.frequency(), requested);
+            let mut expected = Lr4Crossover::new(requested, lit(rate), 2);
+            for index in 0..512 {
+                let sample = lit((index as f64 * 0.037).cos());
+                assert_eq!(
+                    actual.process(sample, index % 2),
+                    expected.process(sample, index % 2)
+                );
+            }
+            actual.reset();
+            expected.reset_at_frequency(requested);
+            assert_eq!(actual.lowpass.as_ptr(), low_storage);
+            assert_eq!(actual.highpass.as_ptr(), high_storage);
+            assert_eq!(actual.process(T::one(), 0), expected.process(T::one(), 0));
+        }
+    }
 
     #[test]
-    fn reset_at_sub_threshold_frequency_matches_fresh_crossover() {
-        let target = 1000.000_5_f32;
-        let mut reset = Lr4Crossover::new(1000.0_f32, 48_000.0, 1);
-        for _ in 0..256 {
-            reset.process(0.4, 0);
+    fn exact_reset_replays_fresh_filters_and_preserves_storage() {
+        check_reset::<f32>();
+        check_reset::<f64>();
+    }
+
+    #[test]
+    fn multiband_reset_replays_fresh_filters_and_preserves_storage() {
+        let mut actual = MultibandLr4Crossover::<f32>::new(&[300.0, 3_000.0], 48_000.0, 2);
+        let mut a = [[0.0; 2]; 3];
+        for _ in 0..128 {
+            actual.process_frame(
+                &[0.25, -0.3],
+                &mut a
+                    .iter_mut()
+                    .map(|band| band.as_mut_slice())
+                    .collect::<Vec<_>>(),
+            );
         }
-        reset.reset_at_frequency(target);
-        let mut fresh = Lr4Crossover::new(target, 48_000.0, 1);
-        assert_eq!(reset.frequency(), target);
-        for frame in 0..128 {
-            let sample = (frame as f32 * 0.073).sin();
-            assert_eq!(reset.process(sample, 0), fresh.process(sample, 0));
+        let storage = (
+            actual.crossovers.as_ptr(),
+            actual.scratch.as_ptr(),
+            actual.carry.as_ptr(),
+        );
+        let frequencies = [301.0, 2_999.0];
+        actual.reset_at_frequencies(&frequencies);
+        assert_eq!(
+            storage,
+            (
+                actual.crossovers.as_ptr(),
+                actual.scratch.as_ptr(),
+                actual.carry.as_ptr()
+            )
+        );
+        let mut expected = MultibandLr4Crossover::new(&frequencies, 48_000.0, 2);
+        let mut b = [[0.0; 2]; 3];
+        for index in 0..512 {
+            let input = [(index as f32 * 0.037).sin(), (index as f32 * 0.071).cos()];
+            actual.process_frame(
+                &input,
+                &mut a
+                    .iter_mut()
+                    .map(|band| band.as_mut_slice())
+                    .collect::<Vec<_>>(),
+            );
+            expected.process_frame(
+                &input,
+                &mut b
+                    .iter_mut()
+                    .map(|band| band.as_mut_slice())
+                    .collect::<Vec<_>>(),
+            );
+            assert_eq!(a, b);
         }
+    }
+
+    #[test]
+    #[should_panic(expected = "reset frequency count")]
+    fn multiband_reset_requires_the_prepared_frequency_count() {
+        MultibandLr4Crossover::<f64>::new(&[300.0, 3_000.0], 48_000.0, 1)
+            .reset_at_frequencies(&[301.0]);
     }
 }

@@ -331,6 +331,83 @@ mod callback_tests {
 }
 
 #[cfg(test)]
+mod seeded_legacy_checkpoint_baseline {
+    use crate::{DEConfigBuilder, DifferentialEvolution, Strategy};
+    use ndarray::{Array1, array};
+    use rand::{RngExt, SeedableRng};
+
+    #[test]
+    fn seeded_uninterrupted_report_matches_pre_refactor_baseline() {
+        let sphere = |x: &Array1<f64>| x.iter().map(|&value| value * value).sum::<f64>();
+        let config = DEConfigBuilder::new()
+            .seed(0x4a08_2026)
+            .maxiter(4)
+            .popsize(5)
+            .tol(0.0)
+            .atol(0.0)
+            .strategy(Strategy::Rand1Bin)
+            .build()
+            .expect("valid seeded baseline configuration");
+        let mut solver = DifferentialEvolution::new(&sphere, array![-3.0, -2.0], array![3.0, 2.0])
+            .expect("valid bounds");
+        *solver.config_mut() = config;
+        let report = solver.solve();
+        assert_eq!(
+            report.x,
+            array![0.048_270_894_771_279_33, -0.214_449_842_999_039_46]
+        );
+        assert_eq!(report.fun, 0.048_318_814_444_332_59);
+        assert_eq!(report.nit, 4);
+        assert_eq!(report.nfev, 50);
+        assert!(!report.success);
+        assert_eq!(report.message, "Maximum iterations reached: 4");
+        assert_eq!(
+            report.population,
+            array![
+                [0.285_359_702_964_253_06, -0.297_019_750_655_381_1],
+                [-0.318_630_764_613_520_63, 1.326_282_387_666_183_1],
+                [-0.530_063_409_192_849_6, -0.091_340_490_313_691_54],
+                [0.048_270_894_771_279_33, -0.214_449_842_999_039_46],
+                [-0.333_702_743_445_064_9, -0.015_427_931_469_863_126],
+                [0.794_524_913_155_446, 0.379_038_718_613_149_4],
+                [-1.151_411_554_770_454_2, 0.232_404_091_211_391_47],
+                [1.236_553_375_211_931_5, -1.243_997_765_955_381_8],
+                [0.988_202_568_105_722_9, 0.313_152_526_718_456_4],
+                [0.164_672_333_454_577_2, -0.437_498_196_409_211_3],
+            ]
+        );
+        assert_eq!(
+            report.population_energies,
+            array![
+                0.169_650_892_355_231_5,
+                1.860_550_535_991_708_3,
+                0.289_310_302_935_891_8,
+                0.048_318_814_444_332_59,
+                0.111_595_542_052_201_6,
+                0.774_940_187_832_567_2,
+                1.379_760_230_070_707_5,
+                3.076_594_691_450_001,
+                1.074_608_820_600_899_5,
+                0.218_521_649_266_688_3,
+            ]
+        );
+    }
+
+    #[test]
+    fn portable_chacha12_stream_matches_rand_std_rng_seeded_stream() {
+        let mut legacy = rand::rngs::StdRng::seed_from_u64(0x4a08_2026);
+        let mut portable = chacha20::ChaCha12Rng::seed_from_u64(0x4a08_2026);
+        for _ in 0..2_048 {
+            assert_eq!(legacy.random::<u64>(), portable.random::<u64>());
+            assert_eq!(
+                legacy.random_range(0_u32..127),
+                portable.random_range(0_u32..127)
+            );
+        }
+    }
+}
+
+#[cfg(test)]
 mod config_validation_tests {
     use super::*;
 
