@@ -2,7 +2,8 @@
 //!
 //! The model is `y = sum(h[k] * x.powi(k + 1))`, with causal finite kernels
 //! and ordinary linear convolution. The supplied output length may truncate
-//! the convolution tail. Its adjoint uses the same truncation. This operator
+//! the convolution tail or append exact zeros for a recording guard interval.
+//! Its adjoint uses the same retained support. This operator
 //! neither fits a model nor establishes identifiability, harmonic support,
 //! calibration, or a physical distortion metric. Callers must validate those
 //! separately. Construction plans FFTs; repeated applications reuse buffers.
@@ -26,6 +27,7 @@ pub struct PolynomialConvolutionOperator {
     coefficients: Vec<f64>,
     support: usize,
     output_len: usize,
+    full_len: usize,
     buffer_bytes: usize,
 }
 
@@ -72,8 +74,8 @@ impl PolynomialConvolutionOperator {
             .len()
             .checked_add(support - 1)
             .ok_or("polynomial convolution length overflow")?;
-        if output_len > full_len {
-            return Err("polynomial output extends beyond the linear convolution".into());
+        if output_len > isize::MAX as usize / std::mem::size_of::<f64>() {
+            return Err("polynomial output length exceeds addressable vector storage".into());
         }
         let fft_len = full_len
             .checked_next_power_of_two()
@@ -146,6 +148,7 @@ impl PolynomialConvolutionOperator {
             coefficients: vec![0.0; coefficient_len],
             support,
             output_len,
+            full_len,
             buffer_bytes,
         })
     }
@@ -195,13 +198,15 @@ impl PolynomialConvolutionOperator {
         self.inverse_fft
             .process_with_scratch(&mut self.sum, &mut self.scratch);
         let scale = 1.0 / self.work.len() as f64;
-        if self.sum[..self.output_len]
+        let retained_len = self.output_len.min(self.full_len);
+        if self.sum[..retained_len]
             .iter()
             .any(|z| !(z.re * scale).is_finite())
         {
             return Err("polynomial forward result is non-finite".into());
         }
-        for (value, sample) in output.iter_mut().zip(&self.sum) {
+        output.fill(0.0);
+        for (value, sample) in output.iter_mut().zip(&self.sum[..retained_len]) {
             *value = sample.re * scale;
         }
         Ok(())
@@ -219,7 +224,8 @@ impl PolynomialConvolutionOperator {
             return Err("polynomial adjoint samples must be finite".into());
         }
         self.sum.fill(Complex::default());
-        for (value, sample) in self.sum.iter_mut().zip(samples) {
+        let retained_len = self.output_len.min(self.full_len);
+        for (value, sample) in self.sum.iter_mut().zip(&samples[..retained_len]) {
             value.re = *sample;
         }
         self.forward_fft
@@ -268,13 +274,13 @@ mod tests {
     }
 
     #[test]
-    fn fft_matches_signed_direct_convolution_and_transpose_for_truncated_tails() {
+    fn fft_matches_signed_direct_convolution_and_transpose_for_truncated_and_guarded_tails() {
         let x: Vec<f64> = (0..37)
             .map(|i| ((i * 17 % 29) as f64 - 14.0) / 19.0)
             .collect();
         for orders in 1..=5 {
             for support in [1, 7, 43] {
-                for len in [1, x.len(), x.len() + support - 1] {
+                for len in [1, x.len(), x.len() + support - 1, x.len() + support + 193] {
                     let h: Vec<f64> = (0..orders * support)
                         .map(|i| ((i * 13 % 17) as f64 - 8.0) / 23.0)
                         .collect();
@@ -314,6 +320,42 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn guard_interval_is_exactly_zero_and_cannot_alias_into_adjoint() {
+        let input = [0.3, -0.6, 0.2];
+        let taps = [0.8, -0.2, 0.4, 0.1];
+        let mut short = PolynomialConvolutionOperator::new(&input, 2, 2, 4, 4, 1 << 20).unwrap();
+        // The guard extends past the FFT length; it must not require larger FFTs.
+        let mut guarded =
+            PolynomialConvolutionOperator::new(&input, 2, 2, 101, 4, 1 << 20).unwrap();
+        assert_eq!(short.buffer_bytes(), guarded.buffer_bytes());
+        let mut output = vec![99.0; 101];
+        guarded.apply(&taps, &mut output).unwrap();
+        let expected = direct(&input, &taps, 2, 101);
+        assert!(
+            output
+                .iter()
+                .zip(expected)
+                .all(|(a, b)| (a - b).abs() < 1e-14)
+        );
+        assert!(output[4..].iter().all(|sample| sample.to_bits() == 0));
+        let mut samples = vec![1e100; 101];
+        samples[..4].copy_from_slice(&[0.7, -0.4, 0.9, -0.1]);
+        let mut actual = vec![0.0; 4];
+        let mut reference = vec![0.0; 4];
+        guarded.apply_adjoint(&samples, &mut actual).unwrap();
+        short.apply_adjoint(&samples[..4], &mut reference).unwrap();
+        assert_eq!(actual, reference);
+        samples[..4].fill(0.0);
+        guarded.apply_adjoint(&samples, &mut actual).unwrap();
+        assert!(actual.iter().all(|value| *value == 0.0));
+        // Even ignored guard samples must be finite under the public input contract.
+        samples[100] = f64::NAN;
+        actual.fill(7.0);
+        assert!(guarded.apply_adjoint(&samples, &mut actual).is_err());
+        assert_eq!(actual, vec![7.0; 4]);
     }
 
     #[test]
@@ -399,7 +441,8 @@ mod tests {
             (vec![f64::NAN], 1, 1, 1, 1),
             (vec![1.0], 6, 1, 1, 1),
             (vec![1.0], 1, 0, 1, 1),
-            (vec![1.0], 1, 1, 2, 2),
+            (vec![1.0], 1, 1, 0, 2),
+            (vec![1.0], 1, 1, usize::MAX, 2),
             (vec![1.0; 8], 1, 2, 8, 8),
             (vec![f64::MAX], 2, 1, 1, 1),
             (vec![1.0], 1, usize::MAX, 1, 8),
