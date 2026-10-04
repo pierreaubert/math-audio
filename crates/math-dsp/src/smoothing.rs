@@ -14,8 +14,8 @@ pub struct Smoother {
 impl Smoother {
     /// Create a new smoother
     /// time_ms: Smoothing time constant (e.g., 10ms - 50ms)
-    pub fn new(value: f32, time_ms: f32, sample_rate: u32) -> Self {
-        let coeff = Self::calculate_coeff(time_ms, sample_rate);
+    pub fn new(value: f32, time_ms: f32, sample_rate: impl Into<f64>) -> Self {
+        let coeff = Self::calculate_coeff(time_ms, sample_rate.into());
         Self {
             target: value,
             current: value,
@@ -23,18 +23,18 @@ impl Smoother {
         }
     }
 
-    fn calculate_coeff(time_ms: f32, sample_rate: u32) -> f32 {
-        if time_ms <= 0.0 || sample_rate == 0 {
+    fn calculate_coeff(time_ms: f32, sample_rate: f64) -> f32 {
+        if time_ms <= 0.0 || !sample_rate.is_finite() || sample_rate <= 0.0 {
             0.0
         } else {
             // Standard one-pole coeff: e^(-1 / (tau * fs))
             // time_ms is roughly time to reach ~63% of target
-            (-1.0 / (time_ms * 0.001 * sample_rate as f32)).exp()
+            (-1.0_f64 / (f64::from(time_ms) * 0.001 * sample_rate)).exp() as f32
         }
     }
 
-    pub fn set_time(&mut self, time_ms: f32, sample_rate: u32) {
-        self.coeff = Self::calculate_coeff(time_ms, sample_rate);
+    pub fn set_time(&mut self, time_ms: f32, sample_rate: impl Into<f64>) {
+        self.coeff = Self::calculate_coeff(time_ms, sample_rate.into());
     }
 
     /// Set new target value
@@ -105,17 +105,17 @@ pub struct LinearSmoother {
     target: f32,
     current: f32,
     step: f32,
-    sample_rate: u32,
+    sample_rate: f64,
     time_ms: f32,
 }
 
 impl LinearSmoother {
-    pub fn new(value: f32, time_ms: f32, sample_rate: u32) -> Self {
+    pub fn new(value: f32, time_ms: f32, sample_rate: impl Into<f64>) -> Self {
         Self {
             target: value,
             current: value,
             step: 0.0,
-            sample_rate,
+            sample_rate: sample_rate.into(),
             time_ms,
         }
     }
@@ -126,8 +126,8 @@ impl LinearSmoother {
             self.current = value;
             self.step = 0.0;
         } else {
-            let samples = (self.time_ms * 0.001 * self.sample_rate as f32).max(1.0);
-            self.step = (self.target - self.current) / samples;
+            let samples = (f64::from(self.time_ms) * 0.001 * self.sample_rate).max(1.0);
+            self.step = (f64::from(self.target - self.current) / samples) as f32;
         }
     }
 
@@ -175,17 +175,17 @@ pub struct LogSmoother {
     target: f32,
     current: f32,
     ratio: f32,
-    sample_rate: u32,
+    sample_rate: f64,
     time_ms: f32,
 }
 
 impl LogSmoother {
-    pub fn new(value: f32, time_ms: f32, sample_rate: u32) -> Self {
+    pub fn new(value: f32, time_ms: f32, sample_rate: impl Into<f64>) -> Self {
         Self {
             target: value.max(1e-7),
             current: value.max(1e-7),
             ratio: 1.0,
-            sample_rate,
+            sample_rate: sample_rate.into(),
             time_ms,
         }
     }
@@ -196,9 +196,9 @@ impl LogSmoother {
             self.current = self.target;
             self.ratio = 1.0;
         } else {
-            let samples = (self.time_ms * 0.001 * self.sample_rate as f32).max(1.0);
+            let samples = (f64::from(self.time_ms) * 0.001 * self.sample_rate).max(1.0);
             // target = current * ratio^samples  => ratio = (target/current)^(1/samples)
-            self.ratio = (self.target / self.current).powf(1.0 / samples);
+            self.ratio = (f64::from(self.target / self.current).powf(1.0 / samples)) as f32;
         }
     }
 
@@ -249,6 +249,27 @@ mod tests {
     use super::*;
 
     #[test]
+    fn integer_rates_track_the_previous_f32_coefficient_formula() {
+        for rate in [1_000_u32, 48_000, 192_000] {
+            for time_ms in [0.1_f32, 10.0, 1_000.0] {
+                let old_coeff = (-1.0_f32 / (time_ms * 0.001 * rate as f32)).exp();
+                let new_coeff = Smoother::calculate_coeff(time_ms, f64::from(rate));
+                // Both values are f32 coefficients. The new calculation carries
+                // the rate in f64 but keeps the previous one-pole response.
+                assert!((new_coeff - old_coeff).abs() <= 2.0 * f32::EPSILON);
+            }
+        }
+    }
+
+    #[test]
+    fn fractional_rate_changes_the_smoothing_response() {
+        let integral = Smoother::calculate_coeff(1.0, 1_000.0);
+        let fractional = Smoother::calculate_coeff(1.0, 1_000.25);
+        assert!(fractional > integral);
+        assert!((fractional - integral) > 1e-5);
+    }
+
+    #[test]
     fn test_exponential_smoother() {
         let mut s = Smoother::new(0.0, 10.0, 1000); // 10ms at 1kHz = 10 samples
         s.set_target(1.0);
@@ -278,6 +299,17 @@ mod tests {
     }
 
     #[test]
+    fn linear_smoother_uses_fractional_rate_for_elapsed_frames() {
+        let mut smoother = LinearSmoother::new(0.0, 1_000.0, 1_234.567_8);
+        smoother.set_target(1.0);
+        let first = smoother.advance();
+        let expected = (1.0 / 1_234.567_8_f64) as f32;
+        assert!((first - expected).abs() <= f32::EPSILON);
+        let truncated_rate = (1.0 / 1_234.0_f64) as f32;
+        assert_ne!(first, truncated_rate);
+    }
+
+    #[test]
     fn test_log_smoother() {
         let mut s = LogSmoother::new(100.0, 10.0, 1000); // 10 samples
         s.set_target(1000.0);
@@ -291,6 +323,17 @@ mod tests {
         }
         assert!((s.advance() - 1000.0).abs() < 1e-3);
         assert!((s.advance() - 1000.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn log_smoother_uses_fractional_rate_for_elapsed_frames() {
+        let mut smoother = LogSmoother::new(1.0, 1_000.0, 1_234.567_8);
+        smoother.set_target(2.0);
+        let first = smoother.advance();
+        let expected = (2.0_f64.powf(1.0 / 1_234.567_8)) as f32;
+        assert!((first - expected).abs() <= 2.0 * f32::EPSILON);
+        let truncated_rate = (2.0_f64.powf(1.0 / 1_234.0)) as f32;
+        assert_ne!(first, truncated_rate);
     }
 
     #[test]

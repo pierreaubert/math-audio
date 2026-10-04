@@ -28,28 +28,28 @@ impl DcBlocker {
     /// Create a new DC blocker.
     ///
     /// `cutoff_hz`: Corner frequency (typically 3-10 Hz).
-    pub fn new(channels: usize, sample_rate: u32, cutoff_hz: f32) -> Self {
+    pub fn new(channels: usize, sample_rate: impl Into<f64>, cutoff_hz: f32) -> Self {
         Self {
             x_prev: vec![0.0; channels],
             y_prev: vec![0.0; channels],
-            coeff: Self::calculate_coeff(cutoff_hz, sample_rate),
+            coeff: Self::calculate_coeff(cutoff_hz, sample_rate.into()),
             channels,
         }
     }
 
     /// Create with default 5 Hz cutoff.
-    pub fn new_default(channels: usize, sample_rate: u32) -> Self {
+    pub fn new_default(channels: usize, sample_rate: impl Into<f64>) -> Self {
         Self::new(channels, sample_rate, 5.0)
     }
 
-    fn calculate_coeff(cutoff_hz: f32, sample_rate: u32) -> f32 {
-        if sample_rate == 0 {
+    fn calculate_coeff(cutoff_hz: f32, sample_rate: f64) -> f32 {
+        if !sample_rate.is_finite() || sample_rate <= 0.0 {
             return 0.99999; // Maximum R = lowest cutoff, safe default
         }
         // R = 1 - 2*pi*fc/fs
         // Higher R = lower cutoff = less bass attenuation
-        let r = 1.0 - (2.0 * std::f32::consts::PI * cutoff_hz / sample_rate as f32);
-        r.clamp(0.9, 0.99999)
+        let r = 1.0 - (2.0 * std::f64::consts::PI * f64::from(cutoff_hz) / sample_rate);
+        r.clamp(0.9, 0.99999) as f32
     }
 
     /// Process a single sample for one channel.
@@ -92,8 +92,8 @@ impl DcBlocker {
     }
 
     /// Update sample rate (recalculates coefficient).
-    pub fn set_sample_rate(&mut self, sample_rate: u32, cutoff_hz: f32) {
-        self.coeff = Self::calculate_coeff(cutoff_hz, sample_rate);
+    pub fn set_sample_rate(&mut self, sample_rate: impl Into<f64>, cutoff_hz: f32) {
+        self.coeff = Self::calculate_coeff(cutoff_hz, sample_rate.into());
     }
 
     /// Update channel count (re-allocates state vectors).

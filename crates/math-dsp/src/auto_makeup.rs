@@ -21,11 +21,12 @@ impl MeasuredMakeup {
     ///
     /// * `smoothing_ms` — EMA time constant (e.g., 1000ms for slow tracking)
     /// * `sample_rate` — audio sample rate
-    pub fn new(smoothing_ms: f32, sample_rate: u32) -> Self {
+    pub fn new(smoothing_ms: f32, sample_rate: impl Into<f64>) -> Self {
+        let sample_rate = sample_rate.into();
         let coeff = if smoothing_ms <= 0.0 {
             0.0
         } else {
-            (-1.0 / (smoothing_ms * 0.001 * sample_rate as f32)).exp()
+            (-1.0 / (f64::from(smoothing_ms) * 0.001 * sample_rate)).exp() as f32
         };
         Self {
             avg_gr_db: 0.0,
@@ -60,11 +61,12 @@ impl MeasuredMakeup {
     }
 
     /// Update smoothing time (e.g., when sample rate changes).
-    pub fn set_smoothing(&mut self, smoothing_ms: f32, sample_rate: u32) {
+    pub fn set_smoothing(&mut self, smoothing_ms: f32, sample_rate: impl Into<f64>) {
+        let sample_rate = sample_rate.into();
         self.coeff = if smoothing_ms <= 0.0 {
             0.0
         } else {
-            (-1.0 / (smoothing_ms * 0.001 * sample_rate as f32)).exp()
+            (-1.0 / (f64::from(smoothing_ms) * 0.001 * sample_rate)).exp() as f32
         };
     }
 }

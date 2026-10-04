@@ -46,7 +46,8 @@ impl Fdn {
     /// Create a new FDN with `num_lines` delay lines.
     ///
     /// `num_lines` must be a power of 2 (for Hadamard matrix). Typical: 8 or 16.
-    pub fn new(num_lines: usize, sample_rate: u32) -> Self {
+    pub fn new<S: Into<f64>>(num_lines: usize, sample_rate: S) -> Self {
+        let sample_rate = sample_rate.into();
         let num_lines = num_lines.next_power_of_two().max(2);
 
         // Mutually-prime delay lengths based on room size ~medium room
@@ -87,7 +88,8 @@ impl Fdn {
     /// `rt60`: Reverb time in seconds (0.1 - 10.0)
     /// `damping`: HF damping (0.0 = bright, 1.0 = dark)
     /// `size`: Room size factor (0.5 = small, 2.0 = large)
-    pub fn set_room_params(&mut self, rt60: f32, damping: f32, size: f32, sample_rate: u32) {
+    pub fn set_room_params<S: Into<f64>>(&mut self, rt60: f32, damping: f32, size: f32, sample_rate: S) {
+        let sample_rate = sample_rate.into();
         // Scale delay lengths by room size
         let base_delays = prime_delays(self.num_lines, sample_rate);
         for (i, &base) in base_delays.iter().enumerate() {
@@ -104,12 +106,12 @@ impl Fdn {
         // once per `m_i` samples, so g_i = 10^(-3 * m_i / (RT60 * SR)).
         // A single global gain derived from the average delay would make
         // short lines decay too fast and long lines too slowly.
-        let rt60_samples = rt60 * sample_rate as f32;
+        let rt60_samples = f64::from(rt60) * sample_rate;
         for (i, &len) in self.delay_lengths.iter().enumerate() {
             self.feedback_gains[i] = if rt60_samples > 0.0 {
-                10.0_f32
-                    .powf(-3.0 * len as f32 / rt60_samples)
-                    .clamp(0.0, 0.999)
+                10.0_f64
+                    .powf(-3.0 * len as f64 / rt60_samples)
+                    .clamp(0.0, 0.999) as f32
             } else {
                 0.0
             };
@@ -260,10 +262,10 @@ fn hadamard_flat(n: usize) -> Vec<f32> {
 
 /// Generate mutually-prime delay lengths for N delay lines.
 /// Uses small primes scaled to produce delays in the 20-80ms range.
-fn prime_delays(n: usize, sample_rate: u32) -> Vec<usize> {
+fn prime_delays(n: usize, sample_rate: f64) -> Vec<usize> {
     // Target delay range: 20-80ms
-    let min_samples = (0.020 * sample_rate as f32) as usize;
-    let max_samples = (0.080 * sample_rate as f32) as usize;
+    let min_samples = (0.020 * sample_rate) as usize;
+    let max_samples = (0.080 * sample_rate) as usize;
 
     // Primes in [min_samples, max_samples]
     let primes: Vec<usize> = (min_samples..=max_samples)

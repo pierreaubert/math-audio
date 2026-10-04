@@ -27,7 +27,8 @@ impl EnvelopeFollower {
     ///
     /// `attack_ms`: Time to reach ~63% of a step increase.
     /// `release_ms`: Time to decay to ~37% of a step decrease.
-    pub fn new(attack_ms: f32, release_ms: f32, sample_rate: u32) -> Self {
+    pub fn new(attack_ms: f32, release_ms: f32, sample_rate: impl Into<f64>) -> Self {
+        let sample_rate = sample_rate.into();
         Self {
             envelope: 0.0,
             attack_coeff: Self::ms_to_coeff(attack_ms, sample_rate),
@@ -35,11 +36,11 @@ impl EnvelopeFollower {
         }
     }
 
-    fn ms_to_coeff(time_ms: f32, sample_rate: u32) -> f32 {
-        if time_ms <= 0.0 {
+    fn ms_to_coeff(time_ms: f32, sample_rate: f64) -> f32 {
+        if time_ms <= 0.0 || !sample_rate.is_finite() || sample_rate <= 0.0 {
             return 0.0;
         }
-        (-1.0 / (time_ms * 0.001 * sample_rate as f32)).exp()
+        (-1.0 / (f64::from(time_ms) * 0.001 * sample_rate)).exp() as f32
     }
 
     /// Process one sample (provide absolute value of input).
@@ -74,7 +75,13 @@ impl EnvelopeFollower {
     }
 
     /// Update attack/release times.
-    pub fn set_times(&mut self, attack_ms: f32, release_ms: f32, sample_rate: u32) {
+    pub fn set_times(
+        &mut self,
+        attack_ms: f32,
+        release_ms: f32,
+        sample_rate: impl Into<f64>,
+    ) {
+        let sample_rate = sample_rate.into();
         self.attack_coeff = Self::ms_to_coeff(attack_ms, sample_rate);
         self.release_coeff = Self::ms_to_coeff(release_ms, sample_rate);
     }

@@ -10,11 +10,11 @@ pub(super) struct KWeightFilter {
 }
 
 impl KWeightFilter {
-    pub(super) fn new(sample_rate: u32) -> Self {
-        let (s1, s2) = if sample_rate == 48000 {
+    pub(super) fn new(sample_rate: f64) -> Self {
+        let (s1, s2) = if sample_rate == 48_000.0 {
             Self::coeffs_48k()
         } else {
-            Self::compute_coeffs(sample_rate as f64)
+            Self::compute_coeffs(sample_rate)
         };
         Self {
             stage1: s1,
