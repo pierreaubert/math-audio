@@ -38,6 +38,7 @@ math-iir-fir = { workspace = true }
 
 # ReplayGain / serialization
 serde = { workspace = true }
+sha2 = "0.10.9"
 
 # Utilities
 log = { workspace = true }
