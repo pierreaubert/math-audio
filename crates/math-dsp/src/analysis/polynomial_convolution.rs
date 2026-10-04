@@ -317,6 +317,61 @@ mod tests {
     }
 
     #[test]
+    fn recording_scale_48khz_sweep_matches_sparse_time_domain_model() {
+        let sample_rate = 48_000.0;
+        let duration = 2.0;
+        let input_len = 96_000;
+        let support = 512;
+        let output_len = input_len + support - 1;
+        // The fifth polynomial order stays below Nyquist over this 40-4000 Hz sweep.
+        let logarithmic_ratio = 100.0_f64.ln();
+        let input: Vec<f64> = (0..input_len)
+            .map(|i| {
+                let time = i as f64 / sample_rate;
+                let phase = std::f64::consts::TAU * 40.0 * duration / logarithmic_ratio
+                    * (logarithmic_ratio * time / duration).exp_m1();
+                0.5 * phase.sin()
+            })
+            .collect();
+        let mut taps = vec![0.0; 5 * support];
+        let mut expected = vec![0.0; output_len];
+        // Evaluate only these independently specified signed/delayed taps;
+        // no FFT, stored spectra, or production adjoint enters this oracle.
+        for order in 1..=5 {
+            for (delay, gain) in [(0, 0.2 / order as f64), (173, -0.07), (511, 0.03)] {
+                taps[(order - 1) * support + delay] = gain;
+                for (i, x) in input.iter().enumerate() {
+                    expected[i + delay] += gain * x.powi(order as i32);
+                }
+            }
+        }
+        let mut operator = PolynomialConvolutionOperator::new(
+            &input,
+            5,
+            support,
+            output_len,
+            131_072,
+            32 * 1024 * 1024,
+        )
+        .unwrap();
+        assert!(operator.buffer_bytes() <= 32 * 1024 * 1024);
+        let mut actual = vec![0.0; output_len];
+        operator.apply(&taps, &mut actual).unwrap();
+        let maximum_error = actual
+            .iter()
+            .zip(&expected)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0, f64::max);
+        assert!(maximum_error < 2e-13, "maximum error {maximum_error}");
+        let samples: Vec<f64> = (0..output_len).map(|i| (i as f64 * 0.123).sin()).collect();
+        let mut adjoint = vec![0.0; taps.len()];
+        operator.apply_adjoint(&samples, &mut adjoint).unwrap();
+        let oracle_dot: f64 = expected.iter().zip(&samples).map(|(a, b)| a * b).sum();
+        let adjoint_dot: f64 = taps.iter().zip(&adjoint).map(|(a, b)| a * b).sum();
+        assert!((oracle_dot - adjoint_dot).abs() < 1e-10);
+    }
+
+    #[test]
     fn invalid_shapes_and_numerics_fail_without_replacing_caller_output() {
         for (input, orders, support, len, cap) in [
             (vec![], 1, 1, 1, 1),
