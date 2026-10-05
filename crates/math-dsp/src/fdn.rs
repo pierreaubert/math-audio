@@ -119,9 +119,7 @@ impl Fdn {
 
         // Absorption from damping
         let damp = damping.clamp(0.0, 1.0);
-        for coeff in &mut self.absorption_coeff {
-            *coeff = damp * 0.6 + 0.1; // 0.1 (bright) to 0.7 (dark)
-        }
+        self.absorption_coeff.fill(damp * 0.6 + 0.1); // 0.1 (bright) to 0.7 (dark)
     }
 
     /// Process one stereo sample pair through the FDN.
