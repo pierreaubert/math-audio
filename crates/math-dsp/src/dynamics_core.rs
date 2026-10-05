@@ -616,7 +616,7 @@ impl DynamicsCore {
                 Biquad::new(
                     BiquadFilterType::Highshelf,
                     shelf_freq,
-                    self.sample_rate as f64,
+                    self.sample_rate,
                     q,
                     tilt as f64,
                 )
