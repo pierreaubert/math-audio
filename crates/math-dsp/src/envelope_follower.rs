@@ -75,12 +75,7 @@ impl EnvelopeFollower {
     }
 
     /// Update attack/release times.
-    pub fn set_times(
-        &mut self,
-        attack_ms: f32,
-        release_ms: f32,
-        sample_rate: impl Into<f64>,
-    ) {
+    pub fn set_times(&mut self, attack_ms: f32, release_ms: f32, sample_rate: impl Into<f64>) {
         let sample_rate = sample_rate.into();
         self.attack_coeff = Self::ms_to_coeff(attack_ms, sample_rate);
         self.release_coeff = Self::ms_to_coeff(release_ms, sample_rate);

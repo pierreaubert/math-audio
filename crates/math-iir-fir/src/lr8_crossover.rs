@@ -408,7 +408,10 @@ mod tests {
         for frame in 0..128 {
             let sample = (frame as f32 * 0.073).sin();
             for channel in 0..2 {
-                assert_eq!(reset.process(sample, channel), fresh.process(sample, channel));
+                assert_eq!(
+                    reset.process(sample, channel),
+                    fresh.process(sample, channel)
+                );
             }
         }
     }

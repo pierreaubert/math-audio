@@ -864,9 +864,10 @@ pub mod tests {
                         let processed = incremental.process(&adapter, indexing).unwrap();
                         start += valid;
                         for (channel, samples) in streamed.iter_mut().enumerate() {
-                            samples.extend((0..processed.frames()).map(|frame| {
-                                processed.read_sample(channel, frame).unwrap()
-                            }));
+                            samples.extend(
+                                (0..processed.frames())
+                                    .map(|frame| processed.read_sample(channel, frame).unwrap()),
+                            );
                         }
                     }
                     assert_eq!(start, input_len, "incremental input did not complete");
@@ -880,11 +881,15 @@ pub mod tests {
                         let adapter = SequentialSliceOfVecs::new(&silence, 2, needed).unwrap();
                         let partial = Indexing::new().partial_len(0);
                         let processed = incremental.process(&adapter, Some(&partial)).unwrap();
-                        assert!(processed.frames() > 0, "incremental drain made no output progress");
+                        assert!(
+                            processed.frames() > 0,
+                            "incremental drain made no output progress"
+                        );
                         for (channel, samples) in streamed.iter_mut().enumerate() {
-                            samples.extend((0..processed.frames()).map(|frame| {
-                                processed.read_sample(channel, frame).unwrap()
-                            }));
+                            samples.extend(
+                                (0..processed.frames())
+                                    .map(|frame| processed.read_sample(channel, frame).unwrap()),
+                            );
                         }
                     }
                     assert!(streamed[0].len() >= delay + expected_len);
@@ -922,12 +927,8 @@ pub mod tests {
         let output = resampler
             .process_all(&input, input_len, Some(&[true, false]))
             .unwrap();
-        assert!(
-            (0..output.frames()).any(|frame| output.read_sample(0, frame).unwrap().abs() > 0.5)
-        );
-        assert!(
-            (0..output.frames()).all(|frame| output.read_sample(1, frame).unwrap() == 0.0)
-        );
+        assert!((0..output.frames()).any(|frame| output.read_sample(0, frame).unwrap().abs() > 0.5));
+        assert!((0..output.frames()).all(|frame| output.read_sample(1, frame).unwrap() == 0.0));
     }
 
     #[cfg(feature = "fft_resampler")]
@@ -963,7 +964,8 @@ pub mod tests {
                     let valid = (input_len - start).min(needed);
                     let mut block = vec![vec![0.0; needed]; 2];
                     for channel in 0..2 {
-                        block[channel][..valid].copy_from_slice(&data[channel][start..start + valid]);
+                        block[channel][..valid]
+                            .copy_from_slice(&data[channel][start..start + valid]);
                     }
                     let adapter = SequentialSliceOfVecs::new(&block, 2, needed).unwrap();
                     let partial = Indexing::new().partial_len(valid);
@@ -972,9 +974,10 @@ pub mod tests {
                         .unwrap();
                     start += valid;
                     for (channel, samples) in streamed.iter_mut().enumerate() {
-                        samples.extend((0..processed.frames()).map(|frame| {
-                            processed.read_sample(channel, frame).unwrap()
-                        }));
+                        samples.extend(
+                            (0..processed.frames())
+                                .map(|frame| processed.read_sample(channel, frame).unwrap()),
+                        );
                     }
                 }
                 assert_eq!(start, input_len);
@@ -990,9 +993,10 @@ pub mod tests {
                     let processed = incremental.process(&adapter, Some(&partial)).unwrap();
                     assert!(processed.frames() > 0, "FFT drain made no output progress");
                     for (channel, samples) in streamed.iter_mut().enumerate() {
-                        samples.extend((0..processed.frames()).map(|frame| {
-                            processed.read_sample(channel, frame).unwrap()
-                        }));
+                        samples.extend(
+                            (0..processed.frames())
+                                .map(|frame| processed.read_sample(channel, frame).unwrap()),
+                        );
                     }
                 }
                 assert!(streamed[0].len() >= delay + expected_len);

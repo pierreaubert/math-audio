@@ -698,7 +698,7 @@ where
                 let boundary = chunk_size as f64 - (interpolator_len + 1) as f64;
                 let mut frames = ((boundary - last_index - 0.5 * (h1 - h0))
                     / Self::avg_t_ratio(resample_ratio, target_ratio))
-                    .floor() as usize;
+                .floor() as usize;
                 while frames > 0
                     && Self::last_position(last_index, resample_ratio, target_ratio, frames)
                         > boundary
