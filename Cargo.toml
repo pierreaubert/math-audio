@@ -134,7 +134,9 @@ literal_string_with_formatting_args = "allow"
 
 [patch.crates-io]
 nalgebra = { git = "https://github.com/pierreaubert/nalgebra.git", rev = "a42573dbc9649af62fb07b469c98c852e62720fd" }
-webdriver-downloader = { version = "0.16.4", git = "https://github.com/pierreaubert/webdriver-downloader", rev = "472b2bcc2695cfcd0d5d508fd065c915fb1c7272" }
+fantoccini = { git = "https://github.com/pierreaubert/fantoccini.git", rev = "bdf1972dd04e8abf5741c177f3b35a261a700ceb" }
+plotly_static = { git = "https://github.com/pierreaubert/plotly.rs.git", rev = "67230e5d154d2bb6110a0242db074b59cf2fdc89" }
+webdriver-downloader = { version = "0.16.4", git = "https://github.com/pierreaubert/webdriver-downloader.git", rev = "34b86a7fa685efb9888ab216d1fcd6b9febe24e1" }
 
 [profile.release]
 lto = true
