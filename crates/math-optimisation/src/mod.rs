@@ -90,7 +90,10 @@ pub use cobra::{
     CobraCallback, CobraConfig, CobraConstraint, CobraConstraintFn, CobraIntermediate, CobraReport,
     cobra,
 };
-pub use cobyla::{CobylaConfig, CobylaConstraint, CobylaReport, CobylaStopTols};
+pub use cobyla::{
+    CobylaConfig, CobylaConstraint, CobylaReport, CobylaStopTols, CobylaTermination,
+    cobyla_with_termination,
+};
 pub use continuous_area::{
     AreaError, AreaScalarisation, Prior, Quadrature, build_quadrature_points, evaluate_area_loss,
     try_evaluate_area_loss,

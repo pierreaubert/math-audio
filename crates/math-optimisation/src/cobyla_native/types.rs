@@ -1,5 +1,6 @@
 use super::status::cobylb;
 use super::stop_criteria::StopCriteria;
+use crate::cobyla::CobylaTermination;
 use crate::error::{DEError, Result};
 
 /// Result of a [`cobyla_native`] run.
@@ -15,12 +16,12 @@ pub struct NativeReport {
     pub nfev: usize,
 }
 
-/// Public entry point used by the `cobyla` module's wrapper.
+/// Native report entry point retained for direct module tests.
 ///
-/// Returns `Ok(Status)` on terminal status, or `Err` on a setup error
-/// (bounds mismatch, etc.).
+/// Returns a report on terminal status, or a setup error (bounds mismatch, etc.).
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
-pub fn cobyla_native<F, G>(
+pub(super) fn cobyla_native<F, G>(
     n: usize,
     f: F,
     constraints: &[G],
@@ -29,6 +30,25 @@ pub fn cobyla_native<F, G>(
     dx: &[f64],
     stop: &StopCriteria,
 ) -> Result<NativeReport>
+where
+    F: Fn(&[f64]) -> f64,
+    G: Fn(&[f64]) -> f64,
+{
+    let (report, _) = cobyla_native_with_termination(n, f, constraints, bounds, x, dx, stop)?;
+    Ok(report)
+}
+
+/// Runs COBYLA and returns its typed completion without changing report fields.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn cobyla_native_with_termination<F, G>(
+    n: usize,
+    f: F,
+    constraints: &[G],
+    bounds: &[(f64, f64)],
+    x: &mut [f64],
+    dx: &[f64],
+    stop: &StopCriteria,
+) -> Result<(NativeReport, CobylaTermination)>
 where
     F: Fn(&[f64]) -> f64,
     G: Fn(&[f64]) -> f64,
@@ -214,15 +234,19 @@ where
         .map(|g| g(x))
         .fold(0.0_f64, |acc, v| acc.max(v));
 
-    Ok(NativeReport {
-        x: x.to_vec(),
-        fun: minf,
-        max_violation: max_v.max(0.0),
-        feasible: max_v <= 0.0,
-        success: status.is_success(),
-        message: status.message(),
-        nfev,
-    })
+    let termination = status.typed_termination();
+    Ok((
+        NativeReport {
+            x: x.to_vec(),
+            fun: minf,
+            max_violation: max_v.max(0.0),
+            feasible: max_v <= 0.0,
+            success: status.is_success(),
+            message: status.message(),
+            nfev,
+        },
+        termination,
+    ))
 }
 
 #[derive(Debug, Clone, Copy)]
