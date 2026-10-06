@@ -1,0 +1,19 @@
+{
+  "owned_local_version": "0.54.1",
+  "upstream_version": "0.54.0",
+  "upstream_archive_url": "https://static.crates.io/crates/webdriver/webdriver-0.54.0.crate",
+  "archive_sha256": "799eea1e97dc3b3505b178be76e301138ced2af3b62490d8d932ace71168a948",
+  "published_upstream_release": false,
+  "license": "MPL-2.0",
+  "rust_sources": "All upstream Rust bytes unchanged",
+  "changes": [
+    "Unpublished local version and publish=false",
+    "Private unused cookie dependency 0.16\u21920.18 with default features disabled",
+    "Standalone workspace; original archive lock retained outside production"
+  ],
+  "consumer_api": "No external cookie type exposed or parser called; locally defined W3C cookie types unchanged",
+  "known_underlying_parser_change": "Quoted cookie values retain quotes under cookie0.18; no current WebDriver caller",
+  "declared_rust_version": "1.88",
+  "minimum_basis": "Maximum declared MSRV in selected full/server proof dependency graph is 1.88; no minimum-toolchain qualification claim",
+  "qualification_toolchain": "1.99.0"
+}

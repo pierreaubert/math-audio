@@ -456,16 +456,6 @@ checksum = "3d52eff69cd5e647efe296129160853a42795992097e8af39800e1060caeea9b"
 
 [[package]]
 name = "cookie"
-version = "0.16.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e859cd57d0710d9e06c381b550c06e76992472a8c6d527aecd2fc673dcc231fb"
-dependencies = [
- "time",
- "version_check",
-]
-
-[[package]]
-name = "cookie"
 version = "0.18.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1a373e3602691c3cdea496d2f0ee5935151e6168fe87739483c463db1b2f2f87"
@@ -860,7 +850,7 @@ version = "0.22.1"
 source = "git+https://github.com/pierreaubert/fantoccini.git?rev=bdf1972dd04e8abf5741c177f3b35a261a700ceb#bdf1972dd04e8abf5741c177f3b35a261a700ceb"
 dependencies = [
  "base64 0.22.1",
- "cookie 0.18.2",
+ "cookie",
  "http",
  "http-body-util",
  "hyper",
@@ -3547,13 +3537,11 @@ dependencies = [
 
 [[package]]
 name = "webdriver"
-version = "0.54.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "799eea1e97dc3b3505b178be76e301138ced2af3b62490d8d932ace71168a948"
+version = "0.54.1"
 dependencies = [
  "base64 0.22.1",
  "bytes",
- "cookie 0.16.2",
+ "cookie",
  "http",
  "icu_segmenter",
  "log",

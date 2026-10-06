@@ -133,6 +133,7 @@ unused_result_ok = "warn"
 literal_string_with_formatting_args = "allow"
 
 [patch.crates-io]
+webdriver = { path = "crates/3rdparties/webdriver" }
 # Match GPUI compatibility forks: workspace patches are not inherited.
 rusty-fork = { git = "https://github.com/pierreaubert/rusty-fork.git", rev = "ee62bcd64fa6afe7fae0e52a448d716dc294e98d" }
 nalgebra = { git = "https://github.com/pierreaubert/nalgebra.git", rev = "a42573dbc9649af62fb07b469c98c852e62720fd" }
