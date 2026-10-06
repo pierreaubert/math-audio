@@ -1,0 +1,3 @@
+Unpublished local predicates 3.1.5 maintenance fork of predicates 3.1.4.
+Original predicates source retains MIT OR Apache-2.0 licenses.
+Private f64 ordered-distance and equality helpers preserve float-cmp 0.10 semantics while resolving float-cmp 0.9. Helpers are adapted from float-cmp 0.10 (Optimal Computing (NZ) Ltd., MIT); its license is retained in LICENSE-FLOAT-CMP.
