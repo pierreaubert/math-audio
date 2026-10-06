@@ -41,6 +41,28 @@
 use ndarray::Array1;
 use std::sync::Arc;
 
+/// Typed stop reason for a completed COBYLA run.
+///
+/// Evaluation-limit termination is distinct from convergence, even though
+/// NLopt assigns both outcomes positive solver return codes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CobylaTermination {
+    /// The solver returned without a more specific stopping condition.
+    Success,
+    /// The configured objective stop value was reached.
+    StopValueReached,
+    /// The objective tolerance was reached.
+    FunctionToleranceReached,
+    /// The parameter tolerance was reached.
+    ParameterToleranceReached,
+    /// The configured objective evaluation limit was reached.
+    EvaluationLimit,
+    /// Progress was limited by floating-point roundoff.
+    RoundoffLimited,
+    /// The solver reported a failure or invalid invocation.
+    Failure,
+}
+
 use crate::error::{DEError, Result};
 
 /// Erased inequality-constraint closure. Returns `<= 0` when feasible
@@ -176,6 +198,27 @@ pub fn cobyla<F>(
 where
     F: Fn(&Array1<f64>) -> f64 + Sync,
 {
+    cobyla_with_termination(f, constraints, config).map(|(report, _)| report)
+}
+
+/// Minimize `f` and return the typed solver stop reason with its report.
+///
+/// This uses the same objective, constraints, and stopping criteria as
+/// [`cobyla`], while preserving whether the solver reached a tolerance or
+/// exhausted its evaluation budget.
+///
+/// # Errors
+///
+/// Returns a setup error when the initial vector, bounds, or trust-region
+/// configuration is invalid.
+pub fn cobyla_with_termination<F>(
+    f: &F,
+    constraints: &[CobylaConstraint],
+    config: CobylaConfig,
+) -> Result<(CobylaReport, CobylaTermination)>
+where
+    F: Fn(&Array1<f64>) -> f64 + Sync,
+{
     let n = config.x0.len();
     if n == 0 {
         return Err(DEError::BoundsMismatch {
@@ -253,7 +296,7 @@ where
         .collect();
 
     let mut x_buf: Vec<f64> = config.x0.to_vec();
-    let report = native::cobyla_native(
+    let (report, termination) = native::cobyla_native_with_termination(
         n,
         f_native,
         &cons_native,
@@ -262,14 +305,16 @@ where
         &dx,
         &stop,
     )?;
-
-    Ok(CobylaReport {
-        x: Array1::from(report.x),
-        fun: report.fun,
-        success: report.success,
-        message: report.message.to_string(),
-        nfev: report.nfev,
-    })
+    Ok((
+        CobylaReport {
+            x: Array1::from(report.x),
+            fun: report.fun,
+            success: report.success,
+            message: report.message.to_string(),
+            nfev: report.nfev,
+        },
+        termination,
+    ))
 }
 
 #[cfg(test)]
@@ -449,5 +494,43 @@ mod tests {
             "fun = {} should be <= 0.5+eps",
             report.fun
         );
+    }
+
+    #[test]
+    fn typed_termination_separates_convergence_from_maxeval() {
+        let f = |x: &Array1<f64>| x[0].powi(2);
+        let config = CobylaConfig {
+            x0: Array1::from(vec![1.0]),
+            bounds: vec![(-10.0, 10.0)],
+            rho_begin: CobylaRhoBegin::All(0.5),
+            maxeval: 1_000,
+            stop_tol: CobylaStopTols {
+                stopval: 0.0,
+                ftol_rel: 0.5,
+                xtol_rel: 0.0,
+                ..CobylaStopTols::default()
+            },
+        };
+        let (_, termination) =
+            cobyla_with_termination(&f, &[], config).expect("tolerance run should complete");
+        assert_eq!(termination, CobylaTermination::ParameterToleranceReached);
+
+        let config = CobylaConfig {
+            x0: Array1::from(vec![1.0]),
+            bounds: vec![(-10.0, 10.0)],
+            rho_begin: CobylaRhoBegin::All(0.5),
+            maxeval: 5,
+            stop_tol: CobylaStopTols {
+                stopval: 0.0,
+                ftol_rel: 0.0,
+                ftol_abs: 0.0,
+                xtol_rel: 0.0,
+                xtol_abs: 0.0,
+            },
+        };
+        let (report, termination) = cobyla_with_termination(&f, &[], config)
+            .expect("maxeval run should return its best point");
+        assert!(report.success, "preserve the positive maxeval result code");
+        assert_eq!(termination, CobylaTermination::EvaluationLimit);
     }
 }

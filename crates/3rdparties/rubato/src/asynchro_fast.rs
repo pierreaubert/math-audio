@@ -251,9 +251,9 @@ where
                     for (chan, active) in channel_mask.iter().enumerate() {
                         if *active {
                             unsafe {
-                                let point = wave_in.get_unchecked(chan).get_unchecked(
-                                    (start_idx + history_len as isize) as usize,
-                                );
+                                let point = wave_in
+                                    .get_unchecked(chan)
+                                    .get_unchecked((start_idx + history_len as isize) as usize);
                                 wave_out.write_sample_unchecked(chan, frame + output_offset, point);
                             }
                         }

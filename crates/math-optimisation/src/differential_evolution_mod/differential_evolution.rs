@@ -1573,7 +1573,10 @@ where
         );
         append_fingerprint_float(&mut fingerprint, "tol", config.tol);
         if config.min_convergence_iter != 0 {
-            fingerprint.push_str(&format!(";min_convergence_iter={}", config.min_convergence_iter));
+            fingerprint.push_str(&format!(
+                ";min_convergence_iter={}",
+                config.min_convergence_iter
+            ));
         }
         append_fingerprint_float(&mut fingerprint, "atol", config.atol);
         append_fingerprint_float(&mut fingerprint, "recombination", config.recombination);

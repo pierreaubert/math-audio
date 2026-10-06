@@ -88,7 +88,13 @@ impl Fdn {
     /// `rt60`: Reverb time in seconds (0.1 - 10.0)
     /// `damping`: HF damping (0.0 = bright, 1.0 = dark)
     /// `size`: Room size factor (0.5 = small, 2.0 = large)
-    pub fn set_room_params<S: Into<f64>>(&mut self, rt60: f32, damping: f32, size: f32, sample_rate: S) {
+    pub fn set_room_params<S: Into<f64>>(
+        &mut self,
+        rt60: f32,
+        damping: f32,
+        size: f32,
+        sample_rate: S,
+    ) {
         let sample_rate = sample_rate.into();
         // Scale delay lengths by room size
         let base_delays = prime_delays(self.num_lines, sample_rate);

@@ -4,6 +4,7 @@ use super::misc::relstop;
 use super::stop_criteria::StopCriteria;
 use super::types::BodyState;
 use super::types::TrLoopState;
+use crate::cobyla::CobylaTermination;
 
 /// Status codes (mirrors NLopt's `nlopt_result`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -21,6 +22,20 @@ pub(super) enum Status {
 }
 
 impl Status {
+    pub(super) fn typed_termination(self) -> CobylaTermination {
+        match self {
+            Status::Success => CobylaTermination::Success,
+            Status::StopvalReached => CobylaTermination::StopValueReached,
+            Status::FtolReached => CobylaTermination::FunctionToleranceReached,
+            Status::XtolReached => CobylaTermination::ParameterToleranceReached,
+            Status::MaxevalReached => CobylaTermination::EvaluationLimit,
+            Status::RoundoffLimited => CobylaTermination::RoundoffLimited,
+            Status::Failure | Status::InvalidArgs | Status::ForcedStop => {
+                CobylaTermination::Failure
+            }
+        }
+    }
+
     pub(super) fn message(self) -> &'static str {
         match self {
             Status::Success => "Success",

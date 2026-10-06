@@ -3,7 +3,7 @@ use super::misc::idx2;
 use super::misc::relstop;
 use super::status::Status;
 use super::stop_criteria::StopCriteria;
-use super::types::cobyla_native;
+use super::types::{cobyla_native, cobyla_native_with_termination};
 
 type TestConstraint = Box<dyn Fn(&[f64]) -> f64>;
 
@@ -513,7 +513,7 @@ fn test_cobyla_native_maxeval_reached() {
     let f = |x: &[f64]| x[0].powi(2);
     let cons: Vec<TestConstraint> = Vec::new();
     let mut x = vec![1.0];
-    let report = cobyla_native(
+    let (report, termination) = cobyla_native_with_termination(
         1,
         f,
         &cons,
@@ -530,6 +530,14 @@ fn test_cobyla_native_maxeval_reached() {
         report.nfev <= 10,
         "nfev = {} should respect tiny maxeval",
         report.nfev
+    );
+    assert_eq!(
+        termination,
+        crate::cobyla::CobylaTermination::EvaluationLimit
+    );
+    assert!(
+        report.success,
+        "preserve NLopt's positive maxeval status semantics"
     );
 }
 
@@ -603,6 +611,22 @@ fn test_cobyla_native_ftol_reached() {
     .expect("cobyla_native failed");
     // ftol_rel convergence should be marked as success
     assert!(report.success, "Should succeed when ftol_rel reached");
+}
+
+#[test]
+fn typed_status_separates_ftol_convergence_from_evaluation_limit() {
+    assert_eq!(
+        Status::FtolReached.typed_termination(),
+        crate::cobyla::CobylaTermination::FunctionToleranceReached
+    );
+    assert_eq!(
+        Status::MaxevalReached.typed_termination(),
+        crate::cobyla::CobylaTermination::EvaluationLimit
+    );
+    assert_eq!(
+        Status::RoundoffLimited.typed_termination(),
+        crate::cobyla::CobylaTermination::RoundoffLimited
+    );
 }
 
 #[test]

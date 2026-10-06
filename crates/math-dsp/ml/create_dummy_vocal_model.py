@@ -8,10 +8,10 @@ Generates a minimal ONNX model with:
 - Single linear layer with zero weights -> constant output of sigmoid(0) = 0.5
 
 Usage:
-    python3 crates/math-audio/math-dsp/ml/create_dummy_vocal_model.py
+    python3 math-audio/crates/math-dsp/ml/create_dummy_vocal_model.py
 
 Output:
-    crates/sotf-plugins/test_data/dummy_vocal_detector.onnx
+    sotf-daw/crates/sotf-plugins/test_data/dummy_vocal_detector.onnx
 """
 
 import numpy as np
@@ -27,7 +27,7 @@ except ImportError:
 FEATURE_SIZE = 320  # 5 frames × (20 MFCCs + 20 deltas + 24 spatial/spectral)
 OUTPUT_DIR = os.path.join(
     os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "..", "..")),
-    "crates", "sotf-plugins", "test_data"
+    "sotf-daw", "crates", "sotf-plugins", "test_data"
 )
 OUTPUT_PATH = os.path.join(OUTPUT_DIR, "dummy_vocal_detector.onnx")
 
