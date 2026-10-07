@@ -419,7 +419,7 @@ mod tests {
 
     #[test]
     fn reset_at_sub_threshold_frequency_matches_fresh_crossover() {
-        let target = 1000.000_5_f32;
+        let target = 1_000.000_5_f32;
         let mut reset = Lr4Crossover::new(1000.0_f32, 48_000.0, 1);
         for _ in 0..256 {
             reset.process(0.4, 0);

@@ -18,7 +18,6 @@ use super::misc::k_weighting_db;
 mod peq_tests {
     use super::super::*;
     use super::*;
-    use base64::Engine as _;
     use ndarray::array;
 
     fn approx_eq(a: f64, b: f64, tol: f64) -> bool {

@@ -15,7 +15,7 @@ exclude = ["crates/3rdparties/rubato"]
 resolver = "3"
 
 [workspace.package]
-version = "0.5.2"
+version = "0.5.3"
 authors = ["Pierre F. Aubert pierre@spinorama.org"]
 description = "Toolkit for audio modelisation"
 edition = "2024"
@@ -77,7 +77,7 @@ wasm-bindgen-rayon = "1.2"
 
 # Utilities
 approx = "0.5"
-toml = "0.8"
+toml = "1.1"
 
 # Audio file I/O
 hound = "3.5"
@@ -144,3 +144,10 @@ webdriver-downloader = { path = "crates/3rdparties/webdriver-downloader" }
 [profile.release]
 lto = true
 codegen-units = 1
+# Do not strip: cargo 1.92 defaults release builds to `-C strip=debuginfo`,
+# and rustc 1.92's stripping emits Mach-O dylibs that the macOS 27 (Xcode 27)
+# loader rejects ("mis-aligned LINKEDIT string pool"). Every proc-macro dylib
+# (serde_derive, thiserror-impl, ...) then fails to load, so all release
+# builds fail with E0463 "can't find crate". Re-enable stripping once the
+# pinned toolchain produces loadable binaries again.
+strip = "none"
