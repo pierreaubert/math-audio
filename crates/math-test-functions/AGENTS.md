@@ -35,7 +35,7 @@ src/
 
 ## Features
 
-- `plotly_static` -- Static plot generation
+- `plotly` -- Interactive HTML contour plots for the `plot-functions` binary
 
 ## Testing
 

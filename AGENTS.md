@@ -167,7 +167,6 @@ Run example suites with `just examples` (IIR/FIR, optimisation, test functions).
 Important features to know when building:
 
 - `plotly`: Plotting support for the `plot-functions` and `plot-de` binaries
-- `plotly_static`: Static PNG export (requires chromedriver)
 
 Note: `rayon` parallelism and `clap` CLI parsing are used directly where needed;
 there are no workspace `parallel`, `cli`, or `wasm` feature flags at this time.

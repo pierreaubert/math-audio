@@ -44,7 +44,7 @@ Provides the primary global optimization algorithm for AutoEQ, forked from SciPy
 
 ## Features
 
-- `plotly_static` -- Static plot generation for convergence visualization
+- `plotly` -- Interactive HTML plots for the `plot-de` binary
 
 ## Testing
 

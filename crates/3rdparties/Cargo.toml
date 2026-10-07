@@ -1,4 +1,0 @@
-[workspace]
-members = ["plotly_static", "webdriver-downloader"]
-exclude = ["rubato"]
-resolver = "3"
