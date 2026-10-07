@@ -1112,7 +1112,6 @@ checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 [[package]]
 name = "nalgebra"
 version = "0.35.0"
-source = "git+https://github.com/pierreaubert/nalgebra.git?rev=a42573dbc9649af62fb07b469c98c852e62720fd#a42573dbc9649af62fb07b469c98c852e62720fd"
 dependencies = [
  "approx",
  "glam",
@@ -1662,7 +1661,6 @@ checksum = "cf54715a573b99ac80df0bc206da022bcd442c974952c7b9720069370852e21f"
 [[package]]
 name = "rusty-fork"
 version = "0.3.1"
-source = "git+https://github.com/pierreaubert/rusty-fork.git?rev=ee62bcd64fa6afe7fae0e52a448d716dc294e98d#ee62bcd64fa6afe7fae0e52a448d716dc294e98d"
 dependencies = [
  "fnv",
  "quick-error",
