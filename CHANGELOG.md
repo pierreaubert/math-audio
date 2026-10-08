@@ -20,6 +20,11 @@ Work present in the tree but not yet committed or released:
   Yeh FMV tone-stack component models (IDs 6–8) with the
   `component_report` characterization example.
 
+## math-rir 0.5.12
+
+- `math-rir`: full indirect IR-only Speech Transmission Index using the
+  IEC 60268-16:2020 model, with 14 × 7 modulation transfer values and octave MTI.
+
 ## 2026-09
 
 - 2026-09-27 — `math-autodiff`: full `f32`/`f64` generics, contiguous
