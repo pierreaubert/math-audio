@@ -5,9 +5,6 @@ Per-crate details live in `crates/<name>/CHANGELOG.md`.
 
 ## [Unreleased]
 
-- `math-rir`: full indirect IR-only Speech Transmission Index using the
-  IEC 60268-16:2020 model, with 14 × 7 modulation transfer values and octave MTI.
-
 Work present in the tree but not yet committed or released:
 
 - `math-optimisation`: SACOBRA-style `cobra` surrogate constrained
@@ -22,6 +19,11 @@ Work present in the tree but not yet committed or released:
 - `math-analog`: Shockley diode-clipper, Koren-12AX7A triode-stage, and
   Yeh FMV tone-stack component models (IDs 6–8) with the
   `component_report` characterization example.
+
+## math-rir 0.5.12
+
+- `math-rir`: full indirect IR-only Speech Transmission Index using the
+  IEC 60268-16:2020 model, with 14 × 7 modulation transfer values and octave MTI.
 
 ## 2026-09
 

@@ -19,13 +19,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   merged reflections and admitted smoothing-ripple crests on decay tails.
 
 ### Added
-- `sti::analyze_sti`: full indirect IR-only STI using IEC 60268-16:2020
-  Annex A weighting and redundancy, octave-band energy MTF, apparent SNR
-  limited to ±15 dB, 14 × 7 modulation/TI values and octave MTI. Invalid
-  input, inadequate Nyquist coverage and missing band energy return errors.
-  Operational noise, auditory masking and hearing thresholds are not applied.
-- Analytical exponential/echo, impulse, gain/time-shift invariance, input
-  validation and full octave-filter exponential-decay regressions.
 - `Iso3382Metrics::quality_verdict()` returning an `Iso3382QualityVerdict`
   (`usable`, `decay_fits_valid`, `finite_metric_count`, `issues`),
   aggregating the NaN-sentinel and r² acceptance checks into one verdict
@@ -38,6 +31,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   frequency, and comb ripple) and `t60_batch` (batched octave-band T60 over
   63 Hz–16 kHz with T30→T20→EDT fit policy and per-band validity flags
   including a B·T60 ≥ 8 filter-ring guard).
+
+## [0.5.12]
+
+### Added
+- `sti::analyze_sti`: full indirect IR-only STI using IEC 60268-16:2020
+  Annex A weighting and redundancy, octave-band energy MTF, apparent SNR
+  limited to ±15 dB, 14 × 7 modulation/TI values and octave MTI. Invalid
+  input, inadequate Nyquist coverage and missing band energy return errors.
+  Operational noise, auditory masking and hearing thresholds are not applied.
+- Analytical exponential/echo, impulse, gain/time-shift invariance, input
+  validation and full octave-filter exponential-decay regressions.
 
 ## [0.5.6] - 2026-05-30
 
