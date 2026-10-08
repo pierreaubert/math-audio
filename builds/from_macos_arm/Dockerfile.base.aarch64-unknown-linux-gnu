@@ -30,9 +30,9 @@ RUN apt-get update && \
     gnome-browser-connector \
     && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
 
-# Install Rust 1.95 (pinned version for compatibility)
+# Install Rust stable (pinned version for compatibility)
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
-    sh -s -- -y --default-toolchain 1.95.0 --profile minimal && \
+    sh -s -- -y --default-toolchain stable --profile minimal && \
     rm -rf /root/.cargo/registry /root/.cargo/git
 
 ENV PATH="/root/.cargo/bin:${PATH}"

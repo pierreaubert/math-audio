@@ -25,18 +25,18 @@ RUN apt-get update && \
     mingw-w64 \
     && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
 
-# Install Rust 1.95 (pinned version for compatibility)
+# Install Rust stable (pinned version for compatibility)
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
-    sh -s -- -y --default-toolchain 1.95.0 --profile minimal && \
+    sh -s -- -y --default-toolchain stable --profile minimal && \
     rm -rf /root/.cargo/registry /root/.cargo/git
 
 ENV PATH="/root/.cargo/bin:${PATH}"
 # Keep Docker builds on the pinned toolchain even when the mounted workspace
 # contains rust-toolchain.toml with channel = "stable".
-ENV RUSTUP_TOOLCHAIN=1.95.0
+ENV RUSTUP_TOOLCHAIN=stable
 
 # Add the Windows target
-RUN rustup target add --toolchain 1.95.0 aarch64-pc-windows-gnullvm
+RUN rustup target add --toolchain stable aarch64-pc-windows-gnullvm
 
 # Install just
 RUN cargo install just --locked && \
