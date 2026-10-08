@@ -45,7 +45,7 @@ criterion = "0.8.2"
 
 # Optimization and math
 ndarray = { version = "0.17", default-features = false, features = ["rayon", "serde"] }
-nalgebra = { version = "0.35", default-features = false, features = ["std"] }
+nalgebra = { package = "sotf-nalgebra", path = "../sotf-3rdparties/nalgebra",  version = "0.35", default-features = false, features = ["std"] }
 oxiblas-ndarray = { version = "0.2.2" }
 rand = "0.10.2"
 chacha20 = { version = "=0.10.2", default-features = false, features = ["rng"] }
@@ -130,10 +130,7 @@ unused_result_ok = "warn"
 # May cause issues with structured logging otherwise.
 literal_string_with_formatting_args = "allow"
 
-[patch.crates-io]
 # Match GPUI compatibility forks: workspace patches are not inherited.
-rusty-fork = { path = "../sotf-3rdparties/rusty-fork" }
-nalgebra = { path = "../sotf-3rdparties/nalgebra" }
 
 [profile.release]
 lto = true
