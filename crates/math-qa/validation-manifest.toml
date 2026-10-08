@@ -93,3 +93,12 @@ golden = "kautz_correction.json"
 test = "wolfram_kautz_correction"
 tolerance = "complex relative error <= 1e-9 (impulse DTFT <= 1e-6)"
 tier = "smoke"
+
+[[case]]
+id = "math-qa.sti.v1"
+owner = "math-rir"
+script = "sti.wls"
+golden = "sti.json"
+test = "wolfram_sti"
+tolerance = "MTF absolute <= 8e-2 impulse, 2.5e-2/1e-2/5e-3 at RT60 0.5/1/2 s; MTI/STI absolute <= 5e-3/2.5e-3/2e-3 (octave-filter transients)"
+tier = "smoke"

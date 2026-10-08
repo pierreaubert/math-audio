@@ -100,7 +100,7 @@ jobs:
         run: just qa
 
   coverage-gate:
-    name: Test Coverage Gate (90 %)
+    name: Test Coverage Gate (81 %)
     runs-on: ubuntu-latest
     needs: check-and-test
     steps:
@@ -124,4 +124,5 @@ jobs:
           key: ${{ runner.os }}-cargo-coverage-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Run coverage gate
-        run: cargo llvm-cov --summary-only --release --fail-under-lines 90 --ignore-filename-regex 'rustlib/src/rust|registry/src'
+        # Keep in sync with the `qa` recipe in Justfile (bins included).
+        run: cargo llvm-cov --summary-only --release --fail-under-lines 81 --ignore-filename-regex 'rustlib/src/rust|registry/src'

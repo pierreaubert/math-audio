@@ -35,7 +35,7 @@ pub(super) fn get_test_functions() -> Vec<(String, TestFunction)> {
     let mut functions = Vec::new();
 
     // Build function list from registry and metadata
-    for (name, _meta) in metadata.iter() {
+    for name in metadata.keys() {
         if let Some(func) = registry.get(name) {
             functions.push((name.clone(), func));
         } else {

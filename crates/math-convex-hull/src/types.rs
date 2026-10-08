@@ -270,3 +270,101 @@ impl ConvexHull3D {
         area
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const TOL: f64 = 1e-12;
+
+    fn assert_vertex_eq(actual: &Vertex, expected: &Vertex) {
+        assert!(
+            (actual.x - expected.x).abs() < TOL
+                && (actual.y - expected.y).abs() < TOL
+                && (actual.z - expected.z).abs() < TOL,
+            "expected {expected:?}, got {actual:?}"
+        );
+    }
+
+    #[test]
+    fn from_spherical_deg_matches_cardinal_axes() {
+        assert_vertex_eq(
+            &Vertex::from_spherical_deg(0.0, 0.0, 1.0),
+            &Vertex::new(1.0, 0.0, 0.0),
+        );
+        assert_vertex_eq(
+            &Vertex::from_spherical_deg(90.0, 0.0, 2.0),
+            &Vertex::new(0.0, 2.0, 0.0),
+        );
+        assert_vertex_eq(
+            &Vertex::from_spherical_deg(0.0, 90.0, 3.0),
+            &Vertex::new(0.0, 0.0, 3.0),
+        );
+    }
+
+    #[test]
+    fn normalize_degenerate_and_try_normalize() {
+        let zero = Vertex::new(0.0, 0.0, 0.0);
+        assert_eq!(zero.normalize(), zero);
+        assert_eq!(zero.try_normalize(), None);
+
+        let unit = Vertex::new(0.0, 3.0, 4.0)
+            .try_normalize()
+            .expect("non-zero vector normalizes");
+        assert_vertex_eq(&unit, &Vertex::new(0.0, 0.6, 0.8));
+    }
+
+    #[test]
+    fn add_noise_stays_within_half_epsilon_per_axis() {
+        let base = Vertex::new(1.0, -2.0, 0.5);
+        assert_eq!(base.add_noise(0.0), base);
+
+        let noisy = base.add_noise(0.1);
+        assert!((noisy.x - base.x).abs() <= 0.05 + TOL);
+        assert!((noisy.y - base.y).abs() <= 0.05 + TOL);
+        assert!((noisy.z - base.z).abs() <= 0.05 + TOL);
+    }
+
+    #[test]
+    fn display_formats_fixed_precision_tuple() {
+        let vertex = Vertex::new(1.0, -2.5, 0.125);
+        assert_eq!(format!("{vertex}"), "(1.000000, -2.500000, 0.125000)");
+    }
+
+    #[test]
+    fn face_indices_and_contains() {
+        let face = Face::new(2, 0, 1);
+        assert_eq!(face.indices(), [2, 0, 1]);
+        assert!(face.contains(0));
+        assert!(face.contains(2));
+        assert!(!face.contains(3));
+    }
+
+    #[test]
+    fn face_centroid_averages_corners() {
+        let vertices = vec![
+            Vertex::new(0.0, 0.0, 0.0),
+            Vertex::new(3.0, 0.0, 0.0),
+            Vertex::new(0.0, 3.0, 0.0),
+        ];
+        let centroid = Face::new(0, 1, 2).centroid(&vertices);
+        assert_vertex_eq(&centroid, &Vertex::new(1.0, 1.0, 0.0));
+    }
+
+    #[test]
+    fn face_visibility_matches_half_space() {
+        let vertices = vec![
+            Vertex::new(0.0, 0.0, 0.0),
+            Vertex::new(1.0, 0.0, 0.0),
+            Vertex::new(0.0, 1.0, 0.0),
+        ];
+        let face = Face::new(0, 1, 2);
+        let above = Vertex::new(0.25, 0.25, 1.0);
+        let below = Vertex::new(0.25, 0.25, -1.0);
+
+        assert!(face.is_visible_from_with_epsilon(&above, &vertices, 0.0));
+        assert!(!face.is_visible_from_with_epsilon(&below, &vertices, 0.0));
+        assert!(face.is_visible_from(&above, &vertices));
+        assert!(!face.is_visible_from(&below, &vertices));
+    }
+}

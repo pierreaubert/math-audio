@@ -92,7 +92,7 @@ fn callback_partitioning_produces_the_same_sample_stream() {
     let mut reference = input.clone();
     let mut streamed = input;
     one_block.process_interleaved(&mut reference, 256).unwrap();
-    for block in streamed.chunks_exact_mut(64) {
+    for block in streamed.as_chunks_mut::<64>().0 {
         partitioned.process_interleaved(block, 32).unwrap();
     }
     assert_eq!(reference, streamed);
@@ -128,7 +128,7 @@ fn automation_is_partition_independent_at_block_boundaries() {
     one_block
         .process_interleaved(&mut one_block_second, 96)
         .unwrap();
-    for block in partitioned_second.chunks_exact_mut(2 * 16) {
+    for block in partitioned_second.as_chunks_mut::<{ 2 * 16 }>().0 {
         partitioned.process_interleaved(block, 16).unwrap();
     }
 

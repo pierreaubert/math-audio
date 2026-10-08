@@ -623,7 +623,7 @@ mod tests {
         let expected_taps = [0.4, -0.2, 0.05, -0.13, 0.07, 0.03];
         let mut rhs = vec![0.; 80];
         // Independent direct convolution, including deliberately unmodellable guard noise.
-        for (order, taps) in expected_taps.chunks_exact(3).enumerate() {
+        for (order, taps) in expected_taps.as_chunks::<3>().0.iter().enumerate() {
             for (delay, tap) in taps.iter().enumerate() {
                 for (i, x) in input.iter().enumerate() {
                     rhs[i + delay] += tap * x.powi(order as i32 + 1);

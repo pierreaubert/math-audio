@@ -53,7 +53,9 @@ mod peq_tests {
         assert!(preamp.is_finite());
         assert!((-60.0..=0.0).contains(&preamp));
         let parameters: std::collections::BTreeMap<i32, f32> = payload[20..]
-            .chunks_exact(8)
+            .as_chunks::<8>()
+            .0
+            .iter()
             .map(|entry| {
                 (
                     i32::from_be_bytes(entry[..4].try_into().unwrap()),

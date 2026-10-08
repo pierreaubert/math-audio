@@ -318,7 +318,12 @@ alias qa-math := qa
 
 qa: qa-analog qa-autodiff qa-convex-hull qa-delaunay qa-dsp qa-iir-fir qa-optimisation qa-rir qa-test-functions qa-mathqa
 	{{cargo}} clippy --all --features plotly -- -D warnings
-	{{cargo}} llvm-cov --summary-only --release --fail-under-lines 90 --ignore-filename-regex 'rustlib/src/rust|registry/src'
+	# Aggregate backstop (lines %, bins included since 1389573, re-measured
+	# 2026-10-08 on stable: 82.19). The old 90 was calibrated for the
+	# --lib-only basis and is arithmetically unreachable once the largely
+	# untested bin targets count (cf. the dsp/optimisation ratchets above).
+	# Keep in sync with the coverage-gate job in .github/workflows/ci.yml.
+	{{cargo}} llvm-cov --summary-only --release --fail-under-lines 81 --ignore-filename-regex 'rustlib/src/rust|registry/src'
 
 # math-qa has no benches, so it gets a dedicated recipe instead of _qa.
 qa-mathqa:
@@ -332,7 +337,7 @@ qa-mathqa:
 
 # Smoke tier: contract + fast engine comparisons (skips without goldens).
 qa-mathqa-smoke:
-	{{cargo}} test -p math-qa --release --test qa_contract --test wolfram_biquad_response --test wolfram_fft_peak --test wolfram_schroeder_t60 --test wolfram_comb_first_dip --test wolfram_third_octave_spl --test wolfram_svf_response --test wolfram_test_functions --test wolfram_kautz_correction
+	{{cargo}} test -p math-qa --release --test qa_contract --test wolfram_biquad_response --test wolfram_fft_peak --test wolfram_schroeder_t60 --test wolfram_comb_first_dip --test wolfram_third_octave_spl --test wolfram_svf_response --test wolfram_test_functions --test wolfram_kautz_correction --test wolfram_sti
 
 # Deep tier: direct-summation spot comparisons (engine-heavy goldens).
 qa-mathqa-deep:

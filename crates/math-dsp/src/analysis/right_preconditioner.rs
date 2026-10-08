@@ -307,7 +307,7 @@ mod tests {
         let mut x = [0.; 3];
         mapped.apply(&g, &mut x).unwrap();
         // Direct triangular multiplication checks the solve without reusing its traversal.
-        for (row, expected) in factor.chunks_exact(3).zip(g) {
+        for (row, expected) in factor.as_chunks::<3>().0.iter().zip(g) {
             let actual: f64 = row.iter().zip(x).map(|(a, b)| a * b).sum();
             assert!((actual - expected).abs() < 1e-14);
         }

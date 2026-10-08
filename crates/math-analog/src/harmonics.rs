@@ -494,7 +494,7 @@ mod tests {
         model.set_drive_db(-60.0).unwrap();
         model.set_h2_db(0.0).unwrap();
         let mut samples = vec![0.0; 48_000];
-        for block in samples.chunks_exact_mut(128) {
+        for block in samples.as_chunks_mut::<128>().0 {
             model.process_interleaved(block, 128).unwrap();
         }
         assert!(samples[47_000].abs() < 0.05);

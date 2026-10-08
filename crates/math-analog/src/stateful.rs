@@ -924,7 +924,7 @@ mod tests {
             .unwrap();
         transformer.prepare(spec()).unwrap();
         let mut stereo = vec![0.0_f32; 2 * 128];
-        for frame in stereo.chunks_exact_mut(2) {
+        for frame in stereo.as_chunks_mut::<2>().0 {
             frame[0] = 0.25;
             frame[1] = -0.25;
         }
