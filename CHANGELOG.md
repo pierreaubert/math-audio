@@ -5,6 +5,9 @@ Per-crate details live in `crates/<name>/CHANGELOG.md`.
 
 ## [Unreleased]
 
+- `math-rir`: full indirect IR-only Speech Transmission Index using the
+  IEC 60268-16:2020 model, with 14 × 7 modulation transfer values and octave MTI.
+
 Work present in the tree but not yet committed or released:
 
 - `math-optimisation`: SACOBRA-style `cobra` surrogate constrained

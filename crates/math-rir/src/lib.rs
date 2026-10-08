@@ -70,6 +70,7 @@ pub mod metrics;
 mod mixing_time;
 pub mod report;
 mod segmentation;
+pub mod sti;
 mod types;
 
 #[path = "lib/analyze.rs"]
