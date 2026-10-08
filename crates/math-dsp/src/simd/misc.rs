@@ -160,7 +160,7 @@ pub fn deinterleave_stereo(input: &[f32], left: &mut [f32], right: &mut [f32]) {
     #[cfg(not(all(target_arch = "x86_64", target_feature = "avx2")))]
     {
         // Scalar fallback (compiler will auto-vectorize for NEON)
-        for (i, chunk) in input.chunks_exact(2).enumerate() {
+        for (i, chunk) in input.as_chunks::<2>().0.iter().enumerate() {
             left[i] = chunk[0];
             right[i] = chunk[1];
         }

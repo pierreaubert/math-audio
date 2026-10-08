@@ -52,7 +52,7 @@ pub(super) fn scalar_window_mul_inplace(data: &mut [f32], window: &[f32]) {
 }
 
 pub(super) fn scalar_deinterleave_stereo(input: &[f32], left: &mut [f32], right: &mut [f32]) {
-    for (i, chunk) in input.chunks_exact(2).enumerate() {
+    for (i, chunk) in input.as_chunks::<2>().0.iter().enumerate() {
         left[i] = chunk[0];
         right[i] = chunk[1];
     }
