@@ -8,6 +8,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- IEC 60268-16 direct-method STI test signals (`signals::sti`):
+  `gen_stipa_signal` / `gen_stipa_signal_seeded` (dual-modulated
+  composite) and `gen_full_sti_signal` /
+  `gen_full_sti_signal_seeded` (98 concatenated single-modulation
+  segments, modulation-major, optional silence gaps). Seeded pink
+  carriers filtered into the seven STI octaves with the same
+  zero-phase Butterworth recipe as `math_rir::bands`, standard
+  speech-spectrum weighting, active RMS normalized to 0.07.
 - Drift-correction + array primitives (`req-math-audio-capture.md`):
   `capture_tdoa` (C1 band-limited GCC chirp TDOA with matched/PHAT
   weighting and parabolic interpolation; C2 two-point clock skew with

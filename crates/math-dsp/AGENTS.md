@@ -6,7 +6,7 @@ DSP utilities for signal generation, analysis, and audio feature extraction.
 
 | Module | Description |
 |---|---|
-| `signals` | Signal generation: sine, two-tone, log sweep, white/pink/M noise, fade, padding, channel utils |
+| `signals` | Signal generation: sine, two-tone, log sweep, white/pink/M noise, STIPA/full-STI, fade, padding, channel utils |
 | `analysis` | FFT-based frequency analysis (Welch/single-FFT), acoustic metrics (RT60, C50/C80, THD), microphone compensation, CSV I/O |
 | `simd` | SIMD-optimized DSP operations |
 | `stft` | Short-Time Fourier Transform |

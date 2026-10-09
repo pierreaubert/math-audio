@@ -13,6 +13,7 @@ mod extract;
 mod gen_;
 mod misc;
 mod prepare;
+mod sti;
 #[cfg(test)]
 mod tests;
 mod tone_phasor_window;
@@ -23,5 +24,6 @@ pub use extract::*;
 pub use gen_::*;
 pub use misc::*;
 pub use prepare::*;
+pub use sti::*;
 pub use tone_phasor_window::*;
 pub use types::*;
