@@ -1,5 +1,11 @@
 <!-- markdownlint-disable-file MD013 -->
 
+# MERGED INTO [SONIUM](https://github.com/pierreaubert/sonium)
+
+This version is not maintained and will be deleted soon. Sonium is a
+large superset, faster, maintained, and powerfull. Note that Sonium is
+GPL and not ISC/MIT/APACHE2.
+
 # Math-Audio: a toolkit for audio applications
 
 Math-Audio is a Rust workspace of numerical computing libraries for audio
