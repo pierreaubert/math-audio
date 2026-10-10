@@ -82,6 +82,7 @@ hound = "3.5"
 
 # Testing
 proptest = "1.9"
+tempfile = "3.23"
 
 [workspace.lints.rust]
 ambiguous_negative_literals = "warn"

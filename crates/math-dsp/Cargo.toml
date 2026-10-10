@@ -21,6 +21,10 @@ path = "bin/wav2csv.rs"
 name = "simd-fuzzer"
 path = "bin/simd_fuzzer.rs"
 
+[[bin]]
+name = "generate-audio-tests"
+path = "bin/generate_audio_tests.rs"
+
 [dependencies]
 # FFT and math
 rustfft = { workspace = true }
@@ -38,6 +42,7 @@ math-iir-fir = { workspace = true }
 
 # ReplayGain / serialization
 serde = { workspace = true }
+serde_json = { workspace = true }
 sha2 = { workspace = true }
 
 # Utilities
@@ -51,6 +56,7 @@ approx = { workspace = true }
 serde_json = { workspace = true }
 proptest = { workspace = true }
 criterion = { workspace = true }
+tempfile = { workspace = true }
 
 [[bench]]
 name = "welch_spectrum"

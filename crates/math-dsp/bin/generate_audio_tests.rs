@@ -1,0 +1,153 @@
+//! Generate audio test files for end-to-end audio validation.
+//!
+//! Generates WAV files in multiple channel counts, sample rates and bit depths.
+//! Signals:
+//! - id: per-channel identification tones (unique frequency per channel)
+//! - thd1k: single-tone 1 kHz @ -3 dBFS (for THD)
+//! - thd100: single-tone 100 Hz @ -3 dBFS (low-frequency THD)
+//! - imd_smpte: SMPTE two-tone 60 Hz + 7 kHz (4:1 power ratio, 2:1 amplitude ratio)
+//! - imd_ccif: CCIF two-tone 19 kHz + 20 kHz (equal amplitudes)
+//! - sweep: logarithmic frequency sweep from 20 Hz to 20 kHz (10s fixed duration)
+//! - white_noise: white noise (flat spectrum)
+//! - pink_noise: pink noise (1/f spectrum, -3dB/octave)
+//! - m_noise: M-weighted noise (ITU-R 468 weighting for acoustic measurements)
+//! - stipa: STIPA direct-method intelligibility signal (IEC 60268-16)
+//! - full_sti: 98-segment full-STI signal, opt-in only (duration is per segment)
+
+use clap::Parser;
+use std::fs;
+
+#[path = "generate_audio_tests/consts.rs"]
+mod consts;
+#[path = "generate_audio_tests/gen_.rs"]
+mod gen_;
+#[path = "generate_audio_tests/generation_stats.rs"]
+mod generation_stats;
+#[path = "generate_audio_tests/misc.rs"]
+mod misc;
+#[path = "generate_audio_tests/signal_kind.rs"]
+mod signal_kind;
+#[cfg(test)]
+#[path = "generate_audio_tests/tests.rs"]
+mod tests;
+#[path = "generate_audio_tests/types.rs"]
+mod types;
+#[path = "generate_audio_tests/write.rs"]
+mod write;
+
+use consts::SWEEP_DURATION;
+use consts::generate_one;
+use generation_stats::GenerationStats;
+use signal_kind::SignalKind;
+use types::Cli;
+use write::write_manifest;
+
+fn main() {
+    let cli = Cli::parse();
+
+    // Validate bit depths
+    for &bits in &cli.bits {
+        if bits != 16 && bits != 24 {
+            eprintln!("Error: Bit depth must be 16 or 24, got {}", bits);
+            std::process::exit(1);
+        }
+    }
+
+    if !cli.sti_gap.is_finite() || cli.sti_gap < 0.0 {
+        eprintln!(
+            "Error: STI gap must be finite and non-negative, got {}",
+            cli.sti_gap
+        );
+        std::process::exit(1);
+    }
+
+    // If no signals specified, use all
+    let signals = if cli.signals.is_empty() {
+        SignalKind::all()
+    } else {
+        cli.signals.clone()
+    };
+
+    // Create output directory
+    if let Err(e) = fs::create_dir_all(&cli.out_dir) {
+        eprintln!("Error: Failed to create output directory: {}", e);
+        std::process::exit(1);
+    }
+
+    let mut stats = GenerationStats::new();
+    let mut manifest_files = Vec::new();
+
+    // Generate all combinations
+    for &signal in &signals {
+        for &channels in &cli.channels {
+            if !(1..=16).contains(&channels) {
+                eprintln!(
+                    "Warning: Channel count {} out of range [1,16], skipping",
+                    channels
+                );
+                stats.skipped += 1;
+                continue;
+            }
+
+            for &sr in &cli.sample_rates {
+                for &bits in &cli.bits {
+                    let duration = if signal == SignalKind::Sweep {
+                        SWEEP_DURATION
+                    } else {
+                        cli.duration
+                    };
+
+                    match generate_one(
+                        &cli.out_dir,
+                        signal,
+                        channels,
+                        sr,
+                        bits,
+                        duration,
+                        cli.sti_gap,
+                    ) {
+                        Ok(path) => {
+                            manifest_files.push(path.to_string_lossy().to_string());
+                            stats.generated += 1;
+                        }
+                        Err(e) => {
+                            if e.contains("Nyquist") || e.contains("skipped") {
+                                stats.skipped += 1;
+                            } else {
+                                eprintln!(
+                                    "Warning: Failed to generate {} ch{} sr{} b{}: {}",
+                                    signal.as_str(),
+                                    channels,
+                                    sr,
+                                    bits,
+                                    e
+                                );
+                                stats.failed += 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Write manifest
+    let manifest_path = cli.out_dir.join("manifest.json");
+    match write_manifest(&manifest_path, &manifest_files) {
+        Ok(_) => {
+            println!(
+                "\nGenerated {} files. Manifest: {}",
+                stats.generated,
+                manifest_path.display()
+            );
+        }
+        Err(e) => {
+            eprintln!("Warning: Failed to write manifest: {}", e);
+        }
+    }
+
+    println!(
+        "Summary: Generated: {}, Skipped: {}, Failed: {}",
+        stats.generated, stats.skipped, stats.failed
+    );
+}
