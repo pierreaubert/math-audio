@@ -47,6 +47,7 @@ prod: prod-workspace
 	{{cargo}} build --release --bin run-de -p math-optimisation
 	{{cargo}} build --release --bin wav2csv -p math-dsp
 	{{cargo}} build --release --bin simd-fuzzer -p math-dsp
+	{{cargo}} build --release --bin generate-audio-tests -p math-dsp
 	{{cargo}} build --release --bin benchmark-convergence -p math-optimisation
 	{{cargo}} build --release --bin benchmark-constrained -p math-optimisation
 

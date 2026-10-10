@@ -8,6 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `generate-audio-tests` binary (moved from `sotf-tools`): generates WAV
+  test signals (id, THD/IMD tones, sweep, white/pink/M noise,
+  STIPA/full-STI) with JSON sidecars and a manifest. Signal synthesis
+  now imports `math_audio_dsp::signals` directly instead of going
+  through the `sotf-engine` re-export.
 - IEC 60268-16 direct-method STI test signals (`signals::sti`):
   `gen_stipa_signal` / `gen_stipa_signal_seeded` (dual-modulated
   composite) and `gen_full_sti_signal` /
@@ -94,6 +99,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `DualWindowStft` latency, FDN per-line T60 gains, DC-bin consistency,
   malformed CSV errors, f32 tone phase growth, LCG high bits, pink-noise
   RMS).
+- `signals::sti`: fixed a time-base bug that multiplied a
+  radians-per-sample omega by seconds time, freezing the modulation
+  envelope (emitted STIPA/full-STI signals carried no modulation).
+  Both generators now phase from the sample index; emitted bytes
+  change accordingly. Regression tests demodulate the emitted
+  signals and check the sent depths (0.55 STIPA, 1.0 full-STI).
 
 ### Performance
 - Faster FDW Morlet kernels (~1.7–2.5×), ReplayGain (~3.2×), peak-only

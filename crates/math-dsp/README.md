@@ -183,6 +183,17 @@ let loaded = read_analysis_csv(Path::new("output.csv"))?;
 
 ## Binaries
 
+### `generate-audio-tests`
+
+Generate WAV test files in multiple channel counts, sample rates, and bit
+depths for end-to-end audio validation (id tones, THD/IMD tones, log sweep,
+white/pink/M noise, STIPA/full-STI). Each file gets a JSON sidecar with
+signal metadata, plus a `manifest.json` index.
+
+```bash
+cargo run --bin generate-audio-tests --release -- --signals sweep,pink-noise
+```
+
 ### `simd-fuzzer`
 
 Fuzz testing tool for SIMD-optimized DSP operations. Validates SIMD implementations against scalar reference code.

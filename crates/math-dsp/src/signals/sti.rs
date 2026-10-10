@@ -239,8 +239,11 @@ pub fn gen_stipa_signal_seeded(sample_rate: u32, duration: f32, seed: u64) -> Ve
         let omega_low = std::f64::consts::TAU * low_fm / sample_rate_f64;
         let omega_high = std::f64::consts::TAU * high_fm / sample_rate_f64;
         for (n, sample) in signal.iter_mut().enumerate() {
-            let time = n as f64 / sample_rate_f64;
-            let beating = (omega_low * time).sin() - (omega_high * time).sin();
+            // Omega is radians per sample: the phase variable is the
+            // sample index. Seconds here would divide by the sample rate
+            // a second time and freeze the envelope (see §10).
+            let index = n as f64;
+            let beating = (omega_low * index).sin() - (omega_high * index).sin();
             let envelope = (0.5 * (1.0 + STIPA_MODULATION_DEPTH * beating).max(0.0)).sqrt();
             *sample += (f64::from(carrier[n]) * envelope * gain) as f32;
         }
@@ -332,8 +335,9 @@ pub fn gen_full_sti_signal_seeded(
         for (band, carrier) in carriers.iter().enumerate() {
             let gain = band_level_gain(band);
             for (n, &carrier_sample) in carrier.iter().enumerate() {
-                let time = n as f64 / sample_rate_f64;
-                let envelope = (0.5 * (1.0 + (omega * time).cos())).sqrt();
+                // Radians per sample: phase from the sample index (see §10).
+                let index = n as f64;
+                let envelope = (0.5 * (1.0 + (omega * index).cos())).sqrt();
                 let sample = f64::from(carrier_sample) * envelope * gain;
                 sum_squares += sample * sample;
                 signal.push(sample as f32);
@@ -362,6 +366,76 @@ mod tests {
 
     fn rms_of(signal: &[f32]) -> f64 {
         active_rms(signal, signal.len())
+    }
+
+    /// Zero-phase octave bandpass of `signal` around `center_hz`.
+    fn bandpass_octave(signal: &[f32], center_hz: f64, sample_rate: u32) -> Vec<f64> {
+        let (low, high) = octave_band_edges(center_hz);
+        let mut sections = filtfilt::peq_to_coefficients(&peq_butterworth_highpass(
+            STI_FILTER_ORDER,
+            low.max(1.0),
+            f64::from(sample_rate),
+        ));
+        sections.extend(filtfilt::peq_to_coefficients(&peq_butterworth_lowpass(
+            STI_FILTER_ORDER,
+            high.min(f64::from(sample_rate) * 0.5 * 0.99),
+            f64::from(sample_rate),
+        )));
+        let input: Vec<f64> = signal.iter().map(|&v| f64::from(v)).collect();
+        filtfilt::filtfilt(&input, &sections)
+    }
+
+    /// Least-squares modulation depth of a squared band signal at `fm_hz`.
+    ///
+    /// Fits `c + a·cos(2π·fm·t) + b·sin(2π·fm·t)` over the samples and
+    /// returns `hypot(a, b) / c`, the same least-squares demodulation the
+    /// direct-method analyzer applies per modulation frequency.
+    fn fitted_depth(squared: &[f64], fm_hz: f64, sample_rate: u32) -> f64 {
+        let sample_rate_f64 = f64::from(sample_rate);
+        // Radians per sample; the phase variable is the sample index.
+        let omega = std::f64::consts::TAU * fm_hz / sample_rate_f64;
+        let mut normal = [[0.0_f64; 4]; 3];
+        for (n, &value) in squared.iter().enumerate() {
+            let phase = omega * (n as f64);
+            let basis = [1.0, phase.cos(), phase.sin()];
+            for row in 0..3 {
+                for col in 0..3 {
+                    normal[row][col] += basis[row] * basis[col];
+                }
+                normal[row][3] += basis[row] * value;
+            }
+        }
+        for pivot in 0..3 {
+            let mut best = pivot;
+            for (row, equation) in normal.iter().enumerate().skip(pivot + 1) {
+                if equation[pivot].abs() > normal[best][pivot].abs() {
+                    best = row;
+                }
+            }
+            normal.swap(pivot, best);
+            let divisor = normal[pivot][pivot];
+            assert!(
+                divisor.abs() > 0.0,
+                "singular modulation basis at {fm_hz} Hz"
+            );
+            let pivot_row = normal[pivot];
+            let (_, below) = normal.split_at_mut(pivot + 1);
+            for equation in below.iter_mut() {
+                let factor = equation[pivot] / divisor;
+                for (entry, &pivot_entry) in equation.iter_mut().zip(pivot_row.iter()).skip(pivot) {
+                    *entry -= factor * pivot_entry;
+                }
+            }
+        }
+        let mut beta = [0.0_f64; 3];
+        for row in (0..3).rev() {
+            let mut value = normal[row][3];
+            for col in row + 1..3 {
+                value -= normal[row][col] * beta[col];
+            }
+            beta[row] = value / normal[row][row];
+        }
+        beta[1].hypot(beta[2]) / beta[0]
     }
 
     #[test]
@@ -408,19 +482,7 @@ mod tests {
         let body = &signal[trim..signal.len() - trim];
         let total: f64 = body.iter().map(|&v| f64::from(v).powi(2)).sum();
         for (band, &center) in STI_OCTAVE_CENTERS_HZ.iter().enumerate() {
-            let (low, high) = octave_band_edges(center);
-            let mut sections = filtfilt::peq_to_coefficients(&peq_butterworth_highpass(
-                STI_FILTER_ORDER,
-                low.max(1.0),
-                f64::from(SHORT_RATE),
-            ));
-            sections.extend(filtfilt::peq_to_coefficients(&peq_butterworth_lowpass(
-                STI_FILTER_ORDER,
-                high.min(f64::from(SHORT_RATE) * 0.5 * 0.99),
-                f64::from(SHORT_RATE),
-            )));
-            let input: Vec<f64> = body.iter().map(|&v| f64::from(v)).collect();
-            let band_energy: f64 = filtfilt::filtfilt(&input, &sections)
+            let band_energy: f64 = bandpass_octave(body, center, SHORT_RATE)
                 .iter()
                 .map(|v| v.powi(2))
                 .sum();
@@ -478,19 +540,7 @@ mod tests {
             let energies: Vec<f64> = STI_OCTAVE_CENTERS_HZ
                 .iter()
                 .map(|&center| {
-                    let (low, high) = octave_band_edges(center);
-                    let mut sections = filtfilt::peq_to_coefficients(&peq_butterworth_highpass(
-                        STI_FILTER_ORDER,
-                        low.max(1.0),
-                        f64::from(SHORT_RATE),
-                    ));
-                    sections.extend(filtfilt::peq_to_coefficients(&peq_butterworth_lowpass(
-                        STI_FILTER_ORDER,
-                        high.min(f64::from(SHORT_RATE) * 0.5 * 0.99),
-                        f64::from(SHORT_RATE),
-                    )));
-                    let input: Vec<f64> = body.iter().map(|&v| f64::from(v)).collect();
-                    filtfilt::filtfilt(&input, &sections)
+                    bandpass_octave(body, center, SHORT_RATE)
                         .iter()
                         .map(|v| v.powi(2))
                         .sum()
@@ -528,6 +578,57 @@ mod tests {
         assert_eq!(
             tight.len(),
             STI_FULL_SEGMENT_COUNT * frames_for(0.1, SHORT_RATE)
+        );
+    }
+
+    #[test]
+    fn stipa_bands_carry_sent_modulation_depth() {
+        // Regression test for requirements §10: the generators once
+        // multiplied a radians-per-sample omega by seconds time, which
+        // froze the envelope. Demodulate every band of the emission and
+        // check both sent depths against the 0.55 design value.
+        const DURATION_S: f32 = 30.0;
+        let signal = gen_stipa_signal_seeded(SHORT_RATE, DURATION_S, 11);
+        let trim = SHORT_RATE as usize / 4;
+        let body = &signal[trim..signal.len() - trim];
+        for (band, &center) in STI_OCTAVE_CENTERS_HZ.iter().enumerate() {
+            let squared: Vec<f64> = bandpass_octave(body, center, SHORT_RATE)
+                .iter()
+                .map(|v| v.powi(2))
+                .collect();
+            for &fm in &STIPA_MODULATION_FREQUENCIES_HZ[band] {
+                let depth = fitted_depth(&squared, fm, SHORT_RATE);
+                assert!(
+                    (0.3..0.8).contains(&depth),
+                    "band {center} Hz fm {fm}: depth {depth:.3}, expected ~0.55"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn full_sti_segments_carry_sent_modulation_depth() {
+        // Full-STI segments send full modulation (intensity depth 1.0).
+        // Segments are single-band by construction, so no test-side
+        // bandpass is needed: square each segment and fit its sent fm.
+        // Short windows make single-segment estimates noisy; the mean
+        // over all 98 segments is the robust statistic.
+        const SEGMENT_S: f32 = 1.0;
+        let signal = gen_full_sti_signal_seeded(SHORT_RATE, SEGMENT_S, 0.0, 12);
+        let segment_frames = frames_for(SEGMENT_S, SHORT_RATE);
+        let trim = SHORT_RATE as usize / 10;
+        let mut sum = 0.0_f64;
+        for segment in 0..STI_FULL_SEGMENT_COUNT {
+            let start = segment * segment_frames;
+            let body = &signal[start + trim..start + segment_frames - trim];
+            let squared: Vec<f64> = body.iter().map(|&v| f64::from(v).powi(2)).collect();
+            let fm = STI_FULL_MODULATION_FREQUENCIES_HZ[segment / 7];
+            sum += fitted_depth(&squared, fm, SHORT_RATE);
+        }
+        let mean = sum / STI_FULL_SEGMENT_COUNT as f64;
+        assert!(
+            (0.8..1.2).contains(&mean),
+            "mean segment depth {mean:.3}, expected ~1.0"
         );
     }
 }

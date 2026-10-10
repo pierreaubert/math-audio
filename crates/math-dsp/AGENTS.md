@@ -24,6 +24,7 @@ DSP utilities for signal generation, analysis, and audio feature extraction.
 
 ## Binaries
 
+- `generate-audio-tests` -- Generate WAV test signals + JSON sidecars for validation
 - `wav2csv` -- Convert WAV files to CSV (frequency/SPL/phase)
 - `simd-fuzzer` -- SIMD fuzzing test tool
 

@@ -164,7 +164,7 @@ fn energy_modulation(energy: &[f64], total: f64, frequency: f64, sample_rate: f6
     (real.hypot(imag) / total).clamp(0.0, 1.0)
 }
 
-fn transmission_index(m: f64) -> f64 {
+pub(crate) fn transmission_index(m: f64) -> f64 {
     // IEC Annex A: apparent SNR = 10 log10(m/(1-m)), clipped at ±15 dB.
     if m <= 0.0 {
         return 0.0;
@@ -175,7 +175,7 @@ fn transmission_index(m: f64) -> f64 {
     ((10.0 * (m / (1.0 - m)).log10()).clamp(-15.0, 15.0) + 15.0) / 30.0
 }
 
-fn combine_mti(mti: &[f64; 7]) -> f64 {
+pub(crate) fn combine_mti(mti: &[f64; 7]) -> f64 {
     let weighted: f64 = STI_ALPHA.iter().zip(mti).map(|(a, m)| a * m).sum();
     let redundancy: f64 = STI_BETA
         .iter()

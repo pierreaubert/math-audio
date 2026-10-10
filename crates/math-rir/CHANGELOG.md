@@ -19,6 +19,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   merged reflections and admitted smoothing-ripple crests on decay tails.
 
 ### Added
+- `sti_direct` module (`requirements-stipa-direct-math-audio.md`):
+  direct-method STIPA scoring of a recorded test signal
+  (`analyze_stipa_direct` with optional loopback reference), sharing
+  the `sti` module's transmission-index and Annex A helpers. Without a
+  reference, depths compare against the 0.55 sent depth of the
+  `math-dsp` STIPA generator; a loopback reference is preferred
+  because it cancels generator coloration and sideband cutting.
 - `Iso3382Metrics::quality_verdict()` returning an `Iso3382QualityVerdict`
   (`usable`, `decay_fits_valid`, `finite_metric_count`, `issues`),
   aggregating the NaN-sentinel and r² acceptance checks into one verdict
