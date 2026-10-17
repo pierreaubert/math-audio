@@ -19,7 +19,11 @@
 //!   `20·log10(peak / direct_peak)` (dB, 0 dB = direct).
 //! - Peak picking: envelope/peak — local maxima of a centred moving-average
 //!   envelope of `|bandpassed|` ([`ENVELOPE_SMOOTH_MS`] wide) in
-//!   `(direct, direct + window]` above `threshold_db` below the direct peak,
+//!   `(direct, direct + window]` above `threshold_db` below the direct
+//!   envelope peak (the threshold lives in the envelope domain: comparing
+//!   envelope averages to the direct waveform peak would reject every
+//!   reflection in a sparse deconvolved IR, whose direct burst envelope
+//!   sits far below its own peak),
 //!   with a minimum separation of `min_separation_ms` (greedy, loudest
 //!   first), each refined to the nearest `|bandpassed|` maximum for timing
 //!   (refinement never reaches back into the direct exclusion, and the
@@ -210,7 +214,6 @@ pub fn early_reflection_table(
         return empty;
     }
 
-    let threshold_lin = 10.0f64.powf(-config.threshold_db / 20.0) * f64::from(direct_peak);
     let min_sep = ((config.min_separation_ms * sample_rate / 1000.0).round() as usize).max(1);
     let exclusion = (DIRECT_EXCLUSION_MS * sample_rate / 1000.0).round() as usize;
     let win_end = (direct_sample as f64 + config.window_ms * sample_rate / 1000.0).round() as usize;
@@ -236,11 +239,18 @@ pub fn early_reflection_table(
         (prefix[b] - prefix[a]) / (b - a).max(1) as f64
     };
     let mut envelope = vec![0.0f64; filtered.len()];
-    let e0 = win_start.saturating_sub(env_half);
+    // The envelope must cover the direct burst too: the candidate threshold
+    // is defined against the direct envelope peak (see module docs).
+    let e0 = direct_sample.saturating_sub(search + env_half);
     let e1 = (win_end + env_half).min(filtered.len());
     for (i, slot) in envelope.iter_mut().enumerate().take(e1).skip(e0) {
         *slot = boxcar(i);
     }
+    let direct_env_peak = envelope[lo..hi].iter().copied().fold(0.0f64, f64::max);
+    if direct_env_peak <= 0.0 || !direct_env_peak.is_finite() {
+        return empty;
+    }
+    let threshold_lin = 10.0f64.powf(-config.threshold_db / 20.0) * direct_env_peak;
     // Local maxima of the envelope (plateau → first index) above threshold.
     let mut candidates: Vec<(usize, f64)> = Vec::new();
     if win_end > win_start + 1 {
@@ -434,6 +444,28 @@ mod tests {
             (r.comb_ripple_db - 9.54).abs() < 0.6,
             "ripple = {}",
             r.comb_ripple_db
+        );
+    }
+
+    #[test]
+    fn picks_sparse_delta_reflection() {
+        // A deconvolved IR is sparse: direct and reflection are short
+        // bandpass bursts whose 1 ms envelope sits far below their peaks.
+        // The candidate threshold must live in the envelope domain or no
+        // reflection can ever pass it.
+        let sr = 48000.0;
+        let mut rir = vec![0.0f32; 4800];
+        rir[480] = 1.0;
+        rir[480 + 240] = 0.5; // 5 ms later at -6 dB
+        let table = early_reflection_table(&rir, sr, &ReflectionTableConfig::default());
+        assert_eq!(table.direct_sample, 480);
+        assert!(
+            table
+                .reflections
+                .iter()
+                .any(|r| (r.delay_ms - 5.0).abs() < 0.25 && (r.gain_db + 6.0).abs() < 1.5),
+            "reflections = {:?}",
+            table.reflections
         );
     }
 
