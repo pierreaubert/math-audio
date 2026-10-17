@@ -120,6 +120,10 @@ impl FitCapture {
     pub fn len(&self) -> usize {
         self.stimulus.len()
     }
+
+    pub fn is_empty(&self) -> bool {
+        self.stimulus.is_empty()
+    }
 }
 
 /// Captured records split into optimizer-visible training material and fully
