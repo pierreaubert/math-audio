@@ -7,6 +7,18 @@ Per-crate details live in `crates/<name>/CHANGELOG.md`.
 
 Work present in the tree but not yet committed or released:
 
+- `math-rir`: early-reflection picker threshold now lives in the envelope
+  domain (relative to the direct burst's envelope peak instead of its
+  waveform peak). The old comparison rejected every reflection in sparse
+  deconvolved IRs, whose direct envelope sits far below its peak; gains
+  remain reported relative to the direct peak.
+- `math-rir`: the STIPA analytical-MTF test no longer effectively hangs
+  in debug builds: its fixture convolution is FFT-based (was a naive
+  ~5e9-operation double loop per channel) and the 64 independent channel
+  realizations run in parallel via rayon. Assertions, realization count,
+  and tolerances are unchanged; the test now completes in ~1 minute in
+  debug instead of running for tens of minutes.
+
 - `math-optimisation`: SACOBRA-style `cobra` surrogate constrained
   optimiser, single-trust-region constrained BO arm, shared
   `RbfSurrogate` models, CMA-ES native inequality constraints with

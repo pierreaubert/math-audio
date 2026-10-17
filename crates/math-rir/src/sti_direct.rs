@@ -577,13 +577,40 @@ mod tests {
                 (f64::from(tap) * (-decay * time).exp()) as f32
             })
             .collect();
-        let mut out = vec![0.0_f32; signal.len() + ir.len() - 1];
-        for (i, &sample) in signal.iter().enumerate() {
-            for (j, &tap) in ir.iter().enumerate() {
-                out[i + j] += sample * tap;
-            }
+        fft_convolve(signal, &ir)
+    }
+
+    /// Full linear convolution via FFT (f64 accumulation).
+    ///
+    /// The naive double loop needs ~5e9 multiply-adds per fixture channel
+    /// at RT60 0.6, which made the analytical-MTF test take minutes in
+    /// release and effectively forever in debug builds.
+    fn fft_convolve(signal: &[f32], ir: &[f32]) -> Vec<f32> {
+        use rustfft::{FftPlanner, num_complex::Complex};
+        let out_len = signal.len() + ir.len() - 1;
+        let size = out_len.next_power_of_two();
+        let mut planner = FftPlanner::<f64>::new();
+        let mut a: Vec<Complex<f64>> = signal
+            .iter()
+            .map(|&sample| Complex::new(f64::from(sample), 0.0))
+            .collect();
+        a.resize(size, Complex::default());
+        let mut b: Vec<Complex<f64>> = ir
+            .iter()
+            .map(|&tap| Complex::new(f64::from(tap), 0.0))
+            .collect();
+        b.resize(size, Complex::default());
+        planner.plan_fft_forward(size).process(&mut a);
+        planner.plan_fft_forward(size).process(&mut b);
+        for (x, y) in a.iter_mut().zip(&b) {
+            *x *= *y;
         }
-        out
+        planner.plan_fft_inverse(size).process(&mut a);
+        let scale = 1.0 / size as f64;
+        a[..out_len]
+            .iter()
+            .map(|value| (value.re * scale) as f32)
+            .collect()
     }
 
     /// Add one realization's transfer cells into running totals.
@@ -665,12 +692,15 @@ mod tests {
 
     #[test]
     fn stipa_synthetic_channel_matches_analytical_mtf() {
-        // About five minutes in release (naive convolution dominates); the
-        // repo gates run release builds only.
+        use rayon::prelude::*;
         let options = StipaOptions::default();
         let crop_start = TEST_RATE_HZ.round() as usize;
         let crop_len = (10.5 * TEST_RATE_HZ).round() as usize;
+        // Realizations are independent; run them in parallel so the test
+        // stays practical in debug builds. Collection preserves index
+        // order, so the means below are unchanged.
         let sources: Vec<Vec<f32>> = (0..CHANNEL_REALIZATIONS)
+            .into_par_iter()
             .map(|realization| {
                 stipa_like_fixture(TEST_RATE_HZ, 12.0, FIXTURE_SEED + realization as u64)
             })
@@ -684,24 +714,31 @@ mod tests {
             let mut ref_sum = [[0.0; 2]; 7];
             let mut noref_sti_sum = 0.0;
             let mut ref_sti_sum = 0.0;
-            for (realization, source) in sources.iter().enumerate() {
-                let reference = source[crop_start..crop_start + crop_len].to_vec();
-                let recording = if rt60 <= 0.0 {
-                    reference.clone()
-                } else {
-                    let decayed = convolve_exponential_decay(
-                        source,
-                        TEST_RATE_HZ,
-                        rt60,
-                        IR_SEED_BASE + realization as u64,
-                    );
-                    decayed[crop_start..crop_start + crop_len].to_vec()
-                };
-                let absolute =
-                    analyze_stipa_direct(&recording, None, TEST_RATE_HZ, &options).unwrap();
-                let with_reference =
-                    analyze_stipa_direct(&recording, Some(&reference), TEST_RATE_HZ, &options)
-                        .unwrap();
+            let outcomes: Vec<(StipaDirectResult, StipaDirectResult)> = sources
+                .par_iter()
+                .enumerate()
+                .map(|(realization, source)| {
+                    let reference = source[crop_start..crop_start + crop_len].to_vec();
+                    let recording = if rt60 <= 0.0 {
+                        reference.clone()
+                    } else {
+                        let decayed = convolve_exponential_decay(
+                            source,
+                            TEST_RATE_HZ,
+                            rt60,
+                            IR_SEED_BASE + realization as u64,
+                        );
+                        decayed[crop_start..crop_start + crop_len].to_vec()
+                    };
+                    let absolute =
+                        analyze_stipa_direct(&recording, None, TEST_RATE_HZ, &options).unwrap();
+                    let with_reference =
+                        analyze_stipa_direct(&recording, Some(&reference), TEST_RATE_HZ, &options)
+                            .unwrap();
+                    (absolute, with_reference)
+                })
+                .collect();
+            for (realization, (absolute, with_reference)) in outcomes.iter().enumerate() {
                 if realization == 0 {
                     assert!((absolute.analysis_duration_s - 10.0).abs() < 1e-3);
                 }
