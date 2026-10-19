@@ -1,6 +1,6 @@
 [package]
 name = "math-rir"
-version = "0.5.12"
+version = "0.5.13"
 edition = { workspace = true }
 authors = { workspace = true }
 description = "Room Impulse Response analysis: SSIR segmentation, ISO 3382 reverberation/clarity metrics, octave-band filtering"
@@ -18,6 +18,7 @@ math-iir-fir = { workspace = true }
 rayon = { workspace = true }
 
 [dev-dependencies]
+stats_alloc = "0.1"
 proptest = { workspace = true }
 criterion = { workspace = true }
 rustfft = { workspace = true }

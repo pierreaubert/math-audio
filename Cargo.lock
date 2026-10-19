@@ -970,10 +970,11 @@ checksum = "f9f8bd3e56ce4dfc153cf470fffbfa98c7620958b312ca5c3a4b8d5181fd13c6"
 
 [[package]]
 name = "math-analog"
-version = "0.5.4"
+version = "0.5.5"
 dependencies = [
  "approx",
  "criterion",
+ "libc",
  "math-dsp",
  "math-iir-fir",
  "math-optimisation",
@@ -1004,15 +1005,15 @@ dependencies = [
 
 [[package]]
 name = "math-convex-hull"
-version = "0.3.3"
+version = "0.3.4"
 dependencies = [
  "criterion",
- "directories",
  "log",
  "proptest",
  "rand",
  "rayon",
  "serde",
+ "tempfile",
  "thiserror",
 ]
 
@@ -1027,7 +1028,7 @@ dependencies = [
 
 [[package]]
 name = "math-dsp"
-version = "0.5.34"
+version = "0.5.35"
 dependencies = [
  "approx",
  "clap",
@@ -1047,12 +1048,13 @@ dependencies = [
  "serde_json",
  "sha2",
  "sotf-nalgebra",
+ "stats_alloc",
  "tempfile",
 ]
 
 [[package]]
 name = "math-iir-fir"
-version = "0.5.26"
+version = "0.5.27"
 dependencies = [
  "base64",
  "byteorder",
@@ -1065,6 +1067,7 @@ dependencies = [
  "rustfft",
  "serde",
  "serde_json",
+ "stats_alloc",
  "thiserror",
 ]
 
@@ -1092,7 +1095,7 @@ dependencies = [
 
 [[package]]
 name = "math-qa"
-version = "0.5.3"
+version = "0.5.4"
 dependencies = [
  "math-dsp",
  "math-iir-fir",
@@ -1108,13 +1111,14 @@ dependencies = [
 
 [[package]]
 name = "math-rir"
-version = "0.5.12"
+version = "0.5.13"
 dependencies = [
  "criterion",
  "math-iir-fir",
  "proptest",
  "rayon",
  "rustfft",
+ "stats_alloc",
 ]
 
 [[package]]

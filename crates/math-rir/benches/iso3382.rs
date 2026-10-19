@@ -1,4 +1,5 @@
 use criterion::{Criterion, criterion_group, criterion_main};
+use math_rir::bands::{BandAnalysisContext, BandWidth, analyze_iso3382_bands_with_pool};
 use math_rir::{analyze_iso3382, analyze_iso3382_octaves, analyze_iso3382_third_octaves};
 use std::hint::black_box;
 
@@ -33,10 +34,45 @@ fn bench_iso3382_third_octaves(c: &mut Criterion) {
     });
 }
 
+fn bench_workspace_matrix(c: &mut Criterion) {
+    let bands = [125.0, 250.0, 500.0, 1000.0, 2000.0, 4000.0];
+    let mut group = c.benchmark_group("iso3382_workspace_pool");
+    for length in [4800, 48000, 480000] {
+        let signal: Vec<_> = (0..length)
+            .map(|n| {
+                ((n as f64 * 0.13).sin()
+                    * (-3.0 * std::f64::consts::LN_10 * n as f64 / 48000.0).exp())
+                    as f32
+            })
+            .collect();
+        for pool_size in [1, 2, 6] {
+            let mut contexts: Vec<_> = (0..pool_size).map(|_| BandAnalysisContext::new()).collect();
+            group.bench_with_input(
+                criterion::BenchmarkId::new(format!("pool{pool_size}"), length),
+                &length,
+                |b, _| {
+                    b.iter(|| {
+                        black_box(analyze_iso3382_bands_with_pool(
+                            black_box(&signal),
+                            48000.0,
+                            &bands,
+                            BandWidth::Octave,
+                            4,
+                            &mut contexts,
+                        ))
+                    })
+                },
+            );
+        }
+    }
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_iso3382_broadband,
     bench_iso3382_octaves,
-    bench_iso3382_third_octaves
+    bench_iso3382_third_octaves,
+    bench_workspace_matrix
 );
 criterion_main!(benches);

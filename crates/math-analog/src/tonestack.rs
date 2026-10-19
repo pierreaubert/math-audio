@@ -536,6 +536,19 @@ impl ToneStackModel {
         let output_gain = db_to_gain(self.output_gain_db.advance());
         let amount = self.amount.advance();
         let mix = self.mix.advance();
+        // Every channel shares the value set, sample rate, and smoothed knob
+        // trajectory. Build this identical design once; retain independent
+        // capacitor, defect, and DC-blocker states for each audio channel.
+        if let Some(first) = self.channels.first_mut()
+            && first.retune(treble, mid, bass, first.sample_rate, first.values, false)
+        {
+            let (filter, built_knobs) = (first.filter, first.built_knobs);
+            for channel in self.channels.iter_mut().skip(1) {
+                channel.filter = filter;
+                channel.built_knobs = built_knobs;
+            }
+        }
+
         let input_sum = frame
             .iter()
             .take(channels)
@@ -548,14 +561,7 @@ impl ToneStackModel {
             } else {
                 0.0
             };
-            let shaped = self.channels[channel].process(
-                dry,
-                treble,
-                mid,
-                bass,
-                output_gain,
-                crosstalk_input,
-            );
+            let shaped = self.channels[channel].process(dry, output_gain, crosstalk_input);
             let effected = dry + amount * (shaped - dry);
             *sample = finite_output(dry + mix * (effected - dry));
         }
@@ -668,7 +674,7 @@ impl ToneStackChannelState {
         self.retune(0.5, 0.5, 0.5, sample_rate, values, true);
     }
 
-    /// Retune the filter when smoothed knobs moved (or `force`).
+    /// Retune and report whether the shared coefficient design changed.
     fn retune(
         &mut self,
         treble: f32,
@@ -677,13 +683,13 @@ impl ToneStackChannelState {
         sample_rate: f32,
         values: ToneStackValues,
         force: bool,
-    ) {
+    ) -> bool {
         let moved = force
             || (treble - self.built_knobs.0).abs() > REBUILD_EPSILON
             || (mid - self.built_knobs.1).abs() > REBUILD_EPSILON
             || (bass - self.built_knobs.2).abs() > REBUILD_EPSILON;
         if !moved {
-            return;
+            return false;
         }
         if let Some(filter) = build_filter(
             f64::from(treble),
@@ -694,21 +700,14 @@ impl ToneStackChannelState {
         ) {
             self.filter = filter;
             self.built_knobs = (treble, mid, bass);
+            true
+        } else {
+            false
         }
     }
 
     #[inline]
-    #[allow(clippy::too_many_arguments)]
-    fn process(
-        &mut self,
-        input: f32,
-        treble: f32,
-        mid: f32,
-        bass: f32,
-        output_gain: f32,
-        crosstalk_input: f32,
-    ) -> f32 {
-        self.retune(treble, mid, bass, self.sample_rate, self.values, false);
+    fn process(&mut self, input: f32, output_gain: f32, crosstalk_input: f32) -> f32 {
         let [x0, x1, x2] = self.state;
         let output = self.filter.cd[0] * x0
             + self.filter.cd[1] * x1
@@ -740,6 +739,69 @@ mod tests {
     use crate::AnalogModel;
     use crate::analysis::measure_harmonics;
     use std::f32::consts::TAU;
+
+    #[test]
+    fn multichannel_retuning_matches_independent_mono_histories() {
+        const CHANNELS: usize = 12;
+        let mut multi = ToneStackModel::new();
+        multi
+            .prepare(ProcessSpec::new(48000.0, CHANNELS, 256))
+            .unwrap();
+        let mut mono: Vec<_> = (0..CHANNELS)
+            .map(|_| {
+                let mut model = ToneStackModel::new();
+                model.prepare(ProcessSpec::new(48000.0, 1, 256)).unwrap();
+                model
+            })
+            .collect();
+        for stage in 0..6 {
+            if stage == 1 {
+                multi.set_treble(0.9).unwrap();
+                for model in &mut mono {
+                    model.set_treble(0.9).unwrap();
+                }
+            }
+            if stage == 3 {
+                multi.reset();
+                for model in &mut mono {
+                    model.reset();
+                }
+            }
+            if stage == 4 {
+                multi.set_values(ToneStackValues::Production);
+                multi.set_bass(0.1).unwrap();
+                for model in &mut mono {
+                    model.set_values(ToneStackValues::Production);
+                    model.set_bass(0.1).unwrap();
+                }
+            }
+            let mut reference: Vec<Vec<f32>> = (0..CHANNELS)
+                .map(|channel| {
+                    (0..256)
+                        .map(|frame| {
+                            ((stage * 256 + frame) as f32 * 0.173 + channel as f32 * 0.31).sin()
+                                * 0.5
+                        })
+                        .collect()
+                })
+                .collect();
+            let mut interleaved: Vec<f32> = (0..256)
+                .flat_map(|frame| reference.iter().map(move |channel| channel[frame]))
+                .collect();
+            multi.process_interleaved(&mut interleaved, 256).unwrap();
+            for (model, samples) in mono.iter_mut().zip(&mut reference) {
+                model.process_interleaved(samples, 256).unwrap();
+            }
+            for frame in 0..256 {
+                for channel in 0..CHANNELS {
+                    assert_eq!(
+                        interleaved[frame * CHANNELS + channel],
+                        reference[channel][frame]
+                    );
+                }
+            }
+        }
+    }
 
     /// Yeh & Smith DAFx-06 symbolic transfer-function magnitude in dB.
     ///

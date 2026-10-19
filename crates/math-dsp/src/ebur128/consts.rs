@@ -1,5 +1,5 @@
-#[cfg(not(test))]
-pub(super) const MAX_GATING_BLOCKS: usize = 36_000;
+// One hour of 100 ms gating blocks is reserved initially, not a history limit.
+pub(super) const INITIAL_GATING_BLOCK_CAPACITY: usize = 36_000;
 
 pub(super) const TRUE_PEAK_FIR_REFERENCE_SAMPLE_RATE: u32 = 48_000;
 
@@ -11,7 +11,7 @@ pub(super) const TRUE_PEAK_FIR_REFERENCE_SAMPLE_RATE: u32 = 48_000;
 /// The table is specified for 48 kHz input. `EbuR128::new` logs a warning when
 /// true-peak mode is requested at another sample rate rather than failing, since
 /// loudness-only and ReplayGain callers commonly analyze native-rate content.
-pub(super) const TRUE_PEAK_FIR_PHASES: [[f64; 12]; 4] = [
+pub(crate) const TRUE_PEAK_FIR_PHASES: [[f64; 12]; 4] = [
     [
         -0.0083007812500,
         0.0148925781250,
@@ -70,4 +70,4 @@ pub(super) const TRUE_PEAK_FIR_PHASES: [[f64; 12]; 4] = [
     ],
 ];
 
-pub(super) const TRUE_PEAK_FIR_LEN: usize = 12;
+pub(crate) const TRUE_PEAK_FIR_LEN: usize = 12;

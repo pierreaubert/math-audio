@@ -39,8 +39,12 @@ jobs:
         run: cargo test --lib --release
 
   avx2-tests:
-    name: AVX2 SIMD Tests (math-dsp, x86_64)
+    name: SIMD Tests (DSP/FIR, x86_64, ${{ matrix.features }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        features: ["+avx2,+fma", "+avx2,-fma", "-avx2,-fma"]
     steps:
       - uses: actions/checkout@v7
 
@@ -54,20 +58,20 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-cargo-avx2-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-simd-${{ matrix.features }}-${{ hashFiles('**/Cargo.lock') }}
 
       # Compile-only gate: guarantees the AVX2 kernels build even if the
       # runner's CPU support ever changes.
-      - name: cargo check math-dsp with AVX2
-        run: cargo check -p math-dsp --all-targets
+      - name: cargo check DSP and FIR feature paths
+        run: cargo check -p math-dsp -p math-iir-fir --all-targets
         env:
-          RUSTFLAGS: -C target-feature=+avx2
+          RUSTFLAGS: -C target-feature=${{ matrix.features }}
 
       # ubuntu-latest runners support AVX2, so the kernels are executed.
-      - name: cargo test math-dsp with AVX2
-        run: cargo test -p math-dsp
+      - name: cargo test DSP and FIR feature paths
+        run: cargo test -p math-dsp -p math-iir-fir --release
         env:
-          RUSTFLAGS: -C target-feature=+avx2
+          RUSTFLAGS: -C target-feature=${{ matrix.features }}
 
   qa:
     name: Workspace QA

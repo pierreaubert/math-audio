@@ -5,9 +5,6 @@ use super::misc::loudness_to_energy;
 use super::mode::Mode;
 use std::f64::consts::PI;
 
-#[cfg(test)]
-pub(super) const MAX_GATING_BLOCKS: usize = 100;
-
 #[test]
 fn silence_returns_neg_inf() {
     let mut meter = EbuR128::new(2, 48000, Mode::all()).unwrap();
@@ -116,13 +113,9 @@ fn gating_block_count_and_energy() {
 }
 
 #[test]
-fn gating_blocks_overflow_oldest_dropped() {
-    // Issue #1: when gating_blocks exceeds MAX_GATING_BLOCKS the oldest
-    // block must be dropped.  With the old Vec::remove(0) this was O(n);
-    // with VecDeque::pop_front() it is O(1).
+fn gating_history_retains_all_accepted_blocks() {
     let sr = 48000;
-    // Need > MAX_GATING_BLOCKS sub-blocks.  Each sub-block is 100 ms,
-    // so 101 blocks = 10.1 s → 48000 * 10.1 ≈ 484800 frames.
+    // Eleven seconds produce 110 sub-blocks, hence 107 complete windows.
     let duration_s = 11;
     let num_frames = sr * duration_s;
     let mut samples = vec![0.0f32; num_frames * 2];
@@ -137,7 +130,8 @@ fn gating_blocks_overflow_oldest_dropped() {
     let mut meter = EbuR128::new(2, sr as u32, Mode::I).unwrap();
     meter.add_frames_f32(&samples).unwrap();
 
-    // Gating must still produce a valid result after overflow.
+    assert_eq!(meter.gating_blocks.len(), 107);
+    // Gating must still produce a valid result over the complete history.
     let lufs = meter.loudness_global().unwrap();
     assert!(
         lufs > -30.0 && lufs < 5.0,

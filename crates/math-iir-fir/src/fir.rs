@@ -57,6 +57,14 @@ pub struct Fir<T: FilterFloat = f64> {
     /// Coefficients in reverse order, used by the linearized block dot-product.
     #[serde(skip)]
     coeffs_rev: Vec<T>,
+    #[serde(skip)]
+    prepared_block_size: usize,
+}
+
+// This dispatch boundary is tested separately from the architecture kernels.
+#[inline]
+fn uses_f64_simd<T: 'static>() -> bool {
+    std::any::TypeId::of::<T>() == std::any::TypeId::of::<f64>()
 }
 
 /// Release-checked constructor validation helpers (shared by all `try_*`
@@ -148,6 +156,7 @@ impl<T: FilterFloat> Fir<T> {
             symmetric,
             scratch: Vec::new(),
             coeffs_rev: Vec::new(),
+            prepared_block_size: 0,
         })
     }
 
@@ -205,6 +214,7 @@ impl<T: FilterFloat> Fir<T> {
             symmetric,
             scratch: Vec::new(),
             coeffs_rev: Vec::new(),
+            prepared_block_size: 0,
         })
     }
 
@@ -268,6 +278,7 @@ impl<T: FilterFloat> Fir<T> {
             symmetric,
             scratch: Vec::new(),
             coeffs_rev: Vec::new(),
+            prepared_block_size: 0,
         })
     }
 
@@ -337,6 +348,7 @@ impl<T: FilterFloat> Fir<T> {
             symmetric,
             scratch: Vec::new(),
             coeffs_rev: Vec::new(),
+            prepared_block_size: 0,
         })
     }
 
@@ -406,6 +418,7 @@ impl<T: FilterFloat> Fir<T> {
             symmetric,
             scratch: Vec::new(),
             coeffs_rev: Vec::new(),
+            prepared_block_size: 0,
         })
     }
 
@@ -423,8 +436,28 @@ impl<T: FilterFloat> Fir<T> {
     pub fn reset(&mut self) {
         self.state.fill(T::zero());
         self.state_pos = self.n_taps();
-        self.scratch.clear();
-        self.coeffs_rev.clear();
+        // Prepared scratch and reversed taps remain reusable after reset.
+    }
+
+    /// Reserve block scratch before entering an audio callback.
+    ///
+    /// Calls up to `max_block_size` allocate nothing, including immediately
+    /// after reset. Larger blocks are split into prepared-size chunks, preserving
+    /// exact filter state and avoiding callback growth. Re-prepare to change size.
+    ///
+    /// # Panics
+    /// Panics when `max_block_size` is zero or the required length overflows.
+    pub fn prepare(&mut self, max_block_size: usize) {
+        assert!(
+            max_block_size > 0,
+            "FIR prepared block size must be positive"
+        );
+        let scratch_len = (self.n_taps() - 1)
+            .checked_add(max_block_size)
+            .expect("FIR scratch length overflow");
+        self.scratch.resize(scratch_len, T::zero());
+        self.ensure_coeffs_rev();
+        self.prepared_block_size = max_block_size;
     }
 
     /// Processes a single audio sample through the filter.
@@ -447,20 +480,28 @@ impl<T: FilterFloat> Fir<T> {
             self.compute_output_symmetric()
         } else {
             #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
-            if std::mem::size_of::<T>() == 8 {
+            if uses_f64_simd::<T>() {
                 unsafe { self.compute_output_f64_neon(self.state_pos) }
             } else {
                 self.compute_output()
             }
-            #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
-            if std::mem::size_of::<T>() == 8 {
+            #[cfg(all(
+                target_arch = "x86_64",
+                target_feature = "avx2",
+                target_feature = "fma"
+            ))]
+            if uses_f64_simd::<T>() {
                 unsafe { self.compute_output_f64_avx2(self.state_pos) }
             } else {
                 self.compute_output()
             }
             #[cfg(not(any(
                 all(target_arch = "aarch64", target_feature = "neon"),
-                all(target_arch = "x86_64", target_feature = "avx2"),
+                all(
+                    target_arch = "x86_64",
+                    target_feature = "avx2",
+                    target_feature = "fma"
+                ),
             )))]
             {
                 self.compute_output()
@@ -485,41 +526,40 @@ impl<T: FilterFloat> Fir<T> {
     /// See the [FTZ policy](crate::denormals) for details.
     pub fn process_block(&mut self, samples: &mut [T]) {
         let _ftz = crate::denormals::ScopedFlushToZero::new();
-        if self.symmetric {
-            self.process_block_symmetric(samples);
+        let chunk_size = if self.prepared_block_size == 0 {
+            samples.len().max(1)
         } else {
-            self.process_block_general(samples);
-        }
-    }
-
-    fn process_block_general(&mut self, samples: &mut [T]) {
-        let n_taps = self.coeffs.len();
-
-        for sample in samples.iter_mut() {
-            let x = *sample;
-            // Store input sample in circular buffer and its duplicate
-            self.state[self.state_pos] = x;
-            self.state[self.state_pos - n_taps] = x;
-
-            // Compute output using convolution
-            *sample = self.compute_output();
-
-            // Update circular buffer position
-            self.state_pos += 1;
-            if self.state_pos == 2 * n_taps {
-                self.state_pos = n_taps;
+            self.prepared_block_size
+        };
+        for chunk in samples.chunks_mut(chunk_size) {
+            if self.symmetric {
+                self.process_block_symmetric(chunk);
+            } else {
+                self.process_block_general(chunk);
             }
         }
     }
 
+    fn process_block_general(&mut self, samples: &mut [T]) {
+        // Reuse the primitive-specific SIMD dispatch without a per-sample FTZ
+        // guard. The block owns that guard and the sample path owns ring state.
+        for sample in samples {
+            *sample = self.process(*sample);
+        }
+    }
+
     fn process_block_symmetric(&mut self, samples: &mut [T]) {
-        #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
-        if std::mem::size_of::<T>() == 8 {
+        #[cfg(all(
+            target_arch = "x86_64",
+            target_feature = "avx2",
+            target_feature = "fma"
+        ))]
+        if uses_f64_simd::<T>() {
             return unsafe { self.process_block_symmetric_f64_avx2(samples) };
         }
 
         #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
-        if std::mem::size_of::<T>() == 8 {
+        if uses_f64_simd::<T>() {
             return unsafe { self.process_block_symmetric_f64_neon(samples) };
         }
 
@@ -588,7 +628,7 @@ impl<T: FilterFloat> Fir<T> {
     ///
     /// # Safety
     /// Must only be called when `T` is `f64` (checked by the caller via
-    /// `size_of::<T>() == 8`).
+    /// `TypeId::of::<T>() == TypeId::of::<f64>()`).
     #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
     #[inline(always)]
     unsafe fn compute_output_f64_neon(&self, state_pos: usize) -> T {
@@ -642,8 +682,12 @@ impl<T: FilterFloat> Fir<T> {
     ///
     /// # Safety
     /// Must only be called when `T` is `f64` (checked by the caller via
-    /// `size_of::<T>() == 8`) and when AVX2/FMA are available on the host.
-    #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+    /// `TypeId::of::<T>() == TypeId::of::<f64>()`) and when AVX2/FMA are available on the host.
+    #[cfg(all(
+        target_arch = "x86_64",
+        target_feature = "avx2",
+        target_feature = "fma"
+    ))]
     #[target_feature(enable = "avx2,fma")]
     #[inline]
     unsafe fn compute_output_f64_avx2(&self, state_pos: usize) -> T {
@@ -714,11 +758,15 @@ impl<T: FilterFloat> Fir<T> {
         // registers (one rounding, one instruction per pair). FilterFloat is only
         // implemented for f32/f64, so size == 8 identifies f64 at runtime.
         #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
-        if std::mem::size_of::<T>() == 8 {
+        if uses_f64_simd::<T>() {
             return unsafe { self.compute_output_symmetric_f64(state_pos, start, half) };
         }
-        #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
-        if std::mem::size_of::<T>() == 8 {
+        #[cfg(all(
+            target_arch = "x86_64",
+            target_feature = "avx2",
+            target_feature = "fma"
+        ))]
+        if uses_f64_simd::<T>() {
             return unsafe { self.compute_output_symmetric_f64_avx2(state_pos, start, half) };
         }
 
@@ -743,7 +791,7 @@ impl<T: FilterFloat> Fir<T> {
     ///
     /// # Safety
     /// Must only be called when `T` is `f64` (checked by the caller via
-    /// `size_of::<T>() == 8`).
+    /// `TypeId::of::<T>() == TypeId::of::<f64>()`).
     #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
     #[inline(always)]
     unsafe fn compute_output_symmetric_f64(
@@ -813,8 +861,12 @@ impl<T: FilterFloat> Fir<T> {
     ///
     /// # Safety
     /// Must only be called when `T` is `f64` (checked by the caller via
-    /// `size_of::<T>() == 8`) and when AVX2/FMA are available on the host.
-    #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+    /// `TypeId::of::<T>() == TypeId::of::<f64>()`) and when AVX2/FMA are available on the host.
+    #[cfg(all(
+        target_arch = "x86_64",
+        target_feature = "avx2",
+        target_feature = "fma"
+    ))]
     #[target_feature(enable = "avx2,fma")]
     #[inline]
     unsafe fn compute_output_symmetric_f64_avx2(
@@ -900,8 +952,12 @@ impl<T: FilterFloat> Fir<T> {
     ///
     /// # Safety
     /// Must only be called when `T` is `f64` (checked by the caller via
-    /// `size_of::<T>() == 8`) and when AVX2/FMA are available on the host.
-    #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+    /// `TypeId::of::<T>() == TypeId::of::<f64>()`) and when AVX2/FMA are available on the host.
+    #[cfg(all(
+        target_arch = "x86_64",
+        target_feature = "avx2",
+        target_feature = "fma"
+    ))]
     #[target_feature(enable = "avx2,fma")]
     #[inline(never)]
     unsafe fn process_block_symmetric_f64_avx2(&mut self, samples: &mut [T]) {
@@ -1016,7 +1072,7 @@ impl<T: FilterFloat> Fir<T> {
     ///
     /// # Safety
     /// Must only be called when `T` is `f64` (checked by the caller via
-    /// `size_of::<T>() == 8`) and when NEON is available on the host.
+    /// `TypeId::of::<T>() == TypeId::of::<f64>()`) and when NEON is available on the host.
     #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
     #[target_feature(enable = "neon")]
     #[inline(never)]
@@ -1140,18 +1196,11 @@ impl<T: FilterFloat> Fir<T> {
         }
     }
 
-    /// Returns true if the coefficient vector is symmetric (within floating-point
-    /// rounding tolerance). The windowed-sinc designs are mathematically symmetric
-    /// but can differ by a few ULPs after normalization, so exact equality is too
-    /// strict.
+    /// Check exact symmetry without approximating arbitrary custom coefficients.
     fn coeffs_are_symmetric(coeffs: &[T]) -> bool {
         let n = coeffs.len();
-        let eps = T::epsilon();
         for i in 0..n / 2 {
-            let a = coeffs[i];
-            let b = coeffs[n - 1 - i];
-            let scale = a.abs().max(b.abs()).max(T::one());
-            if (a - b).abs() > eps * scale {
+            if coeffs[i] != coeffs[n - 1 - i] {
                 return false;
             }
         }

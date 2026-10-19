@@ -29,8 +29,8 @@ validation-manifest.toml   Case ids, tolerances, tiers
 
 Each comparison test resolves its reference live when `WOLFRAMSCRIPT`
 points at an activated engine, otherwise from the checked-in golden.
-With neither available the test prints `SKIPPED` and passes. The
-contract test (`qa_contract`) fails while any manifest case lacks a
+A missing selected engine or golden fails the comparison; it never skips.
+The contract test (`qa_contract`) fails while any manifest case lacks a
 golden — that is the honest pending-engine signal, cleared by
 `just qa-goldens`.
 

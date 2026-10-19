@@ -37,7 +37,7 @@ fn bessel_i0(x: f64) -> f64 {
 /// the group delay is constant and compensated by construction (the tap
 /// window is centred on the exact fractional read position — see
 /// [`resample_to_common_clock`]).
-fn prototype_table(ratio: f64) -> Vec<Vec<f64>> {
+fn prototype_table(ratio: f64) -> Vec<f64> {
     // Leave a transition band below both clocks' Nyquist limits.
     let cutoff = 0.94 / ratio.max(1.0);
     // Exact integer centre; tap t reads `base - (t - CENTER)`.
@@ -48,8 +48,17 @@ fn prototype_table(ratio: f64) -> Vec<Vec<f64>> {
     // `(base + frac)`, hence the `+ frac` below.
     let center = ((RESAMPLE_TAPS - 1) / 2) as f64;
     let i0_beta = bessel_i0(RESAMPLE_KAISER_BETA);
-    let mut table = vec![vec![0.0; RESAMPLE_TAPS]; RESAMPLE_PHASES + 1];
-    for (p, row) in table.iter_mut().enumerate() {
+    let window: [f64; RESAMPLE_TAPS] = std::array::from_fn(|t| {
+        let u = 2.0 * t as f64 / (RESAMPLE_TAPS - 1) as f64 - 1.0;
+        bessel_i0(RESAMPLE_KAISER_BETA * (1.0 - u * u).max(0.0).sqrt()) / i0_beta
+    });
+    let mut table = vec![0.0; RESAMPLE_TAPS * (RESAMPLE_PHASES + 1)];
+    for (p, row) in table
+        .as_chunks_mut::<RESAMPLE_TAPS>()
+        .0
+        .iter_mut()
+        .enumerate()
+    {
         let frac = p as f64 / RESAMPLE_PHASES as f64;
         for (t, tap) in row.iter_mut().enumerate() {
             let x = t as f64 - center + frac;
@@ -58,9 +67,7 @@ fn prototype_table(ratio: f64) -> Vec<Vec<f64>> {
             } else {
                 (std::f64::consts::PI * cutoff * x).sin() / (std::f64::consts::PI * x)
             };
-            let u = 2.0 * t as f64 / (RESAMPLE_TAPS - 1) as f64 - 1.0;
-            let kaiser = bessel_i0(RESAMPLE_KAISER_BETA * (1.0 - u * u).max(0.0).sqrt()) / i0_beta;
-            *tap = sinc * kaiser;
+            *tap = sinc * window[t];
         }
         // Unity DC gain per phase so level is exact for slow signals.
         let gain: f64 = row.iter().sum();
@@ -92,45 +99,92 @@ pub fn resample_to_common_clock(
     skew: &ClockSkew,
     out_len: usize,
 ) -> Option<Vec<f32>> {
-    if !skew.valid
-        || !skew.offset_samples.is_finite()
-        || !skew.skew_ppm.is_finite()
-        || skew.skew_ppm.abs() > crate::capture_tdoa::MAX_PLAUSIBLE_SKEW_PPM
-    {
-        return None;
-    }
     if input.is_empty()
         || input.iter().any(|sample| !sample.is_finite())
+        || !skew.offset_samples.is_finite()
         || skew.offset_samples.abs() > input.len() as f64 + out_len as f64
     {
         return None;
     }
-    let ratio = 1.0 + skew.skew_ppm / 1e6;
-    let table = prototype_table(ratio);
-    let center = ((RESAMPLE_TAPS - 1) / 2) as i64;
-    let at = |n: i64| {
-        if n < 0 || n >= input.len() as i64 {
-            0.0
-        } else {
-            input[n as usize] as f64
+    let resampler = CommonClockResampler::new(skew)?;
+    let mut output = vec![0.0; out_len];
+    resampler.process_into(input, skew.offset_samples, &mut output)?;
+    Some(output)
+}
+
+/// Reusable common-clock interpolation table for one fixed clock-skew ratio.
+///
+/// Build once and reuse across channels/records with their individual offsets.
+/// A changed skew requires constructing a new plan explicitly. The contiguous
+/// table occupies `(RESAMPLE_PHASES + 1) * RESAMPLE_TAPS * 8` coefficient bytes.
+#[derive(Debug)]
+pub struct CommonClockResampler {
+    ratio: f64,
+    table: Vec<f64>,
+}
+
+impl CommonClockResampler {
+    /// Prepare a table from an accepted, finite clock estimate.
+    ///
+    /// Returns `None` for invalid or implausible skew/offset estimates.
+    pub fn new(skew: &ClockSkew) -> Option<Self> {
+        if !skew.valid
+            || !skew.offset_samples.is_finite()
+            || !skew.skew_ppm.is_finite()
+            || skew.skew_ppm.abs() > crate::capture_tdoa::MAX_PLAUSIBLE_SKEW_PPM
+        {
+            return None;
         }
-    };
-    let mut out = Vec::with_capacity(out_len);
-    for m in 0..out_len {
-        let n = m as f64 * ratio + skew.offset_samples;
-        let i0 = n.floor();
-        let frac = n - i0;
-        let phase_position = frac * RESAMPLE_PHASES as f64;
-        let phase = (phase_position.floor() as usize).min(RESAMPLE_PHASES - 1);
-        let mix = phase_position - phase as f64;
-        let base = i0 as i64;
-        let mut acc = 0.0;
-        for (t, (lo, hi)) in table[phase].iter().zip(&table[phase + 1]).enumerate() {
-            acc += (lo * (1.0 - mix) + hi * mix) * at(base - t as i64 + center);
-        }
-        out.push(acc as f32);
+        let ratio = 1.0 + skew.skew_ppm / 1e6;
+        Some(Self {
+            ratio,
+            table: prototype_table(ratio),
+        })
     }
-    Some(out)
+
+    /// Resample into caller storage using the prepared ratio and supplied offset.
+    ///
+    /// No allocation occurs. Input is scanned for finite samples on every call.
+    /// Boundary context is zero-padded, as in [`resample_to_common_clock`].
+    /// Returns `None` for empty/non-finite input or an invalid/out-of-range offset.
+    pub fn process_into(
+        &self,
+        input: &[f32],
+        offset_samples: f64,
+        output: &mut [f32],
+    ) -> Option<()> {
+        if input.is_empty()
+            || input.iter().any(|sample| !sample.is_finite())
+            || !offset_samples.is_finite()
+            || offset_samples.abs() > input.len() as f64 + output.len() as f64
+        {
+            return None;
+        }
+        let center = ((RESAMPLE_TAPS - 1) / 2) as i64;
+        let at = |n: i64| {
+            if n < 0 || n >= input.len() as i64 {
+                0.0
+            } else {
+                f64::from(input[n as usize])
+            }
+        };
+        for (m, sample) in output.iter_mut().enumerate() {
+            let n = m as f64 * self.ratio + offset_samples;
+            let floor = n.floor();
+            let phase_position = (n - floor) * RESAMPLE_PHASES as f64;
+            let phase = (phase_position.floor() as usize).min(RESAMPLE_PHASES - 1);
+            let mix = phase_position - phase as f64;
+            let base = floor as i64;
+            let lo = &self.table[phase * RESAMPLE_TAPS..(phase + 1) * RESAMPLE_TAPS];
+            let hi = &self.table[(phase + 1) * RESAMPLE_TAPS..(phase + 2) * RESAMPLE_TAPS];
+            let mut sum = 0.0;
+            for (tap, (&lo, &hi)) in lo.iter().zip(hi).enumerate() {
+                sum += (lo * (1.0 - mix) + hi * mix) * at(base - tap as i64 + center);
+            }
+            *sample = sum as f32;
+        }
+        Some(())
+    }
 }
 
 #[cfg(test)]

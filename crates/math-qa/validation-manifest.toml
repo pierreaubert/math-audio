@@ -102,3 +102,21 @@ golden = "sti.json"
 test = "wolfram_sti"
 tolerance = "MTF absolute <= 8e-2 impulse, 2.5e-2/1e-2/5e-3 at RT60 0.5/1/2 s; MTI/STI absolute <= 5e-3/2.5e-3/2e-3 (octave-filter transients)"
 tier = "smoke"
+
+[[case]]
+id = "math-qa.capture-tdoa.v1"
+owner = "math-dsp"
+script = "capture_tdoa.wls"
+golden = "capture_tdoa.json"
+test = "wolfram_capture_tdoa"
+tolerance = "per-entry TDOA, skew, and uncertainty tolerances across the recorded sample-rate families"
+tier = "smoke"
+
+[[case]]
+id = "math-qa.capture-array.v1"
+owner = "math-dsp"
+script = "capture_array.wls"
+golden = "capture_array.json"
+test = "wolfram_capture_array"
+tolerance = "per-entry DOA, geometry, and direct-sinc resampling tolerances across the recorded sample-rate families"
+tier = "smoke"

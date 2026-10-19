@@ -19,6 +19,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added duplicate-points hull regression coverage and
   translated/large-scale property tests.
 
+## [0.3.4] - 2026-10-18
+
+### Tests
+- Numerical integration tests no longer write to the user's cache. Export
+  checks use isolated temporary directories, including optional model exports.
+- Cube volume and area have exact quantitative expectations. Property inputs
+  include full-rank anchors so unexpected hull-construction errors fail tests.
+
 ## [0.3.2] - 2026-06-21
 
 ### Added

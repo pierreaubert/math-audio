@@ -1,8 +1,8 @@
 //! Koren 12AX7A common-cathode triode stage component model (model ID 7).
 //!
 //! A fixed-bias common-cathode stage: the grid is driven by the AC-coupled
-//! input, and the plate node is solved implicitly per sample (Newton via the
-//! shared bounded utility) against the resistive plate load. Plate AC is
+//! input, and the plate node is solved implicitly per sample (safeguarded
+//! Newton with an analytic derivative) against the resistive plate load. Plate AC is
 //! normalized by the measured small-signal gain so the stage is unity at low
 //! levels and saturates with drive. See
 //! `references/component-references.md` for the frozen equations, operating
@@ -47,7 +47,7 @@ const QUIESCENT_PLATE_A: f32 = 0.9722e-3;
 // Level convention: 1 V peak grid swing per 0 dBFS before drive.
 const GRID_VOLTS_PER_DBFS: f32 = 1.0;
 const COUPLING_HP_HZ: f32 = 8.0;
-/// Newton budget per sample (the shared utility's cap).
+/// Maximum safeguarded Newton iterations per sample.
 const SOLVER_MAX_ITERATIONS: usize = 64;
 /// Newton residual tolerance in plate volts.
 ///
@@ -70,23 +70,38 @@ const GAIN_PROBE_V: f32 = 1e-3;
 /// stable form so any finite grid/plate voltage stays finite (no exp
 /// overflow); non-positive `E1` yields zero current.
 fn koren_plate_current(grid_v: f32, plate_v: f32) -> f32 {
+    koren_plate_current_and_slope(grid_v, plate_v).0
+}
+
+/// Evaluate current and its plate-voltage derivative in one Koren evaluation.
+fn koren_plate_current_and_slope(grid_v: f32, plate_v: f32) -> (f32, f32) {
     if !grid_v.is_finite() || !plate_v.is_finite() || plate_v <= 0.0 {
-        return 0.0;
+        return (0.0, 0.0);
     }
-    let argument = KOREN_KP * (1.0 / KOREN_MU + grid_v / (KOREN_KVB + plate_v * plate_v).sqrt());
-    // Stable softplus: ln(1 + e^x) = x for large x, ln1p(e^x) otherwise.
-    // At x = 20 the neglected term is 2e-9; continuity is inaudible.
-    let softplus = if argument > 20.0 {
-        argument
+    let root = (KOREN_KVB + plate_v * plate_v).sqrt();
+    let argument = KOREN_KP * (1.0 / KOREN_MU + grid_v / root);
+    let (softplus, sigmoid) = if argument > 20.0 {
+        (argument, 1.0)
     } else {
-        argument.exp().ln_1p()
+        let exponential = argument.exp();
+        (exponential.ln_1p(), exponential / (1.0 + exponential))
     };
     let e1 = (plate_v / KOREN_KP) * softplus;
     if e1 <= 0.0 {
-        0.0
-    } else {
-        2.0 * e1.powf(KOREN_EX) / KOREN_KG1
+        return (0.0, 0.0);
     }
+    let current = 2.0 * e1.powf(KOREN_EX) / KOREN_KG1;
+    // In deep cutoff both current and its derivative underflow to zero.
+    // Avoid the indeterminate product 0 * (EX / subnormal E1).
+    if current == 0.0 {
+        return (0.0, 0.0);
+    }
+    // dE1/dEp = softplus/KP - Eg*Ep²*sigmoid/(KVB+Ep²)^(3/2).
+    // Reuse I/E1 instead of evaluating another noninteger power.
+    let e1_slope =
+        softplus / KOREN_KP - grid_v * plate_v * plate_v * sigmoid / (root * root * root);
+    let slope = current * (KOREN_EX / e1) * e1_slope;
+    (current, slope)
 }
 
 /// AC plate load: the plate resistor in parallel with the next grid leak.
@@ -351,70 +366,64 @@ impl TriodeChannelState {
         }
     }
 
-    /// Solve the plate node for a grid AC voltage. The plate load is passive
-    /// so the plate stays inside `[0, SUPPLY]`.
+    /// Solve the monotone passive load line with safeguarded Newton steps.
     ///
-    /// Two-phase deterministic solve: Newton from the previous plate value
-    /// (the fast path — adjacent samples usually agree), then, only on
-    /// failure, a coarse grid search for a fresh initial followed by a
-    /// second Newton run. Newton overshoots across the 350 V span on
-    /// cutoff/saturation transitions and can ping-pong between the rails;
-    /// the grid restart breaks those limit cycles. A loose iterate is
-    /// accepted and only a truly lost solve holds the previous state.
+    /// The residual is strictly increasing: dF/dVp = 1 + Rac*dIp/dVp > 0.
+    /// The supply rails bracket its unique root. A Newton step outside the
+    /// current bracket becomes a bisection step, avoiding rail-to-rail limit
+    /// cycles and the previous 17-point restart. Current and derivative share
+    /// one expensive Koren evaluation; tolerances and the iteration cap remain.
     fn solve_plate(&mut self, grid_ac: f32) -> f32 {
         let plate_load = ac_plate_load();
-        let lower = -QUIESCENT_PLATE_V;
-        let upper = SUPPLY_V - QUIESCENT_PLATE_V;
-        let residual = |plate_ac: f32| {
-            let plate = QUIESCENT_PLATE_V + plate_ac;
-            let current = koren_plate_current(GRID_BIAS_V + grid_ac, plate) - QUIESCENT_PLATE_A;
-            plate_ac + current * plate_load
-        };
-        let first = solve_bounded_nonlinear(
-            residual,
-            self.plate_ac,
-            lower,
-            upper,
-            SOLVER_MAX_ITERATIONS,
-            SOLVER_TOLERANCE_V,
-        );
+        let mut lower = -QUIESCENT_PLATE_V;
+        let mut upper = SUPPLY_V - QUIESCENT_PLATE_V;
+        let mut value = self.plate_ac.clamp(lower, upper);
+        let mut best_value = value;
+        let mut best_residual = f32::INFINITY;
         self.solves = self.solves.saturating_add(1);
-        if first.converged {
-            self.plate_ac = flush_denormal(first.value);
-            return self.plate_ac;
-        }
-        // Phase 2: scan a fixed 17-point grid for the smallest |residual|
-        // and restart Newton there. Fixed grid, no allocation.
-        let mut best_value = self.plate_ac;
-        let mut best_residual = first.residual.abs();
-        for step in 0..=16_u8 {
-            let candidate = lower + (upper - lower) * f32::from(step) / 16.0;
-            let magnitude = residual(candidate).abs();
-            if magnitude < best_residual {
-                best_residual = magnitude;
-                best_value = candidate;
+        for _ in 0..SOLVER_MAX_ITERATIONS {
+            let (current, slope) =
+                koren_plate_current_and_slope(GRID_BIAS_V + grid_ac, QUIESCENT_PLATE_V + value);
+            let residual = value + (current - QUIESCENT_PLATE_A) * plate_load;
+            if !residual.is_finite() {
+                break;
             }
-        }
-        let second = solve_bounded_nonlinear(
-            residual,
-            best_value,
-            lower,
-            upper,
-            SOLVER_MAX_ITERATIONS,
-            SOLVER_TOLERANCE_V,
-        );
-        self.solves = self.solves.saturating_add(1);
-        let solved = if second.converged {
-            second.value
-        } else {
-            self.fallbacks = self.fallbacks.saturating_add(1);
-            if second.residual.is_finite() && second.residual.abs() <= LOOSE_ACCEPT_V {
-                second.value
+            if residual.abs() < best_residual {
+                best_residual = residual.abs();
+                best_value = value;
+            }
+            if residual.abs() <= SOLVER_TOLERANCE_V {
+                self.plate_ac = flush_denormal(value);
+                return self.plate_ac;
+            }
+            if residual > 0.0 {
+                upper = value;
             } else {
-                self.plate_ac
+                lower = value;
             }
-        };
-        self.plate_ac = flush_denormal(solved);
+            let derivative = 1.0 + plate_load * slope;
+            let newton = value - residual / derivative;
+            let midpoint = lower + (upper - lower) * 0.5;
+            let mut next = if newton.is_finite() && newton > lower && newton < upper {
+                newton
+            } else {
+                midpoint
+            };
+            // A representable fixed point cannot improve by repeating the
+            // same iteration. Try the remaining bracket, then retain the best
+            // evaluated residual if its endpoints are adjacent f32 values.
+            if next == value {
+                next = midpoint;
+            }
+            if next == value {
+                break;
+            }
+            value = next;
+        }
+        self.fallbacks = self.fallbacks.saturating_add(1);
+        if best_residual <= LOOSE_ACCEPT_V {
+            self.plate_ac = flush_denormal(best_value);
+        }
         self.plate_ac
     }
 
@@ -648,11 +657,59 @@ mod tests {
         model.process_interleaved(&mut samples, 4_800).unwrap();
         assert!(samples.iter().all(|sample| sample.is_finite()));
         let (solves, fallbacks) = model.solve_stats();
-        // Two-phase solve: retries add extra solves beyond one per sample.
-        assert!(solves >= 4_800);
+        assert_eq!(solves, 4_800, "one bounded solve per sample");
         assert!(
             f64::from(fallbacks as u32) / 4_800.0 < 0.05,
             "fallback rate too high under grid overdrive: {fallbacks}/{solves}"
         );
+    }
+
+    #[test]
+    fn solve_plate_tracks_reference_across_rail_to_rail_grid_jumps() {
+        let mut channel = TriodeChannelState::new(48000.0, DefectConfig::default());
+        let load = f64::from(ac_plate_load());
+        for grid in [-16.0_f32, 16.0, -0.01, 6.0, -8.0, 0.0, 12.0, -3.0, 0.01] {
+            let mut low = -f64::from(QUIESCENT_PLATE_V);
+            let mut high = f64::from(SUPPLY_V - QUIESCENT_PLATE_V);
+            for _ in 0..80 {
+                let middle = (low + high) * 0.5;
+                let residual = middle
+                    + load
+                        * (koren_reference(
+                            f64::from(GRID_BIAS_V + grid),
+                            f64::from(QUIESCENT_PLATE_V) + middle,
+                        ) - f64::from(QUIESCENT_PLATE_A));
+                if residual > 0.0 {
+                    high = middle;
+                } else {
+                    low = middle;
+                }
+            }
+            let expected = (low + high) * 0.5;
+            let actual = channel.solve_plate(grid);
+            assert!(
+                (f64::from(actual) - expected).abs() < 0.01,
+                "grid={grid}: plate={actual}, independent root={expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn analytic_plate_slope_matches_independent_f64_differences() {
+        for grid in [-8.0_f32, -1.5, 0.0, 1.0, 14.5] {
+            for plate in [0.1_f32, 1.0, 5.0, 50.0, 204.174, 350.0] {
+                let (_, actual) = koren_plate_current_and_slope(grid, plate);
+                let plate = f64::from(plate);
+                let step = (plate * 1e-4).max(1e-4);
+                let expected = (koren_reference(f64::from(grid), plate + step)
+                    - koren_reference(f64::from(grid), plate - step))
+                    / (2.0 * step);
+                assert!(actual >= 0.0 && actual.is_finite());
+                assert!(
+                    (f64::from(actual) - expected).abs() <= 1e-10 + expected.abs() * 2e-4,
+                    "grid={grid}, plate={plate}: slope={actual}, reference={expected}"
+                );
+            }
+        }
     }
 }

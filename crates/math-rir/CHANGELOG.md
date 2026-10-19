@@ -39,6 +39,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   63 Hz–16 kHz with T30→T20→EDT fit policy and per-band validity flags
   including a B·T60 ≥ 8 filter-ring guard).
 
+## [0.5.13] - 2026-10-18
+
+### Fixed
+- Decay fits reject insufficient tail-energy headroom even when a truncated
+  record produces a high r². The documented 10 dB check returns no fit instead
+  of a biased T30; it does not claim to compensate missing decay energy.
+
+### Performance and tests
+- Band filtering borrows reusable filtfilt output without an intermediate copy.
+- `DecayWorkspace::compute` retains and lends curve samples across calls;
+  internal ISO analysis uses the borrowed result.
+- `analyze_iso3382_bands_with_pool` bounds concurrent long-record workspaces.
+- Added duration/SNR/rate/gain regressions, long-record allocation accounting,
+  pool equivalence tests, and record-length/pool-size benchmarks.
+
 ## [0.5.12]
 
 ### Added

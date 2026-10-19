@@ -1036,6 +1036,99 @@ fn spectrogram_reports_peak_amplitude_and_includes_exact_frame() {
 }
 
 #[test]
+fn display_spectrogram_downsamples_with_peak_preserving_blocks() {
+    use super::compute::display_spectrogram;
+
+    // [time][freq]: one loud block at time 2..4, highest frequency bin.
+    let mut spectrogram = vec![vec![-80.0f32; 4]; 4];
+    spectrogram[2][3] = -10.0;
+    spectrogram[3][3] = -20.0;
+    let display = display_spectrogram(&spectrogram, 2, 2, 80.0).unwrap();
+    assert_eq!(display.cols, 2);
+    assert_eq!(display.rows, 2);
+    assert_eq!(display.cells.len(), 4);
+    // Row 0 = highest frequencies; the loud block lands top-right at 1.0.
+    assert!((display.cells[1] - 1.0).abs() < 1e-6);
+    // The −80 dB floor sits 70 dB below the −10 dB peak: 10/80 = 0.125.
+    assert!((display.cells[0] - 0.125).abs() < 1e-6);
+    assert!((display.cells[2] - 0.125).abs() < 1e-6);
+    assert!((display.cells[3] - 0.125).abs() < 1e-6);
+}
+
+#[test]
+fn reconstruct_impulse_response_accepts_a_flat_response() {
+    use super::compute::reconstruct_impulse_response;
+
+    let frequencies: Vec<f32> = (0..64).map(|i| 20.0 * 1.1f32.powi(i)).collect();
+    let magnitude_db = vec![0.0f32; 64];
+    let phase_deg = vec![0.0f32; 64];
+    let (times, impulse) =
+        reconstruct_impulse_response(&frequencies, &magnitude_db, &phase_deg, 48_000.0)
+            .expect("flat response must reconstruct");
+    assert_eq!(times.len(), impulse.len());
+    let peak_index = impulse
+        .iter()
+        .enumerate()
+        .max_by(|a, b| a.1.abs().total_cmp(&b.1.abs()))
+        .map(|(i, _)| i)
+        .unwrap();
+    assert!(peak_index <= impulse.len() / 4, "peak at {peak_index}");
+}
+
+#[test]
+fn reconstruct_impulse_response_rejects_malformed_grids() {
+    use super::compute::reconstruct_impulse_response;
+
+    let frequencies: Vec<f32> = (0..64).map(|i| 20.0 * 1.1f32.powi(i)).collect();
+    let magnitude_db = vec![0.0f32; 64];
+    let phase_deg = vec![0.0f32; 64];
+
+    // Too few points.
+    assert!(
+        reconstruct_impulse_response(
+            &frequencies[..8],
+            &magnitude_db[..8],
+            &phase_deg[..8],
+            48_000.0
+        )
+        .is_none()
+    );
+    // Mismatched lengths.
+    assert!(
+        reconstruct_impulse_response(&frequencies, &magnitude_db[..32], &phase_deg, 48_000.0)
+            .is_none()
+    );
+    // Non-ascending grid.
+    let mut shuffled = frequencies.clone();
+    shuffled.swap(10, 11);
+    assert!(reconstruct_impulse_response(&shuffled, &magnitude_db, &phase_deg, 48_000.0).is_none());
+    // Grid beyond Nyquist.
+    let mut wide = frequencies.clone();
+    *wide.last_mut().unwrap() = 30_000.0;
+    assert!(reconstruct_impulse_response(&wide, &magnitude_db, &phase_deg, 48_000.0).is_none());
+    // Mostly non-finite magnitude.
+    let mut nan_mag = magnitude_db.clone();
+    for value in nan_mag.iter_mut().take(60) {
+        *value = f32::NAN;
+    }
+    assert!(reconstruct_impulse_response(&frequencies, &nan_mag, &phase_deg, 48_000.0).is_none());
+}
+
+#[test]
+fn display_spectrogram_rejects_invalid_input() {
+    use super::compute::display_spectrogram;
+
+    assert!(display_spectrogram(&[], 4, 4, 80.0).is_none());
+    assert!(display_spectrogram(&[vec![]], 4, 4, 80.0).is_none());
+    assert!(display_spectrogram(&[vec![0.0]], 0, 4, 80.0).is_none());
+    assert!(display_spectrogram(&[vec![0.0]], 4, 0, 80.0).is_none());
+    assert!(display_spectrogram(&[vec![0.0]], 4, 4, 0.0).is_none());
+    assert!(display_spectrogram(&[vec![f32::NAN]], 4, 4, 80.0).is_none());
+    // Ragged rows are rejected, not zipped by index.
+    assert!(display_spectrogram(&[vec![0.0, -1.0], vec![0.0]], 4, 4, 80.0).is_none());
+}
+
+#[test]
 fn test_unwrap_phase_deg_basic() {
     let phase = vec![0.0f32, 90.0, 180.0, -90.0, 0.0];
     let unwrapped = super::misc::unwrap_phase_deg(&phase);
@@ -1130,7 +1223,7 @@ fn test_compute_clarity_broadband_mid_impulse() {
     // Impulse at 60 ms: late for the 50 ms window, early for the 80 ms one.
     let mut ir = vec![0.0f32; 48000];
     ir[(0.060 * 48000.0) as usize] = 1.0;
-    let (c50, c80) = compute_clarity_broadband(&ir, 48000.0);
+    let (c50, c80) = compute_clarity_broadband_at(&ir, 48000.0, 0);
     assert_eq!(c50, -60.0);
     assert_eq!(c80, 60.0);
 }
@@ -1140,7 +1233,7 @@ fn test_compute_clarity_broadband_late_impulse() {
     // Place impulse after 100 ms so both early windows miss it.
     let mut ir = vec![0.0f32; 48000];
     ir[5000] = 1.0;
-    let (c50, c80) = compute_clarity_broadband(&ir, 48000.0);
+    let (c50, c80) = compute_clarity_broadband_at(&ir, 48000.0, 0);
     assert_eq!(c50, -60.0);
     assert_eq!(c80, -60.0);
 }

@@ -1,6 +1,6 @@
 [package]
 name = "math-dsp"
-version = "0.5.34"
+version = "0.5.35"
 edition = { workspace = true }
 authors = { workspace = true }
 description = "DSP utilities: signal generation, FFT analysis, and audio analysis tools"
@@ -52,6 +52,7 @@ rand = { workspace = true }
 rayon = { workspace = true }
 
 [dev-dependencies]
+stats_alloc = "0.1"
 approx = { workspace = true }
 serde_json = { workspace = true }
 proptest = { workspace = true }
@@ -64,4 +65,8 @@ harness = false
 
 [[bench]]
 name = "audio_features"
+harness = false
+
+[[bench]]
+name = "audit_hot_paths"
 harness = false

@@ -113,8 +113,11 @@ impl TonalTransientSeparator {
             let transient_est = self.compute_freq_median(magnitudes, bin);
 
             // --- Wiener soft masks ---
-            let tonal_pow = tonal_est.powf(p);
-            let trans_pow = transient_est.powf(p);
+            let (tonal_pow, trans_pow) = if p == 2.0 {
+                (tonal_est * tonal_est, transient_est * transient_est)
+            } else {
+                (tonal_est.powf(p), transient_est.powf(p))
+            };
             let denom = tonal_pow + trans_pow;
 
             if denom > 1e-10 {
@@ -183,19 +186,39 @@ fn fast_median(data: &mut [f32]) -> f32 {
         return (data[0] + data[1]) * 0.5;
     }
 
-    // For small N (typical: 5-15), selection sort to midpoint is fast enough
+    // Linear-time selection avoids sorting the unused upper/lower halves.
+    // Preserve the historical upper median for even edge windows (n > 2).
     let mid = n / 2;
-    // Partial selection sort: find the mid-th smallest element
-    for i in 0..=mid {
-        let mut min_idx = i;
-        for j in (i + 1)..n {
-            if data[j] < data[min_idx] {
-                min_idx = j;
+    *data.select_nth_unstable_by(mid, f32::total_cmp).1
+}
+
+#[cfg(test)]
+mod audit_median_tests {
+    use super::fast_median;
+
+    #[test]
+    fn selection_preserves_legacy_edge_and_duplicate_medians() {
+        for length in 0..65 {
+            for pattern in 0..4 {
+                let mut data: Vec<_> = (0..length)
+                    .map(|i| match pattern {
+                        0 => i as f32,
+                        1 => (length - i) as f32,
+                        2 => (i % 3) as f32,
+                        _ => ((i * 12345 + 101) % 103) as f32,
+                    })
+                    .collect();
+                let mut ordered = data.clone();
+                ordered.sort_by(f32::total_cmp);
+                let expected = match length {
+                    0 => 0.0,
+                    2 => (ordered[0] + ordered[1]) * 0.5,
+                    _ => ordered[length / 2],
+                };
+                assert_eq!(fast_median(&mut data), expected);
             }
         }
-        data.swap(i, min_idx);
     }
-    data[mid]
 }
 
 #[cfg(test)]

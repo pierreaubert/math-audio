@@ -1,6 +1,6 @@
 [package]
 name = "math-iir-fir"
-version = "0.5.26"
+version = "0.5.27"
 description = "Math-Audio IIR and FIR filters"
 edition = { workspace = true }
 keywords.workspace = true
@@ -22,6 +22,7 @@ num-complex = { workspace = true }
 hound = { workspace = true }
 
 [dev-dependencies]
+stats_alloc = "0.1"
 criterion = { workspace = true }
 proptest = { workspace = true }
 
@@ -44,3 +45,7 @@ path = "src/bin/filter_bench.rs"
 [lib]
 name = "math_audio_iir_fir"
 path = "src/mod.rs"
+
+[[bench]]
+name = "audit_hot_paths"
+harness = false

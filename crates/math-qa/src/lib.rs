@@ -93,8 +93,12 @@ pub fn wolfram_script(name: &str) -> PathBuf {
 }
 
 /// Reference payload for a case: live engine output when `WOLFRAMSCRIPT`
-/// is set, otherwise the checked-in golden. Returns `None` (loudly) when
-/// neither is available so tests skip instead of failing blind.
+/// is set, otherwise the checked-in golden.
+///
+/// # Panics
+/// Panics when the selected reference is missing, unreadable, or invalid.
+/// The optional return type is retained for source compatibility; success
+/// always returns `Some`. Required comparisons never silently skip.
 pub fn reference(case: &str, script: &str) -> Option<serde_json::Value> {
     match env::var_os("WOLFRAMSCRIPT") {
         Some(executable) => run_wolfram_script_with(&executable, script),
@@ -103,7 +107,10 @@ pub fn reference(case: &str, script: &str) -> Option<serde_json::Value> {
 }
 
 /// [`reference`] against an explicit golden directory (no env lookup), so
-/// the golden/skip branches are unit-testable without touching process env.
+/// reference branches are unit-testable without touching process env.
+///
+/// # Panics
+/// Panics if the golden is missing, unreadable, or invalid JSON.
 pub fn reference_with(case: &str, golden_dir: &std::path::Path) -> Option<serde_json::Value> {
     let path = golden_dir.join(format!("{case}.json"));
     match std::fs::read_to_string(&path) {
@@ -111,18 +118,19 @@ pub fn reference_with(case: &str, golden_dir: &std::path::Path) -> Option<serde_
             serde_json::from_str(&text)
                 .unwrap_or_else(|error| panic!("golden {} is not JSON: {error}", path.display())),
         ),
-        Err(_) => {
-            println!(
-                "SKIPPED {case}: no golden at {} and WOLFRAMSCRIPT unset (run `just qa-goldens`)",
-                path.display()
-            );
-            None
-        }
+        Err(error) => panic!(
+            "required golden {} is unavailable: {error} (run `just qa-goldens`)",
+            path.display()
+        ),
     }
 }
 
-/// Run a `.wls` script through the live engine; `None` when the engine
-/// binary is missing. Follows the `sonium-qa` invocation pattern,
+/// Run a `.wls` script through the required live engine.
+///
+/// # Panics
+/// Panics if the executable is unavailable, fails, or emits invalid JSON.
+///
+/// Follows the `sonium-qa` invocation pattern,
 /// including the macOS `WolframKernel` fallback. Takes the engine binary
 /// explicitly (no env lookup) so the launch/parse branches are
 /// unit-testable with a fixture script; [`reference`] wires in
@@ -145,10 +153,6 @@ pub fn run_wolfram_script_with(
     }
     let output = match command.output() {
         Ok(output) => output,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            eprintln!("WOLFRAMSCRIPT binary not found; skipping live reference");
-            return None;
-        }
         Err(error) => panic!("failed to launch {executable:?}: {error}"),
     };
     assert!(
@@ -188,6 +192,70 @@ pub fn emit_result(result: &QaResult) {
         "QA_RESULT: {}",
         serde_json::to_string(result).unwrap_or_else(|_| "{}".to_string())
     );
+}
+
+/// Verify that every manifest case emitted exactly one successful comparison.
+///
+/// # Errors
+/// Rejects malformed records, missing/duplicate/unknown cases, unsuccessful
+/// comparisons, invalid numeric diagnostics, and unknown reference provenance.
+pub fn verify_result_records(log: &str, manifest: &str) -> Result<usize, String> {
+    use std::collections::BTreeSet;
+    let manifest: toml::Value = toml::from_str(manifest).map_err(|e| format!("manifest: {e}"))?;
+    let cases = manifest
+        .get("case")
+        .and_then(toml::Value::as_array)
+        .ok_or("manifest has no cases")?;
+    let mut expected = BTreeSet::new();
+    for case in cases {
+        let id = case
+            .get("id")
+            .and_then(toml::Value::as_str)
+            .ok_or("manifest case has no id")?;
+        if !expected.insert(id) {
+            return Err(format!("duplicate manifest case: {id}"));
+        }
+    }
+    if expected.is_empty() {
+        return Err("manifest has no cases".into());
+    }
+    let mut seen = BTreeSet::new();
+    for line in log.lines() {
+        let Some((_, payload)) = line.split_once("QA_RESULT: ") else {
+            continue;
+        };
+        let record: serde_json::Value =
+            serde_json::from_str(payload).map_err(|e| format!("QA_RESULT: {e}"))?;
+        let id = record["case"].as_str().ok_or("comparison has no case id")?;
+        if !expected.contains(id) {
+            return Err(format!("unknown comparison: {id}"));
+        }
+        if !seen.insert(id.to_owned()) {
+            return Err(format!("duplicate comparison: {id}"));
+        }
+        if record["pass"].as_bool() != Some(true) {
+            return Err(format!("failed comparison: {id}"));
+        }
+        for key in ["max_rel_error", "tolerance"] {
+            let value = record[key]
+                .as_f64()
+                .ok_or_else(|| format!("{id}: invalid {key}"))?;
+            if !value.is_finite() || value < 0.0 {
+                return Err(format!("{id}: invalid {key}"));
+            }
+        }
+        if !matches!(
+            record["provenance"].as_str(),
+            Some("live-engine" | "checked-in-golden")
+        ) {
+            return Err(format!("{id}: invalid provenance"));
+        }
+    }
+    let missing: Vec<_> = expected.iter().filter(|id| !seen.contains(**id)).collect();
+    if !missing.is_empty() {
+        return Err(format!("missing comparisons: {missing:?}"));
+    }
+    Ok(seen.len())
 }
 
 /// Whether the reference came from the live engine.
@@ -344,13 +412,13 @@ mod tests {
     }
 
     #[test]
-    fn reference_with_reads_golden_and_skips_when_missing() {
+    fn reference_with_reads_golden_and_rejects_missing() {
         let dir = std::env::temp_dir().join("math-qa-reference-with");
         std::fs::create_dir_all(&dir).expect("temp dir");
         std::fs::write(dir.join("present.json"), r#"{"answer": 42.0}"#).expect("fixture");
         let value = reference_with("present", &dir).expect("golden loads");
         assert_eq!(value["answer"], 42.0);
-        assert!(reference_with("absent-case-xyz", &dir).is_none());
+        assert!(std::panic::catch_unwind(|| reference_with("absent-case-xyz", &dir)).is_err());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -390,13 +458,13 @@ mod tests {
         let value = run_wolfram_script_with(engine.as_os_str(), "any.wls").expect("parses");
         assert_eq!(value["ok"], true);
         assert_eq!(value["v"], 1.5);
-        // Nonexistent binary -> loud skip, not a panic.
+        // An explicitly selected missing engine must fail the comparison.
         assert!(
-            run_wolfram_script_with(
+            std::panic::catch_unwind(|| run_wolfram_script_with(
                 std::ffi::OsStr::new("/tmp/math-qa-no-such-engine-xyz"),
                 "any.wls"
-            )
-            .is_none()
+            ))
+            .is_err()
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

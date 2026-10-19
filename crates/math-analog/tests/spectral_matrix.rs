@@ -215,3 +215,74 @@ fn component_models_record_finite_alias_characterization() {
     );
     println!("component alias_rms: clipper={clipper} triode={triode} stack={stack}");
 }
+
+#[test]
+fn direct_harmonic_matrix_matches_independent_f64_waveform_and_complex_dft() {
+    // The oracle evaluates the published polynomial and DC-blocker recurrence
+    // in f64, without calling the model's shapers, filters, FFT, or analysis.
+    // Complex Fourier differences constrain phase as well as harmonic/alias gain.
+    const LENGTH: usize = 1024;
+    for sample_rate in SAMPLE_RATES {
+        for bin in [1, 3, 21, 107, 231] {
+            let frequency = bin as f64 * f64::from(sample_rate) / LENGTH as f64;
+            for level in LEVELS_DBFS {
+                for drive in [0.0_f32, 12.0, 24.0] {
+                    let mut model = HarmonicModel::new();
+                    model.set_anti_aliasing(AntiAliasing::Off);
+                    model.set_drive_db(drive).unwrap();
+                    model.set_h2_db(-18.0).unwrap();
+                    model.set_h3_db(-24.0).unwrap();
+                    model
+                        .prepare(ProcessSpec::new(sample_rate, 1, 3 * LENGTH))
+                        .unwrap();
+                    let input: Vec<f32> = (0..3 * LENGTH)
+                        .map(|n| {
+                            (10.0_f64.powf(f64::from(level) / 20.0)
+                                * (std::f64::consts::TAU * frequency * n as f64
+                                    / f64::from(sample_rate))
+                                .sin()) as f32
+                        })
+                        .collect();
+                    let mut actual = input.clone();
+                    model.process_interleaved(&mut actual, 3 * LENGTH).unwrap();
+                    let (mut previous_x, mut previous_y) = (0.0_f64, 0.0_f64);
+                    let pole = (-std::f64::consts::TAU * 20.0 / f64::from(sample_rate)).exp();
+                    let reference: Vec<f64> = input
+                        .iter()
+                        .map(|&sample| {
+                            let u =
+                                (f64::from(sample) * 10.0_f64.powf(f64::from(drive) / 20.0)).tanh();
+                            let shaped = u
+                                + 10.0_f64.powf(-18.0 / 20.0) * (2.0 * u * u - 1.0)
+                                + 10.0_f64.powf(-24.0 / 20.0) * (4.0 * u * u * u - 3.0 * u);
+                            let output = shaped - previous_x + pole * previous_y;
+                            previous_x = shaped;
+                            previous_y = output;
+                            output
+                        })
+                        .collect();
+                    for harmonic in 1..=10 {
+                        let mut difference = [0.0_f64; 2];
+                        let mut expected = [0.0_f64; 2];
+                        for n in 0..LENGTH {
+                            let angle =
+                                std::f64::consts::TAU * (bin * harmonic * n) as f64 / LENGTH as f64;
+                            let error =
+                                f64::from(actual[2 * LENGTH + n]) - reference[2 * LENGTH + n];
+                            difference[0] += error * angle.cos();
+                            difference[1] += error * angle.sin();
+                            expected[0] += reference[2 * LENGTH + n] * angle.cos();
+                            expected[1] += reference[2 * LENGTH + n] * angle.sin();
+                        }
+                        let error = 2.0 * difference[0].hypot(difference[1]) / LENGTH as f64;
+                        let amplitude = 2.0 * expected[0].hypot(expected[1]) / LENGTH as f64;
+                        assert!(
+                            error <= 2e-5 + 1e-3 * amplitude,
+                            "fs={sample_rate} bin={bin} level={level} drive={drive} H{harmonic}: complex error={error}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+}

@@ -9,6 +9,14 @@ mod fir_tests {
     use ndarray::array;
     use num_traits::Float;
 
+    #[test]
+    fn audit_simd_dispatch_requires_f64_identity_not_eight_byte_size() {
+        assert!(uses_f64_simd::<f64>());
+        assert!(!uses_f64_simd::<f32>());
+        assert!(!uses_f64_simd::<[u8; 8]>());
+        assert!(!uses_f64_simd::<(f32, f32)>());
+    }
+
     fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
         (a - b).abs() <= tol
     }

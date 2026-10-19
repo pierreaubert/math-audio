@@ -49,73 +49,9 @@ pub fn filtfilt_with_padlen<T: FilterFloat>(
     sections: &[BiquadCoefficients<T>],
     padlen: usize,
 ) -> Vec<T> {
-    if signal.is_empty() || sections.is_empty() {
-        return signal.to_vec();
-    }
-
-    let n = signal.len();
-
-    // Minimum useful length: need at least 2 samples for reflection
-    if n < 2 {
-        return signal.to_vec();
-    }
-
-    assert!(
-        padlen < n,
-        "padlen ({padlen}) must not exceed signal.len() - 1 ({n})",
-    );
-
-    let two = lit::<T>(2.0);
-
-    // Build padded signal with odd reflection at both ends
-    let mut padded = Vec::with_capacity(n + 2 * padlen);
-
-    // Prepend: odd extension at left boundary
-    let x0 = signal[0];
-    for i in (1..=padlen).rev() {
-        padded.push(two * x0 - signal[i]);
-    }
-
-    // Original signal
-    padded.extend_from_slice(signal);
-
-    // Append: odd extension at right boundary
-    let xlast = signal[n - 1];
-    for i in (1..=padlen).rev() {
-        padded.push(two * xlast - signal[n - 1 - i]);
-    }
-
-    // Compute steady-state initial conditions for each section
-    let zi_base: Vec<[T; 2]> = sections.iter().map(biquad_zi).collect();
-
-    // Forward pass: cascade all sections
-    let mut data = padded;
-    for (sec_idx, section) in sections.iter().enumerate() {
-        // `data[0]` is the steady-state output level of every preceding
-        // section, so non-unity section DC gains are propagated through the
-        // cascade before this section's unit-input zi is scaled.
-        let scale = data[0];
-        let zi = [zi_base[sec_idx][0] * scale, zi_base[sec_idx][1] * scale];
-        data = biquad_filter(&data, section, zi);
-    }
-
-    // Reverse
-    data.reverse();
-
-    // Backward pass: cascade all sections again
-    for (sec_idx, section) in sections.iter().enumerate() {
-        // As in the forward pass, the first sample carries the cumulative
-        // steady-state gain of all preceding sections in this pass.
-        let scale = data[0];
-        let zi = [zi_base[sec_idx][0] * scale, zi_base[sec_idx][1] * scale];
-        data = biquad_filter(&data, section, zi);
-    }
-
-    // Reverse back to original order
-    data.reverse();
-
-    // Trim padding
-    data[padlen..padlen + n].to_vec()
+    FiltfiltWorkspace::new()
+        .process_with_padlen(signal, sections, padlen)
+        .to_vec()
 }
 
 /// Apply forward-reverse filtering (zero-phase) through a cascade of biquad sections.
@@ -152,6 +88,112 @@ pub fn filtfilt<T: FilterFloat>(signal: &[T], sections: &[BiquadCoefficients<T>]
     // with narrow high-order filters.
     let padlen = (6 * (2 * sections.len() + 1)).min(n - 1);
     filtfilt_with_padlen(signal, sections, padlen)
+}
+
+/// Reusable padding and output storage for forward-reverse SOS filtering.
+#[derive(Debug, Default)]
+pub struct FiltfiltWorkspace<T: FilterFloat = f64> {
+    data: Vec<T>,
+}
+
+impl<T: FilterFloat> FiltfiltWorkspace<T> {
+    /// Create an empty workspace.
+    pub fn new() -> Self {
+        Self { data: Vec::new() }
+    }
+
+    /// Reserve space for a signal and the default reflected padding.
+    pub fn prepare(&mut self, signal_len: usize, section_count: usize) {
+        let padding = (6 * (2 * section_count + 1)).min(signal_len.saturating_sub(1));
+        self.data
+            .reserve((signal_len + 2 * padding).saturating_sub(self.data.len()));
+    }
+
+    /// Filter into borrowed workspace output, retaining storage across calls.
+    ///
+    /// After preparation, equal or shorter signals with no more sections allocate
+    /// nothing. Empty sections or fewer than two input samples pass through.
+    pub fn process(&mut self, signal: &[T], sections: &[BiquadCoefficients<T>]) -> &[T] {
+        let padding = (6 * (2 * sections.len() + 1)).min(signal.len().saturating_sub(1));
+        self.process_with_padlen(signal, sections, padding)
+    }
+
+    /// Filter with explicit odd-reflection padding into borrowed storage.
+    ///
+    /// # Panics
+    /// Panics if nonempty filtering of two or more samples requests padding
+    /// greater than or equal to the signal length.
+    pub fn process_with_padlen(
+        &mut self,
+        signal: &[T],
+        sections: &[BiquadCoefficients<T>],
+        padding: usize,
+    ) -> &[T] {
+        self.data.clear();
+        if signal.len() < 2 || sections.is_empty() {
+            self.data.extend_from_slice(signal);
+            return &self.data;
+        }
+        assert!(
+            padding < signal.len(),
+            "padlen ({padding}) must not exceed signal.len() - 1 ({})",
+            signal.len()
+        );
+        // Reserve both ends before appending the center. Otherwise the final
+        // right padding can double a nearly-full long-record allocation.
+        self.data.reserve(signal.len() + 2 * padding);
+        let two = lit::<T>(2.0);
+        for i in (1..=padding).rev() {
+            self.data.push(two * signal[0] - signal[i]);
+        }
+        self.data.extend_from_slice(signal);
+        for i in (1..=padding).rev() {
+            self.data
+                .push(two * signal[signal.len() - 1] - signal[signal.len() - 1 - i]);
+        }
+        for _ in 0..2 {
+            for section in sections {
+                let zi = biquad_zi(section);
+                let first = self.data[0];
+                biquad_filter_in_place(&mut self.data, section, [zi[0] * first, zi[1] * first]);
+            }
+            self.data.reverse();
+        }
+        &self.data[padding..padding + signal.len()]
+    }
+}
+
+/// Filter into caller storage while reusing reflected-padding workspace.
+///
+/// # Panics
+/// Panics unless input and output lengths match.
+pub fn filtfilt_into<T: FilterFloat>(
+    signal: &[T],
+    sections: &[BiquadCoefficients<T>],
+    output: &mut [T],
+    workspace: &mut FiltfiltWorkspace<T>,
+) {
+    assert_eq!(
+        signal.len(),
+        output.len(),
+        "filtfilt input/output length mismatch"
+    );
+    output.copy_from_slice(workspace.process(signal, sections));
+}
+
+fn biquad_filter_in_place<T: FilterFloat>(
+    data: &mut [T],
+    section: &BiquadCoefficients<T>,
+    zi: [T; 2],
+) {
+    let [mut d0, mut d1] = zi;
+    for sample in data {
+        let input = *sample;
+        let output = section.b0 * input + d0;
+        d0 = section.b1 * input - section.a1 * output + d1;
+        d1 = section.b2 * input - section.a2 * output;
+        *sample = output;
+    }
 }
 
 /// Compute steady-state initial conditions for a biquad section (direct form II transposed).

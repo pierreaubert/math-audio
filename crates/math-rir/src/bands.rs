@@ -66,7 +66,7 @@ type CoeffKey = (u64, u64, u64, usize);
 pub struct BandpassWorkspace {
     coeff_cache: HashMap<CoeffKey, Vec<BiquadCoefficients<f64>>>,
     scratch: Vec<f64>,
-    filtered: Vec<f64>,
+    filter: filtfilt::FiltfiltWorkspace<f64>,
     output: Vec<f32>,
 }
 
@@ -131,17 +131,15 @@ impl BandpassWorkspace {
         });
 
         self.scratch.resize(rir.len(), 0.0);
-        self.filtered.resize(rir.len(), 0.0);
         self.output.resize(rir.len(), 0.0);
 
         for (i, &s) in rir.iter().enumerate() {
             self.scratch[i] = f64::from(s);
         }
 
-        let filtfilt_out = filtfilt::filtfilt(&self.scratch, coeffs);
-        self.filtered.copy_from_slice(&filtfilt_out);
-        for i in 0..rir.len() {
-            self.output[i] = self.filtered[i] as f32;
+        let filtered = self.filter.process(&self.scratch, coeffs);
+        for (output, &sample) in self.output.iter_mut().zip(filtered) {
+            *output = sample as f32;
         }
 
         &self.output[..rir.len()]
@@ -204,6 +202,40 @@ pub fn analyze_iso3382_bands(
     let mut contexts: Vec<BandAnalysisContext> =
         bands.iter().map(|_| BandAnalysisContext::new()).collect();
     analyze_iso3382_bands_with_contexts(rir, sample_rate, bands, width, order, &mut contexts)
+}
+
+/// Analyze bands using a bounded, reusable pool of large signal workspaces.
+///
+/// At most `contexts.len()` bands run concurrently. Batches reuse the same
+/// buffers, so long-record memory scales with the pool size rather than the
+/// total number of bands. Results retain the requested band order.
+///
+/// # Panics
+/// Panics if nonempty bands are supplied with an empty workspace pool.
+pub fn analyze_iso3382_bands_with_pool(
+    rir: &[f32],
+    sample_rate: f64,
+    bands: &[f64],
+    width: BandWidth,
+    order: usize,
+    contexts: &mut [BandAnalysisContext],
+) -> Vec<(f64, Iso3382Metrics)> {
+    if bands.is_empty() {
+        return Vec::new();
+    }
+    assert!(!contexts.is_empty(), "band workspace pool cannot be empty");
+    let mut output = Vec::with_capacity(bands.len());
+    for batch in bands.chunks(contexts.len()) {
+        output.extend(analyze_iso3382_bands_with_contexts(
+            rir,
+            sample_rate,
+            batch,
+            width,
+            order,
+            &mut contexts[..batch.len()],
+        ));
+    }
+    output
 }
 
 /// Convenience: ISO octave-band analysis (125 Hz … 8 kHz).

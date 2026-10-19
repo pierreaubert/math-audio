@@ -38,6 +38,14 @@ pub(super) fn design_fir_lowpass<T: FilterFloat>(
         *h_val *= window_coeffs[i];
     }
 
+    // The design is linear phase. Mirror explicitly so custom-filter dispatch
+    // never has to approximate arbitrary taps to recognize generated symmetry.
+    for i in 0..n / 2 {
+        let value = (h[i] + h[n - 1 - i]) / lit(2.0);
+        h[i] = value;
+        h[n - 1 - i] = value;
+    }
+
     // Normalize to unit gain at DC
     let sum: T = h.iter().copied().sum();
     if sum.abs() > lit(1e-10) {
@@ -108,6 +116,12 @@ pub(super) fn design_fir_bandpass<T: FilterFloat>(
     let window_coeffs = generate_window(n, window, kaiser_beta);
     for (i, h_val) in h.iter_mut().enumerate() {
         *h_val *= window_coeffs[i];
+    }
+
+    for i in 0..n / 2 {
+        let value = (h[i] + h[n - 1 - i]) / lit(2.0);
+        h[i] = value;
+        h[n - 1 - i] = value;
     }
 
     // Normalize at the middle of the requested passband. A bandpass has zero

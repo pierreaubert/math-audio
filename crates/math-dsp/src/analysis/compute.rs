@@ -916,6 +916,73 @@ pub fn compute_impulse_response_from_fr(
     (times, impulse)
 }
 
+/// Reconstruct an impulse response from a frequency response, with validity gates.
+///
+/// Wraps [`compute_impulse_response_from_fr`] for callers that only have
+/// response data (imports, older sessions): a malformed grid must not
+/// produce a plausible-looking decay. Returns `None` when the grid has
+/// fewer than 16 points, mismatched lengths, non-ascending or
+/// out-of-band frequencies, more than 10% non-finite magnitude/phase
+/// values, or when the reconstructed impulse is empty, mostly
+/// non-finite, silent, or peaks in its last quarter (a circular-wrap
+/// artifact, e.g. from a sign-flipped phase).
+#[must_use]
+pub fn reconstruct_impulse_response(
+    frequencies: &[f32],
+    magnitude_db: &[f32],
+    phase_deg: &[f32],
+    sample_rate: f32,
+) -> Option<(Vec<f32>, Vec<f32>)> {
+    if frequencies.len() < 16
+        || magnitude_db.len() != frequencies.len()
+        || phase_deg.len() != frequencies.len()
+        || !sample_rate.is_finite()
+        || sample_rate <= 0.0
+    {
+        return None;
+    }
+    if frequencies.windows(2).any(|pair| {
+        pair[1].partial_cmp(&pair[0]) != Some(std::cmp::Ordering::Greater)
+            || !pair[0].is_finite()
+    }) {
+        return None;
+    }
+    let first = frequencies[0];
+    let last = frequencies[frequencies.len() - 1];
+    if first <= 0.0 || !last.is_finite() || last > sample_rate / 2.0 {
+        return None;
+    }
+    let finite_ratio = |values: &[f32]| {
+        values.iter().filter(|value| value.is_finite()).count() as f32 / values.len() as f32
+    };
+    if finite_ratio(magnitude_db) < 0.9 || finite_ratio(phase_deg) < 0.9 {
+        return None;
+    }
+
+    let (times, impulse) =
+        compute_impulse_response_from_fr(frequencies, magnitude_db, phase_deg, sample_rate);
+    if impulse.is_empty() || impulse.iter().any(|value| !value.is_finite()) {
+        return None;
+    }
+    let (peak_index, peak) =
+        impulse
+            .iter()
+            .enumerate()
+            .fold((0usize, 0.0f32), |(best_i, best), (i, value)| {
+                if value.abs() > best {
+                    (i, value.abs())
+                } else {
+                    (best_i, best)
+                }
+            });
+    // `compute_impulse_response_from_fr` peak-normalizes, so a silent or
+    // degenerate reconstruction shows up as a zero/flat peak here.
+    if peak <= 0.0 || peak_index > impulse.len() * 3 / 4 {
+        return None;
+    }
+    Some((times, impulse))
+}
+
 /// Compute Schroeder energy decay curve
 pub(super) fn compute_schroeder_decay(impulse: &[f32]) -> Vec<f32> {
     let mut energy = 0.0;
@@ -947,56 +1014,65 @@ pub fn compute_rt60_broadband(impulse: &[f32], sample_rate: f32) -> f32 {
         .unwrap_or(0.0)
 }
 
-/// Compute Clarity (C50, C80) from Impulse Response (Broadband)
-/// Returns (C50_dB, C80_dB)
+/// Compute capped broadband clarity relative to the first significant arrival.
+///
+/// Arrival is the first sample at least 1% of the absolute peak (-40 dB).
+/// Use [`compute_clarity_broadband_at`] when the measured arrival is known.
+/// Returns (C50, C80) in dB, capped to ±60 dB for display compatibility.
+/// Empty/silent input returns (-60, -60); non-finite input returns NaNs.
 pub fn compute_clarity_broadband(impulse: &[f32], sample_rate: f32) -> (f32, f32) {
-    let mut energy_0_50 = 0.0;
-    let mut energy_50_inf = 0.0;
-    let mut energy_0_80 = 0.0;
-    let mut energy_80_inf = 0.0;
+    let peak = impulse
+        .iter()
+        .fold(0.0_f32, |peak, sample| peak.max(sample.abs()));
+    let start = impulse
+        .iter()
+        .position(|sample| f64::from(sample.abs()) >= f64::from(peak) * 0.01)
+        .unwrap_or(0);
+    compute_clarity_broadband_at(impulse, sample_rate, start)
+}
 
-    let samp_50ms = (0.050 * sample_rate) as usize;
-    let samp_80ms = (0.080 * sample_rate) as usize;
-
-    for (i, &samp) in impulse.iter().enumerate() {
-        let sq = samp * samp;
-
-        if i < samp_50ms {
-            energy_0_50 += sq;
-        } else {
-            energy_50_inf += sq;
-        }
-
-        if i < samp_80ms {
-            energy_0_80 += sq;
-        } else {
-            energy_80_inf += sq;
+/// Compute capped broadband clarity from an explicitly supplied arrival index.
+///
+/// All energies use f64; nonzero gain changes do not change their ratio.
+/// Samples before `start_sample` are excluded. Empty/silent input or a start
+/// beyond the input returns (-60, -60); invalid rate/non-finite input returns NaNs.
+pub fn compute_clarity_broadband_at(
+    impulse: &[f32],
+    sample_rate: f32,
+    start_sample: usize,
+) -> (f32, f32) {
+    if !sample_rate.is_finite() || sample_rate <= 0.0 || impulse.iter().any(|s| !s.is_finite()) {
+        return (f32::NAN, f32::NAN);
+    }
+    let Some(impulse) = impulse.get(start_sample..) else {
+        return (-60.0, -60.0);
+    };
+    let mut early = [0.0_f64; 2];
+    let mut late = [0.0_f64; 2];
+    let boundaries = [
+        (0.050 * f64::from(sample_rate)) as usize,
+        (0.080 * f64::from(sample_rate)) as usize,
+    ];
+    for (i, &sample) in impulse.iter().enumerate() {
+        let energy = f64::from(sample).powi(2);
+        for window in 0..2 {
+            if i < boundaries[window] {
+                early[window] += energy;
+            } else {
+                late[window] += energy;
+            }
         }
     }
-
-    // When late energy is negligible, clarity is very high (capped at 60 dB)
-    // When early energy is negligible, clarity is very low (capped at -60 dB)
-    const MAX_CLARITY_DB: f32 = 60.0;
-
-    let c50 = if energy_50_inf > 1e-12 && energy_0_50 > 1e-12 {
-        let ratio = energy_0_50 / energy_50_inf;
-        (10.0 * ratio.log10()).clamp(-MAX_CLARITY_DB, MAX_CLARITY_DB)
-    } else if energy_0_50 > energy_50_inf {
-        MAX_CLARITY_DB // Early energy dominates - excellent clarity
-    } else {
-        -MAX_CLARITY_DB // Late energy dominates - poor clarity
+    let clarity = |early: f64, late: f64| {
+        if early > 0.0 && late > 0.0 {
+            (10.0 * (early / late).log10()).clamp(-60.0, 60.0) as f32
+        } else if early > late {
+            60.0
+        } else {
+            -60.0
+        }
     };
-
-    let c80 = if energy_80_inf > 1e-12 && energy_0_80 > 1e-12 {
-        let ratio = energy_0_80 / energy_80_inf;
-        (10.0 * ratio.log10()).clamp(-MAX_CLARITY_DB, MAX_CLARITY_DB)
-    } else if energy_0_80 > energy_80_inf {
-        MAX_CLARITY_DB // Early energy dominates - excellent clarity
-    } else {
-        -MAX_CLARITY_DB // Late energy dominates - poor clarity
-    };
-
-    (c50, c80)
+    (clarity(early[0], late[0]), clarity(early[1], late[1]))
 }
 
 /// Compute RT60 spectrum using octave band filtering.
@@ -1436,6 +1512,88 @@ pub fn compute_spectrogram(
     let freqs: Vec<f32> = (0..num_bins).map(|i| i as f32 * freq_step).collect();
 
     (spectrogram, freqs, times)
+}
+
+/// Display-ready spectrogram grid produced by [`display_spectrogram`]:
+/// `cols * rows` normalized magnitudes in row-major order, row 0 being
+/// the highest frequencies.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DisplaySpectrogram {
+    /// Number of time columns (≤ the requested maximum).
+    pub cols: usize,
+    /// Number of frequency rows (≤ the requested maximum).
+    pub rows: usize,
+    /// Normalized magnitudes in `0.0..=1.0`, row-major, row 0 = highest
+    /// frequencies; `cells.len() == cols * rows`.
+    pub cells: Vec<f32>,
+}
+
+/// Downsample a dB spectrogram (`[time][frequency]`, as returned by
+/// [`compute_spectrogram`]) to at most `max_cols * max_rows` cells and
+/// normalize it to a peak-relative window of `dynamic_range_db`.
+///
+/// Each output cell keeps the maximum dB of its source block so short
+/// events stay visible. Output values are clamped to `0.0..=1.0`
+/// (1.0 = loudest block). Returns `None` for empty, ragged, or
+/// non-finite input and for zero display bounds.
+#[must_use]
+pub fn display_spectrogram(
+    spectrogram: &[Vec<f32>],
+    max_cols: usize,
+    max_rows: usize,
+    dynamic_range_db: f32,
+) -> Option<DisplaySpectrogram> {
+    if spectrogram.is_empty() || max_cols == 0 || max_rows == 0 {
+        return None;
+    }
+    if !dynamic_range_db.is_finite() || dynamic_range_db <= 0.0 {
+        return None;
+    }
+    let num_time_slices = spectrogram.len();
+    let num_freq_bins = spectrogram[0].len();
+    if num_freq_bins == 0
+        || spectrogram
+            .iter()
+            .any(|row| row.len() != num_freq_bins || row.iter().any(|value| !value.is_finite()))
+    {
+        return None;
+    }
+
+    let cols = num_time_slices.min(max_cols);
+    let rows = num_freq_bins.min(max_rows);
+    // Row 0 is the top of the plot = highest frequencies.
+    let mut cells = vec![0.0f32; cols * rows];
+    let mut peak_db = f32::NEG_INFINITY;
+    for col in 0..cols {
+        let t_start = col * num_time_slices / cols;
+        let t_end = ((col + 1) * num_time_slices / cols)
+            .max(t_start + 1)
+            .min(num_time_slices);
+        for row in 0..rows {
+            let f_hi = num_freq_bins - row * num_freq_bins / rows;
+            let f_lo = (num_freq_bins - (row + 1) * num_freq_bins / rows).min(f_hi - 1);
+            let mut max_val = f32::NEG_INFINITY;
+            for slice in &spectrogram[t_start..t_end] {
+                for &val in &slice[f_lo..f_hi] {
+                    if val > max_val {
+                        max_val = val;
+                    }
+                }
+            }
+            if max_val > peak_db {
+                peak_db = max_val;
+            }
+            cells[row * cols + col] = max_val;
+        }
+    }
+    if !peak_db.is_finite() {
+        return None;
+    }
+    let floor_db = peak_db - dynamic_range_db;
+    for cell in &mut cells {
+        *cell = ((*cell - floor_db) / dynamic_range_db).clamp(0.0, 1.0);
+    }
+    Some(DisplaySpectrogram { cols, rows, cells })
 }
 
 /// Compute a log-frequency weighted reference response level in dB.

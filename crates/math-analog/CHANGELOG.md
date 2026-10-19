@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.5] - 2026-10-18
+
+### Fixed
+- Triode load-line solving uses an analytic derivative and safeguarded Newton
+  steps inside a maintained root bracket. Large grid transitions no longer
+  exhaust rail-to-rail restarts and hold an incorrect previous plate value;
+  the original residual tolerance and iteration cap remain unchanged.
+- Added independent f64 bisection and derivative checks alongside the driven
+  small-buffer CPU budget that exposed the slow/failing transitions.
+- Tone-stack automation builds identical channel coefficients once per frame,
+  retaining independent capacitor/defect histories. A bit-exact independent-mono
+  comparison covers smoothed changes, reset, and structural value-set changes.
+
+### Tests
+- Added an independent f64 harmonic waveform and complex-DFT oracle across
+  rates, levels, drive, frequencies, and ten harmonic/alias components.
+- Allocation checks include the first prepared callback, 32/64/128/256 frames,
+  parameter changes, reset, driven input, and denormal tails.
+- Callback tests report wall and thread CPU timing separately, enforcing the
+  25% work budget in uninstrumented release builds, including small buffers.
+  `MATH_AUDIO_ENFORCE_REALTIME=1` additionally enforces wall deadlines on an
+  isolated runner. Linux/macOS use the current-thread CPU clock; other platforms
+  retain wall-time enforcement. The SIMD report also times the portable compiler
+  baseline without inhibiting its vectorization.
+
 ## [0.5.4] - 2026-09-27
 
 ### Added

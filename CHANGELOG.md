@@ -32,6 +32,25 @@ Work present in the tree but not yet committed or released:
   Yeh FMV tone-stack component models (IDs 6–8) with the
   `component_report` characterization example.
 
+## [0.5.4] - 2026-10-18
+
+- Implemented the code audit's DSP correctness fixes: sound FIR SIMD type/feature
+  boundaries, exact custom taps, whole-program and near-threshold loudness,
+  decay-fit headroom, FIR true peaks, clarity invariance, and complete STFT streams.
+- Driven small-buffer validation also exposed incorrect held triode plate values
+  after grid jumps. The triode solver now uses an analytic derivative and
+  safeguarded monotone root bracket, checked against independent f64 bisection.
+- Added prepared/reusable FIR, Welch, common-clock resampling, filtfilt, and decay
+  APIs; reduced median-selection work and bounded multiband workspace concurrency.
+- Made required QA references fail visibly and verified executed comparison
+  records against the complete manifest. Isolated hull exports and strengthened
+  numerical, allocation, callback-size, and maintained benchmark coverage.
+- Versions: math-dsp 0.5.35, math-iir-fir 0.5.27, math-rir 0.5.13,
+  math-qa 0.5.4, math-analog 0.5.5, math-convex-hull 0.3.4.
+- Broadband clarity now infers arrival by default; use the new explicit-start API
+  for an existing array-origin convention. True-peak reconstruction has FIR delay
+  and finite-tail completion. Unsupported decay fits now return no measurement.
+
 ## math-rir 0.5.12
 
 - `math-rir`: full indirect IR-only Speech Transmission Index using the

@@ -21,3 +21,5 @@ mod true_peak_detector;
 pub use ebu_r128::*;
 pub use misc::*;
 pub use mode::*;
+
+pub(crate) use consts::{TRUE_PEAK_FIR_LEN, TRUE_PEAK_FIR_PHASES};

@@ -37,6 +37,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   bench); aarch64 NEON 8-output symmetric-FIR block path and unrolled DF1
   scalar path (+12% aggregate throughput, bit-identical checksums).
 
+## [0.5.27] - 2026-10-18
+
+### Fixed
+- FIR SIMD dispatch checks actual f64 type identity; eight-byte custom numeric
+  types no longer enter f64 pointer casts. AVX2 kernels also require FMA.
+- Custom FIR coefficients require exact symmetry, preserving tiny asymmetric
+  taps and sample/block equivalence. Generated linear-phase taps are explicitly
+  mirrored before normalization.
+
+### Performance and tests
+- FIR `prepare` reserves scratch and reversed taps, preserves them through reset,
+  and chunks oversized callbacks without allocation. General block filtering
+  reuses the available SIMD sample kernel.
+- Added `FiltfiltWorkspace` and `filtfilt_into`; SOS passes reuse one padded buffer.
+- Added precision/symmetry/size allocation and convolution tests, a comprehensive
+  FIR benchmark matrix, and x86 feature combinations with and without FMA.
+
 ## [0.5.23] - 2026-09-09
 
 ### Fixed

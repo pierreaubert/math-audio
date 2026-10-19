@@ -2,25 +2,12 @@
 //!
 //! These tests correspond to the test cases in the C++ convhull_3d library.
 
-use directories::ProjectDirs;
 use math_convex_hull::{ConvexHull3D, Vertex, export_html, export_obj, testdata};
 use std::fs;
 use std::path::PathBuf;
 
-/// Get the data directory using the directories crate
-fn get_data_dir() -> PathBuf {
-    let proj_dirs = ProjectDirs::from("org", "spinorama", "math-audio")
-        .expect("Failed to determine project directories");
-
-    proj_dirs.cache_dir().to_path_buf()
-}
-
-/// Helper function to run a test and generate visualizations
-fn run_test_with_visualization(
-    name: &str,
-    vertices: Vec<Vertex>,
-    expected_min_faces: usize,
-) -> (usize, usize) {
+/// Check hull properties independently of visualization exports
+fn run_hull_case(name: &str, vertices: Vec<Vertex>, expected_min_faces: usize) -> (usize, usize) {
     println!("\n=== Test: {} ===", name);
     println!("Input vertices: {}", vertices.len());
 
@@ -50,36 +37,20 @@ fn run_test_with_visualization(
     assert!(volume > 0.0, "Volume must be positive");
     assert!(surface_area > 0.0, "Surface area must be positive");
 
-    // Create output directory
-    let output_dir = get_data_dir().join("convexhull3d");
-    fs::create_dir_all(&output_dir).unwrap();
-    let output_dir = output_dir.to_string_lossy().to_string();
-
-    // Export OBJ
-    let obj_path = format!("{}/convhull_{}.obj", output_dir, name);
-    export_obj(&hull, &obj_path).expect("Failed to export OBJ");
-    println!("Exported OBJ: {}", obj_path);
-
-    // Export HTML
-    let html_path = format!("{}/convhull_{}.html", output_dir, name);
-    let title = format!("Convex Hull: {}", name);
-    export_html(&hull, &html_path, &title).expect("Failed to export HTML");
-    println!("Exported HTML: {}", html_path);
-
     (num_faces, num_vertices)
 }
 
 #[test]
 fn test_tetrahedron() {
     let vertices = testdata::tetrahedron_vertices();
-    let (num_faces, _) = run_test_with_visualization("tetrahedron", vertices, 4);
+    let (num_faces, _) = run_hull_case("tetrahedron", vertices, 4);
     assert_eq!(num_faces, 4, "A tetrahedron should have exactly 4 faces");
 }
 
 #[test]
 fn test_cube() {
     let vertices = testdata::cube_vertices(2.0);
-    let (num_faces, _) = run_test_with_visualization("cube", vertices, 12);
+    let (num_faces, _) = run_hull_case("cube", vertices, 12);
     // A cube should have 12 triangular faces (2 per square face)
     // Note: due to numerical precision and triangulation choices, we might get 12-14 faces
     assert!(
@@ -92,7 +63,7 @@ fn test_cube() {
 #[test]
 fn test_octahedron() {
     let vertices = testdata::octahedron_vertices();
-    let (num_faces, _) = run_test_with_visualization("octahedron", vertices, 8);
+    let (num_faces, _) = run_hull_case("octahedron", vertices, 8);
     // Octahedron has 8 faces, but numerical precision might cause slight variations
     assert!(
         (8..=12).contains(&num_faces),
@@ -104,7 +75,7 @@ fn test_octahedron() {
 #[test]
 fn test_icosahedron() {
     let vertices = testdata::icosahedron_vertices();
-    let (num_faces, _) = run_test_with_visualization("icosahedron", vertices, 20);
+    let (num_faces, _) = run_hull_case("icosahedron", vertices, 20);
     // Icosahedron has 20 faces, but numerical precision might cause variations
     assert!(
         (20..=32).contains(&num_faces),
@@ -117,28 +88,28 @@ fn test_icosahedron() {
 fn test_random_sphere_936() {
     // This corresponds to the "random spherical distribution" test in C++
     let vertices = testdata::random_sphere_points(936, 1.0);
-    run_test_with_visualization("rand_sph_936", vertices, 100);
+    run_hull_case("rand_sph_936", vertices, 100);
 }
 
 #[test]
 fn test_tdesign_180_sphere() {
     // This corresponds to the T-Design 180-point test in C++
     let vertices = testdata::tdesign_180_sphere();
-    run_test_with_visualization("tdesign_180_sph", vertices, 100);
+    run_hull_case("tdesign_180_sph", vertices, 100);
 }
 
 #[test]
 fn test_tdesign_840_sphere() {
     // This corresponds to the T-Design 840-point test in C++
     let vertices = testdata::tdesign_840_sphere();
-    run_test_with_visualization("tdesign_840_sph", vertices, 500);
+    run_hull_case("tdesign_840_sph", vertices, 500);
 }
 
 #[test]
 fn test_tdesign_5100_sphere() {
     // This corresponds to the T-Design 5100-point test in C++
     let vertices = testdata::tdesign_5100_sphere();
-    run_test_with_visualization("tdesign_5100_sph", vertices, 3000);
+    run_hull_case("tdesign_5100_sph", vertices, 3000);
 }
 
 #[test]
@@ -147,7 +118,7 @@ fn test_cube_with_interior_100() {
     // Note: random points are generated within the cube's bounding box,
     // which may slightly exceed the cube's corners, so hull may be larger
     let vertices = testdata::cube_with_interior_points(2.0, 100);
-    let (num_faces, _) = run_test_with_visualization("cube_interior_100", vertices, 12);
+    let (num_faces, _) = run_hull_case("cube_interior_100", vertices, 12);
     // The hull should have at least 12 faces (minimum for a cube-like shape)
     assert!(
         num_faces >= 12,
@@ -162,7 +133,7 @@ fn test_cube_with_interior_1000() {
     // Note: random points are generated within the cube's bounding box,
     // which may slightly exceed the cube's corners, so hull may be larger
     let vertices = testdata::cube_with_interior_points(2.0, 1000);
-    let (num_faces, _) = run_test_with_visualization("cube_interior_1000", vertices, 12);
+    let (num_faces, _) = run_hull_case("cube_interior_1000", vertices, 12);
     // The hull should have at least 12 faces (minimum for a cube-like shape)
     assert!(
         num_faces >= 12,
@@ -178,13 +149,8 @@ fn test_volume_calculation() {
     let hull = ConvexHull3D::build(&vertices).unwrap();
     let volume = hull.volume();
 
-    // Volume should be positive and reasonable for a 2x2x2 cube
-    // (Note: exact value may vary due to triangulation method)
-    assert!(
-        volume > 0.0 && volume < 15.0,
-        "Volume should be reasonable, got {}",
-        volume
-    );
+    assert!((volume - 8.0).abs() < 1e-10, "cube volume: {volume}");
+    assert!((hull.surface_area() - 24.0).abs() < 1e-10);
 }
 
 #[test]
@@ -362,8 +328,8 @@ fn test_process_all_obj_files() {
                         );
 
                         // Export results
-                        let output_dir = get_data_dir().join("convexhull3d");
-                        fs::create_dir_all(&output_dir).unwrap();
+                        let temporary = tempfile::tempdir().unwrap();
+                        let output_dir = temporary.path();
 
                         let obj_path = output_dir.join(format!("convhull_{}.obj", filename));
                         let html_path = output_dir.join(format!("convhull_{}.html", filename));
@@ -401,4 +367,21 @@ fn test_process_all_obj_files() {
         success_count > 0,
         "At least some OBJ files should process successfully"
     );
+}
+
+#[test]
+fn exports_use_an_isolated_temporary_directory() {
+    let directory = tempfile::tempdir().unwrap();
+    let hull = ConvexHull3D::build(&testdata::cube_vertices(2.0)).unwrap();
+    let obj = directory.path().join("cube.obj");
+    let html = directory.path().join("cube.html");
+    export_obj(&hull, obj.to_str().unwrap()).unwrap();
+    export_html(&hull, html.to_str().unwrap(), "Cube").unwrap();
+    assert!(
+        fs::read_to_string(&obj)
+            .unwrap()
+            .lines()
+            .any(|line| line.starts_with("v "))
+    );
+    assert!(fs::read_to_string(&html).unwrap().contains("Cube"));
 }

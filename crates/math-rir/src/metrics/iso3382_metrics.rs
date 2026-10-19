@@ -4,7 +4,7 @@ use crate::bands::{BandAnalysisContext, BandWidth};
 use crate::config::SsirConfig;
 use crate::detection::find_direct_sound_toa;
 
-use super::{DecayCurve, DecayWorkspace};
+use super::DecayWorkspace;
 
 /// ISO 3382 single-band acoustic metrics for one RIR.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -158,7 +158,7 @@ fn compute_iso3382_metrics(
     };
 
     // Schroeder decay → EDT / T20 / T30.
-    let curve = DecayCurve::from_rir_with_workspace(rir, sample_rate, start, None, decay_ws);
+    let curve = decay_ws.compute(rir, sample_rate, start, None);
     let (edt_s, edt_r2) = match curve.fit_db_range(0.0, -10.0) {
         Some((slope, _, r2)) if slope < 0.0 => (-60.0 / slope, r2),
         _ => (f64::NAN, 0.0),

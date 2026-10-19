@@ -287,6 +287,7 @@ qa-iir-fir: (_qa "math-iir-fir" qa_cov_iir_fir) examples-iir
 	{{cargo}} bench -p math-iir-fir --bench biquad_bench -- --quick
 	{{cargo}} bench -p math-iir-fir --bench response_bench -- --quick
 	{{cargo}} bench -p math-iir-fir --bench fir_design_bench -- --quick
+	{{cargo}} bench -p math-iir-fir --bench audit_hot_paths -- --quick
 
 qa-optimisation: (_qa "math-optimisation" qa_cov_optimisation) examples-optimisation
 	{{cargo}} build --release --bin run-de -p math-optimisation
@@ -305,6 +306,7 @@ qa-dsp: (_qa "math-dsp" qa_cov_dsp)
 	if [ "$(uname -m)" = "x86_64" ]; then RUSTFLAGS="-C target-feature=+avx2" {{cargo}} check -p math-dsp --all-targets && RUSTFLAGS="-C target-feature=+avx2" {{cargo}} test -p math-dsp; else echo "Skipping AVX2 pass (not x86_64)"; fi
 	{{cargo}} bench -p math-dsp --bench welch_spectrum -- --quick
 	{{cargo}} bench -p math-dsp --bench audio_features -- --quick
+	{{cargo}} bench -p math-dsp --bench audit_hot_paths -- --quick
 
 qa-analog: (_qa "math-analog" qa_cov_analog)
 	{{cargo}} run --release -p math-analog --example analysis_report
@@ -332,13 +334,22 @@ qa-mathqa:
 	{{cargo}} fmt -p math-qa -- --check
 	{{cargo}} clippy -p math-qa --all-targets -- -D warnings
 	{{cargo}} test -p math-qa --lib --release
-	{{cargo}} test -p math-qa --tests --release
+	just qa-mathqa-records
 	{{cargo}} test -p math-qa --doc
 	{{cargo}} llvm-cov -p math-qa --summary-only --release --fail-under-lines {{qa_cov_math_qa}} --ignore-filename-regex 'rustlib/src/rust|registry/src'
 
-# Smoke tier: contract + fast engine comparisons (skips without goldens).
+# Capture comparison records and require every manifest case to execute.
+qa-mathqa-records:
+	#!/usr/bin/env bash
+	set -euo pipefail
+	qa_log="$(mktemp)"
+	trap 'rm -f "$qa_log"' EXIT
+	{{cargo}} test -p math-qa --tests --release -- --nocapture 2>&1 | tee "$qa_log"
+	{{cargo}} run -p math-qa --bin verify-qa-results --release -- "$qa_log"
+
+# Smoke tier: contract + fast engine comparisons (references are required).
 qa-mathqa-smoke:
-	{{cargo}} test -p math-qa --release --test qa_contract --test wolfram_biquad_response --test wolfram_fft_peak --test wolfram_schroeder_t60 --test wolfram_comb_first_dip --test wolfram_third_octave_spl --test wolfram_svf_response --test wolfram_test_functions --test wolfram_kautz_correction --test wolfram_sti
+	{{cargo}} test -p math-qa --release --test qa_contract --test wolfram_biquad_response --test wolfram_fft_peak --test wolfram_schroeder_t60 --test wolfram_comb_first_dip --test wolfram_third_octave_spl --test wolfram_svf_response --test wolfram_test_functions --test wolfram_kautz_correction --test wolfram_sti --test wolfram_capture_tdoa --test wolfram_capture_array
 
 # Deep tier: direct-summation spot comparisons (engine-heavy goldens).
 qa-mathqa-deep:

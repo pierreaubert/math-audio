@@ -1,5 +1,4 @@
-#[cfg(not(test))]
-use super::consts::MAX_GATING_BLOCKS;
+use super::consts::INITIAL_GATING_BLOCK_CAPACITY;
 use super::consts::TRUE_PEAK_FIR_REFERENCE_SAMPLE_RATE;
 use super::kweight_filter::KWeightFilter;
 use super::misc::channel_weight;
@@ -7,8 +6,6 @@ use super::misc::energy_to_loudness;
 use super::misc::loudness_to_energy;
 use super::mode::Mode;
 use super::sub_block_ring::SubBlockRing;
-#[cfg(test)]
-use super::tests::MAX_GATING_BLOCKS;
 use super::true_peak_detector::TruePeakDetector;
 use std::collections::VecDeque;
 
@@ -92,9 +89,7 @@ impl EbuR128 {
             momentary_ring: SubBlockRing::new(4), // 4 × 100ms = 400ms
             shortterm_ring: SubBlockRing::new(30), // 30 × 100ms = 3s
             gating_blocks: if mode.has(Mode::I) {
-                // Prepare the complete rolling window so push_back never grows
-                // storage on the audio thread, including after ten minutes.
-                VecDeque::with_capacity(MAX_GATING_BLOCKS)
+                VecDeque::with_capacity(INITIAL_GATING_BLOCK_CAPACITY)
             } else {
                 VecDeque::new()
             },
@@ -102,6 +97,16 @@ impl EbuR128 {
             prev_sample_peak: vec![0.0; nc],
             true_peak_detector,
         })
+    }
+
+    /// Reserve storage for at least `total_blocks` accepted program blocks.
+    ///
+    /// Reserve ten blocks per second of the maximum program length before
+    /// processing to prevent history growth from allocating in callbacks.
+    /// Reset retains the reserved capacity. This does not limit history.
+    pub fn reserve_gating_blocks(&mut self, total_blocks: usize) {
+        self.gating_blocks
+            .reserve(total_blocks.saturating_sub(self.gating_blocks.len()));
     }
 
     /// Feed interleaved f32 audio frames.
@@ -173,14 +178,12 @@ impl EbuR128 {
             && self.momentary_ring.is_full()
             && let Some(mean_energy) = self.momentary_ring.mean()
         {
-            // Cap at ~1 hour of blocks (36000 at 10 blocks/sec) to prevent
-            // unbounded memory growth during long playback sessions.
-            // When full, drop the oldest block (approximation acceptable for
-            // integrated loudness which is already a long-term average).
-            if self.gating_blocks.len() >= MAX_GATING_BLOCKS {
-                self.gating_blocks.pop_front();
+            // Whole-program integration cannot evict accepted history. Below
+            // the absolute gate a block can never participate in either pass.
+            // Keep NaNs so contamination remains visible to the caller.
+            if mean_energy > loudness_to_energy(-70.0) || mean_energy.is_nan() {
+                self.gating_blocks.push_back(mean_energy);
             }
-            self.gating_blocks.push_back(mean_energy);
         }
 
         // Reset accumulators
@@ -216,6 +219,11 @@ impl EbuR128 {
     }
 
     /// Integrated loudness (entire program) in LUFS, with EBU R128 two-pass gating.
+    ///
+    /// Above-absolute-gate blocks are retained until reset, using approximately
+    /// 80 bytes per second of accepted audio. Storage grows past the initially
+    /// reserved hour; use [`Self::reserve_gating_blocks`] before processing when
+    /// the maximum program duration is known and callback allocation matters.
     pub fn loudness_global(&self) -> Result<f64, String> {
         if self.gating_blocks.is_empty() {
             return Ok(f64::NEG_INFINITY);
@@ -255,7 +263,7 @@ impl EbuR128 {
         // Pass 2: Relative gate at mean - 10 LU.
         // Per BS.1770 / libebur128 the factor is 10^(-10/10) = 0.1 exactly;
         // the -0.691 absolute offset must not leak into the relative factor.
-        let rel_gate_energy = mean_above_abs * 0.1;
+        let rel_gate_energy = (mean_above_abs * 0.1).max(abs_gate_energy);
         let mut sum_rel = 0.0f64;
         let mut count_rel = 0usize;
         for &e in blocks {
@@ -367,7 +375,7 @@ impl EbuR128 {
 
         // Relative gate at mean - 10 LU (factor 10^(-10/10) = 0.1 exactly,
         // matching compute_gated_loudness and libebur128)
-        let rel_gate_energy = mean_above_abs * 0.1;
+        let rel_gate_energy = (mean_above_abs * 0.1).max(abs_gate_energy);
         let mut count: u64 = 0;
         let mut total_energy: f64 = 0.0;
         for &e in &self.gating_blocks {

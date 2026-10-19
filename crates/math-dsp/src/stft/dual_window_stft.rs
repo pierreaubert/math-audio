@@ -7,9 +7,9 @@ use rustfft::num_complex::Complex;
 ///
 /// Uses a long analysis window for frequency resolution and a shorter
 /// synthesis window for low-latency output. The steady-state output latency
-/// is `analysis_size - 1` samples: the first hop fires once the ring buffer
-/// has been filled with `analysis_size` samples (after pushing the sample at
-/// index `analysis_size - 1`), so `output[n] = input[n - (analysis_size - 1)]`.
+/// is `analysis_size - 1` samples, including startup. Initial zero padding
+/// supplies the earlier frames needed to reconstruct the first input sample.
+/// Use [`Self::finish_into`] to recover the delayed tail of a finite stream.
 pub struct DualWindowStft {
     pub(super) analysis_window: Vec<f32>,
     pub(super) synthesis_window: Vec<f32>,
@@ -36,7 +36,7 @@ impl DualWindowStft {
 
         let fft = RealFftProcessor::new_bidirectional(analysis_size);
 
-        Self {
+        let mut processor = Self {
             analysis_window,
             synthesis_window,
             analysis_size,
@@ -44,6 +44,14 @@ impl DualWindowStft {
             output_accum: vec![0.0; analysis_size * 3],
             output_read_pos: 0,
             fft,
+        };
+        processor.prime();
+        processor
+    }
+
+    fn prime(&mut self) {
+        for _ in 0..self.analysis_size - self.input_ring.hop_size {
+            self.input_ring.push(0.0);
         }
     }
 
@@ -123,6 +131,11 @@ impl DualWindowStft {
     where
         F: FnMut(&mut [Complex<f32>]),
     {
+        assert_eq!(
+            input.len(),
+            output.len(),
+            "STFT input/output length mismatch"
+        );
         for (i, &sample) in input.iter().enumerate() {
             if self.analyze(sample) {
                 process_fn(&mut self.fft.freq_buffer);
@@ -132,12 +145,34 @@ impl DualWindowStft {
         }
     }
 
-    /// Get the output latency in samples.
+    /// Drain the delayed finite-stream tail into `output`, then reset.
     ///
-    /// Returns `analysis_size - 1`. The ring accumulator triggers its first
-    /// hop when the sample at index `analysis_size - 1` is pushed, and the
-    /// synthesized frame is written starting at the current output position,
-    /// so steady-state output satisfies `output[n] = input[n - latency]`.
+    /// Calls the spectral callback for zero-padded final frames. This operation
+    /// does not allocate. For zero-preserving callbacks, repeated drains after
+    /// reset produce zeros. Only STFT state is reset; callback state is caller-owned.
+    ///
+    /// # Panics
+    /// Panics unless `output.len()` equals [`Self::latency_samples`].
+    pub fn finish_into<F>(&mut self, output: &mut [f32], mut process_fn: F)
+    where
+        F: FnMut(&mut [Complex<f32>]),
+    {
+        assert_eq!(
+            output.len(),
+            self.latency_samples(),
+            "STFT drain length mismatch"
+        );
+        for sample in output {
+            if self.analyze(0.0) {
+                process_fn(&mut self.fft.freq_buffer);
+                self.synthesize_in_place();
+            }
+            *sample = self.read_output();
+        }
+        self.reset();
+    }
+
+    /// Return the input-to-output delay, including startup, in samples.
     pub fn latency_samples(&self) -> usize {
         self.analysis_size - 1
     }
@@ -145,6 +180,7 @@ impl DualWindowStft {
     /// Reset all internal state.
     pub fn reset(&mut self) {
         self.input_ring.reset();
+        self.prime();
         self.output_accum.fill(0.0);
         self.output_read_pos = 0;
     }

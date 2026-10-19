@@ -15,6 +15,20 @@ fn vertex_strategy() -> impl Strategy<Value = Vertex> {
         .prop_map(|(x, y, z)| Vertex::new(x, y, z))
 }
 
+// Four fixed, affinely independent anchors guarantee nondegeneracy even
+// after proptest shrinks every random coordinate to zero.
+fn nondegenerate_points(maximum: usize) -> impl Strategy<Value = Vec<Vertex>> {
+    prop::collection::vec(vertex_strategy(), 0..maximum).prop_map(|mut points| {
+        points.extend([
+            Vertex::new(-20.0, -20.0, -20.0),
+            Vertex::new(20.0, -20.0, -20.0),
+            Vertex::new(-20.0, 20.0, -20.0),
+            Vertex::new(-20.0, -20.0, 20.0),
+        ]);
+        points
+    })
+}
+
 fn approx_eq(a: f64, b: f64, eps: f64) -> bool {
     (a - b).abs() <= eps
 }
@@ -59,11 +73,8 @@ proptest! {
 
     /// INVARIANT: every input point lies inside the hull or on its boundary.
     #[test]
-    fn all_input_points_inside_or_on_hull(points in prop::collection::vec(vertex_strategy(), 4..30)) {
-        let hull = match ConvexHull3D::build(&points) {
-            Ok(h) => h,
-            Err(_) => return Ok(()), // skip degenerate inputs
-        };
+    fn all_input_points_inside_or_on_hull(points in nondegenerate_points(30)) {
+        let hull = ConvexHull3D::build(&points).expect("full-rank generated point set");
 
         let eps = 1e-6;
         for (i, p) in points.iter().enumerate() {
@@ -78,11 +89,8 @@ proptest! {
 
     /// INVARIANT: hull vertices are a subset of the input points.
     #[test]
-    fn hull_vertices_are_subset_of_input(points in prop::collection::vec(vertex_strategy(), 4..30)) {
-        let hull = match ConvexHull3D::build(&points) {
-            Ok(h) => h,
-            Err(_) => return Ok(()),
-        };
+    fn hull_vertices_are_subset_of_input(points in nondegenerate_points(30)) {
+        let hull = ConvexHull3D::build(&points).expect("full-rank generated point set");
 
         let eps = 1e-9;
         for (i, hv) in hull.vertices().iter().enumerate() {
@@ -99,21 +107,15 @@ proptest! {
 
     /// INVARIANT: duplicating input points does not change the hull.
     #[test]
-    fn duplicate_points_do_not_change_hull(points in prop::collection::vec(vertex_strategy(), 4..20)) {
-        let hull_a = match ConvexHull3D::build(&points) {
-            Ok(h) => h,
-            Err(_) => return Ok(()),
-        };
+    fn duplicate_points_do_not_change_hull(points in nondegenerate_points(20)) {
+        let hull_a = ConvexHull3D::build(&points).expect("full-rank generated point set");
 
         let mut duplicated = points.clone();
         for p in &points {
             duplicated.push(*p);
         }
 
-        let hull_b = match ConvexHull3D::build(&duplicated) {
-            Ok(h) => h,
-            Err(_) => return Ok(()),
-        };
+        let hull_b = ConvexHull3D::build(&duplicated).expect("full-rank generated point set");
 
         prop_assert_eq!(
             hull_a.num_faces(),
