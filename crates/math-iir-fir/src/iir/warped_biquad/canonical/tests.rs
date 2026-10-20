@@ -162,3 +162,37 @@ fn matched_physical_transfer_matches_independent_factored_prototype_at_lambda_ex
     assert_eq!(cases, 288);
     assert!(maximum < 2e-7);
 }
+
+#[test]
+fn matched_physical_design_preserves_the_existing_biquad_corner_fallback_policy() {
+    for rate in [8000.0, 16000.0] {
+        for l in [-0.37, 0.0, 0.37] {
+            for gain in [-6.0, 6.0, f64::NAN] {
+                let native =
+                    Biquad::<f64>::new(BiquadFilterType::PeakMatched, 20000.0, rate, 2.0, gain);
+                let mut actual = WarpedBiquad::<f64>::new(
+                    BiquadFilterType::PeakMatched,
+                    20000.0,
+                    rate,
+                    2.0,
+                    gain,
+                    l,
+                );
+                let mut expected = WarpedBiquad::<f64>::new(
+                    BiquadFilterType::PeakMatched,
+                    native.freq,
+                    native.srate,
+                    native.q,
+                    native.db_gain,
+                    l,
+                );
+                for n in 0..4096 {
+                    let x = if n == 0 { 1.0 } else { 0.0 };
+                    let y = actual.process(x);
+                    assert!(y.is_finite());
+                    assert_eq!(y, expected.process(x));
+                }
+            }
+        }
+    }
+}

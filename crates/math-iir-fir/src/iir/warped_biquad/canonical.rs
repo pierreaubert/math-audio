@@ -55,22 +55,26 @@ impl<T: FilterFloat> PhysicalState<T> {
 }
 
 pub(super) fn physical_coefficients<T: FilterFloat>(f: &WarpedBiquad<T>) -> [T; 5] {
+    // Keep Biquad::new's existing frequency/rate/gain fallback policy. In
+    // particular, a corner above a new Nyquist must not create a negative
+    // matched-pole decay when evaluated through tan(w/2).
+    let native = Biquad::new(f.filter_type, f.freq, f.srate, f.q, f.db_gain);
     if f.filter_type != BiquadFilterType::PeakMatched || f.lambda == T::zero() {
         // The bilinear frequency variable and the corner prewarp receive the
         // same (1+l)/(1-l) scale, which cancels exactly. Optimized shelves
         // have the same fixed-slope minimum-phase transfer as these shelves.
-        let c = Biquad::new(f.filter_type, f.freq, f.srate, f.q, f.db_gain).coefficients();
+        let c = native.coefficients();
         return [c.b0, c.b1, c.b2, c.a1, c.a2];
     }
     let one = T::one();
     let two: T = lit(2.0);
     let l = f.lambda;
-    let w = two * T::PI() * f.freq / f.srate;
+    let w = two * T::PI() * native.freq / native.srate;
     // Half-angle prewarp avoids subtraction in omega+2*atan(correction),
     // especially for a low corner and lambda near -1.
     let k = (w / two).tan() * (one + l) / (one - l);
     let warped_w = two * k.atan();
-    let sigma = warped_w / (two * f.q);
+    let sigma = warped_w / (two * native.q);
     let radius = (-sigma).exp();
     let radius_minus_one = (-sigma).exp_m1();
     let sin_half_sq = (warped_w / two).sin().powi(2);
@@ -89,16 +93,16 @@ pub(super) fn physical_coefficients<T: FilterFloat>(f: &WarpedBiquad<T>) -> [T; 
     // The unique minimum-phase numerator has unity endpoints and prescribed
     // physical center gain. This is the same spectral factor as substituting
     // the allpass into the prototype, without rounded near-unit coefficients.
-    let gain = lit::<T>(10.0).powf(f.db_gain.abs() / lit(20.0));
+    let gain = lit::<T>(10.0).powf(native.db_gain.abs() / lit(20.0));
     let gain_sq = gain * gain;
     let p = one + a2;
     let real_over_sin = (p * w.cos() + a1) / w.sin();
     let d = (gain_sq * (one - a2).powi(2) + (gain_sq - one) * real_over_sin * real_over_sin).sqrt();
     let b0 = (p + d) / two;
     let b2 = (p - d) / two;
-    if f.db_gain < T::zero() {
+    if native.db_gain < T::zero() {
         [one / b0, a1 / b0, a2 / b0, a1 / b0, b2 / b0]
-    } else if f.db_gain == T::zero() {
+    } else if native.db_gain == T::zero() {
         [one, a1, a2, a1, a2]
     } else {
         [b0, a1, b2, a1, a2]
