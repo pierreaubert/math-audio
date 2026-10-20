@@ -11,7 +11,7 @@ All filter types (`Biquad`, `SvfFilter`, `Fir`, `BiquadBank`) are generic over `
 ## Features
 
 - **Biquad Filters**: Peak, Lowpass, Highpass, Lowshelf, Highshelf, Bandpass, Notch, AllPass
-- **SVF (State Variable Filter)**: Zero-delay feedback topology (Zavalishin TPT) for artifact-free parameter changes
+- **SVF (State Variable Filter)**: Zero-delay feedback topology (Zavalishin TPT) with preserved integrator state during parameter changes
 - **FIR Filters**: Windowed sinc filter bank for linear-phase filtering, FIR design from frequency response, Kirkeby correction, pre-ringing suppression
 - **Crossovers**: Linkwitz-Riley 4th-order IIR and linear-phase FIR crossovers
 - **Offline filtering**: Zero-phase `filtfilt` and `sosfilt` for analysis
@@ -112,3 +112,15 @@ cargo check -p math-iir-fir && cargo clippy -p math-iir-fir
 ## License
 
 See the root workspace `LICENSE` file.
+
+
+SVF shelves retain their requested corner frequency and Q through gain-aware
+prewarping. Low shelf uses `g / sqrt(A)` and high shelf `g * sqrt(A)`, with
+`A = 10^(gain_db/40)`. The analytic response follows the same state-variable
+identity as processing: `input = HP + k*BP + LP`. Raw SVF bandpass has center
+gain Q; standard biquad bandpass uses a unity-peak convention. Parameter updates
+preserve integrator history, while abrupt modulation can still cause transients.
+The independent analog-reference regression covers f64/f32 impulse prefixes and
+complex responses at frequency, Q and gain endpoints. This correction changes
+previously incorrect shelf audio and response plots without adding allocation
+or changing the API.

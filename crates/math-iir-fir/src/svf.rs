@@ -106,8 +106,8 @@ impl<T: FilterFloat> SvfFilter<T> {
 
     /// Update filter parameters without resetting state.
     ///
-    /// This is the key advantage of SVF: parameter changes produce no
-    /// transient artifacts, making it ideal for modulated or animated EQ.
+    /// Preserves integrator history while coefficients change. Abrupt parameter
+    /// changes can still create transients.
     pub fn update_params(
         &mut self,
         filter_type: SvfFilterType,
@@ -182,26 +182,26 @@ impl<T: FilterFloat> SvfFilter<T> {
             }
             SvfFilterType::Lowshelf => {
                 // Low-shelf: boost/cut below frequency
-                self.g *= a.sqrt(); // pre-warp correction for shelf
+                self.g /= a.sqrt(); // preserve the requested shelf corner
                 self.k = T::one() / q;
                 self.a1 = T::one() / (T::one() + self.g * (self.g + self.k));
                 self.a2 = self.g * self.a1;
                 self.a3 = self.g * self.a2;
                 let a2 = a * a;
                 self.m0 = T::one();
-                self.m1 = self.k * (a2 - T::one());
+                self.m1 = self.k * (a - T::one());
                 self.m2 = a2 - T::one();
             }
             SvfFilterType::Highshelf => {
                 // High-shelf: boost/cut above frequency
-                self.g /= a.sqrt(); // pre-warp correction for shelf
+                self.g *= a.sqrt(); // preserve the requested shelf corner
                 self.k = T::one() / q;
                 self.a1 = T::one() / (T::one() + self.g * (self.g + self.k));
                 self.a2 = self.g * self.a1;
                 self.a3 = self.g * self.a2;
                 let a2 = a * a;
                 self.m0 = a2;
-                self.m1 = self.k * (T::one() - a2) * a;
+                self.m1 = self.k * a * (T::one() - a);
                 self.m2 = T::one() - a2;
             }
             SvfFilterType::Allpass => {
@@ -268,17 +268,16 @@ impl<T: FilterFloat> SvfFilter<T> {
         let hp = s_norm * s_norm / denom;
 
         // H(z) = m0*input + m1*v1 + m2*v2  where v1=BP*input, v2=LP*input
-        // Since input = HP + BP + LP (SVF identity):
-        // H = m0*(HP+BP+LP) + m1*BP + m2*LP = m0*HP + (m0+m1)*BP + (m0+m2)*LP
+        // The state-variable identity is input = HP + k*BP + LP.
+        // H = m0*HP + (m0*k+m1)*BP + (m0+m2)*LP.
         Complex::<T>::new(self.m0, T::zero()) * hp
-            + Complex::<T>::new(self.m0 + self.m1, T::zero()) * bp
+            + Complex::<T>::new(self.m0 * k + self.m1, T::zero()) * bp
             + Complex::<T>::new(self.m0 + self.m2, T::zero()) * lp
     }
 
     /// Compute the frequency response magnitude in dB at a given frequency.
     pub fn response_db_at(&self, freq: T) -> T {
-        // Use process-based measurement for accuracy
-        // (the analytic response_at has approximation issues for shelves)
+        // Use the same corrected transfer function as response_at.
         let resp = self.response_at(freq);
         lit::<T>(20.0) * resp.norm().log10()
     }

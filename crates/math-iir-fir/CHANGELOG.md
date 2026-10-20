@@ -26,6 +26,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   space without allocating in the hot path.
 
 ### Fixed
+- Correct TPT SVF low/high shelf prewarping and bandpass mix coefficients so
+  gain, corner and user Q match the analog prototypes. Preserve integrator state
+  during parameter updates; shelf audio intentionally changes.
+- Correct the SVF analytic response identity to `input = HP + k*BP + LP`, matching
+  the processing path across filter families. Verify 384 independent analog
+  cases with f64/f32 impulses and 1,920 complex-response probes on four rates.
 - `suppress_pre_ringing` now applies a smooth time-varying cap (audible
   threshold near the main impulse fading cosinusoidally to zero at the
   time limit) instead of blending toward a clamped value; pre-ring energy
