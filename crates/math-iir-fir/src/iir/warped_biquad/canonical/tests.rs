@@ -196,3 +196,21 @@ fn matched_physical_design_preserves_the_existing_biquad_corner_fallback_policy(
         }
     }
 }
+
+#[test]
+fn identical_retunes_do_not_reconstruct_or_perturb_populated_coordinates() {
+    for kind in [BiquadFilterType::Peak, BiquadFilterType::PeakMatched] {
+        for l in [-0.9999, -0.37, 0.0, 0.37, 0.9999] {
+            let mut actual = WarpedBiquad::<f64>::new(kind, 1000.0, 48000.0, 2.0, 6.0, l);
+            for n in 0..1024 {
+                actual.process(0.1 * (n as f64 * 0.13).sin());
+            }
+            let mut expected = actual.clone();
+            actual.update_params(kind, 1000.0, 48000.0, 2.0, 6.0, l);
+            for n in 0..2048 {
+                let x = 0.1 * (n as f64 * 0.17).sin();
+                assert_eq!(actual.process(x), expected.process(x), "{kind:?}/{l}/{n}");
+            }
+        }
+    }
+}

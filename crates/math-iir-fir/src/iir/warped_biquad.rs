@@ -143,6 +143,18 @@ impl<T: FilterFloat> WarpedBiquad<T> {
         db_gain: T,
         lambda: T,
     ) {
+        // An identical retune must preserve the populated observable state
+        // bit-for-bit, rather than remapping it through allpass coordinates.
+        if self.physical.is_some()
+            && self.filter_type == filter_type
+            && self.freq == freq
+            && self.srate == srate
+            && self.q == q
+            && self.db_gain == db_gain
+            && self.lambda == lambda
+        {
+            return;
+        }
         self.filter_type = filter_type;
         self.freq = freq;
         self.srate = srate;
