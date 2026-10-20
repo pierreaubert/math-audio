@@ -19,17 +19,22 @@ pub enum BiquadFilterType {
     Highshelf,
     /// All-pass filter
     AllPass,
-    /// Low-shelf filter (Orfanidis design with prescribed Nyquist gain).
-    /// Rare near-degenerate solve cases fall back to a symmetric numerator
-    /// (`d = 0`) rather than dividing by a near-zero quadratic coefficient.
+    /// Minimum-phase low shelf with prescribed DC and Nyquist gains.
+    ///
+    /// Keeps fixed-slope poles and geometric midpoint gain. Uses a closed-form
+    /// numerator split; Q does not change the shelf slope.
     LowshelfOrf,
-    /// High-shelf filter (Orfanidis design with prescribed Nyquist gain).
-    /// Rare near-degenerate solve cases fall back to a symmetric numerator
-    /// (`d = 0`) rather than dividing by a near-zero quadratic coefficient.
+    /// Minimum-phase high shelf with prescribed DC and Nyquist gains.
+    ///
+    /// Keeps fixed-slope poles and geometric midpoint gain. Uses a closed-form
+    /// numerator split; Q does not change the shelf slope.
     HighshelfOrf,
-    /// Peaking filter (Vicanek matched analog response). Rare
-    /// near-degenerate solve cases fall back to a symmetric numerator
-    /// (`d = 0`) rather than dividing by a near-zero quadratic coefficient.
+    /// Minimum-phase matched peak with unity DC and Nyquist gain.
+    ///
+    /// Boost poles have radius `exp(-pi*f/(Q*fs))` and angle `2*pi*f/fs`.
+    /// Numerator spectral factoring sets the requested center gain. Cuts invert
+    /// the corresponding boost; zero gain is identity. This recipe does not
+    /// guarantee an analog bandwidth match at every frequency.
     PeakMatched,
 }
 

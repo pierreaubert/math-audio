@@ -316,7 +316,6 @@ impl<T: FilterFloat> Biquad<T> {
         let one = T::one();
         let two: T = lit(2.0);
         let four: T = lit(4.0);
-        let half: T = lit(0.5);
 
         match self.filter_type {
             BiquadFilterType::Lowpass => {
@@ -383,138 +382,76 @@ impl<T: FilterFloat> Biquad<T> {
                 a1 = -two * cs;
                 a2 = one - alpha;
             }
-            BiquadFilterType::LowshelfOrf => {
-                let g: T = lit::<T>(10.0).powf(self.db_gain / lit(20.0));
-                let a_val: T = lit::<T>(10.0).powf(self.db_gain / lit(40.0));
-                let beta_rbj = (a_val + a_val).sqrt();
-                a0 = (a_val + one) + (a_val - one) * cs + beta_rbj * sn;
-                a1 = -two * ((a_val - one) + (a_val + one) * cs);
-                a2 = (a_val + one) + (a_val - one) * cs - beta_rbj * sn;
-
-                let sum_a = a0 + a1 + a2;
-                let diff_a = a0 - a1 + a2;
-                let sum_b = g * sum_a;
-                let diff_b = diff_a;
-
-                b1 = (sum_b - diff_b) / two;
-                let p = (sum_b + diff_b) / two;
-
-                let w0 = omega;
-                let cos_2w0 = (two * w0).cos();
-                let sin_2w0 = (two * w0).sin();
-
-                let a_re = a0 + a1 * cs + a2 * cos_2w0;
-                let a_im = -a1 * sn - a2 * sin_2w0;
-                let den_w0_sq = a_re * a_re + a_im * a_im;
-                let target = g * den_w0_sq;
-
-                let c1 = two * b1 * p * cs;
-                let known = p * p / two + b1 * b1 + c1 + p * p / two * cos_2w0;
-                let d_coeff = half - half * cos_2w0;
-
-                // Orfanidis solves a quadratic for the remaining numerator
-                // split. At pathological frequencies, the quadratic
-                // coefficient can vanish; use the symmetric split (`d = 0`)
-                // instead of amplifying roundoff with a near-zero divide.
-                let eps: T = lit(1e-15);
-                let d_sq = if d_coeff.abs() > eps {
-                    (target - known) / d_coeff
+            BiquadFilterType::LowshelfOrf | BiquadFilterType::HighshelfOrf => {
+                // Preserve the fixed-slope poles and endpoint/midpoint constraints.
+                // Half-angle sums and the closed-form positive numerator split
+                // avoid subtracting nearly equal powers and dividing by sin²(w).
+                // The positive split selects minimum phase for boosts AND cuts.
+                let sin_half_sq = (omega / two).sin().powi(2);
+                let cos_half_sq = (omega / two).cos().powi(2);
+                let eight: T = lit(8.0);
+                let (sum_b, diff_b);
+                if self.filter_type == BiquadFilterType::LowshelfOrf {
+                    a0 = (a + one) + (a - one) * cs + beta * sn;
+                    a1 = -two * ((a - one) + (a + one) * cs);
+                    a2 = (a + one) + (a - one) * cs - beta * sn;
+                    sum_b = eight * a * a * sin_half_sq;
+                    diff_b = eight * a * cos_half_sq;
                 } else {
-                    zero
-                };
-                let d_val = if d_sq >= zero { d_sq.sqrt() } else { zero };
-                let d_signed = if g >= one { d_val } else { -d_val };
-
-                b0 = (p + d_signed) / two;
-                b2 = (p - d_signed) / two;
-            }
-            BiquadFilterType::HighshelfOrf => {
-                let g: T = lit::<T>(10.0).powf(self.db_gain / lit(20.0));
-                let a_val: T = lit::<T>(10.0).powf(self.db_gain / lit(40.0));
-                let beta_rbj = (a_val + a_val).sqrt();
-                a0 = (a_val + one) - (a_val - one) * cs + beta_rbj * sn;
-                a1 = two * ((a_val - one) - (a_val + one) * cs);
-                a2 = (a_val + one) - (a_val - one) * cs - beta_rbj * sn;
-
-                let sum_a = a0 + a1 + a2;
-                let diff_a = a0 - a1 + a2;
-                let sum_b = sum_a;
-                let diff_b = g * diff_a;
-
-                b1 = (sum_b - diff_b) / two;
+                    a0 = (a + one) - (a - one) * cs + beta * sn;
+                    a1 = two * ((a - one) - (a + one) * cs);
+                    a2 = (a + one) - (a - one) * cs - beta * sn;
+                    sum_b = eight * a * sin_half_sq;
+                    diff_b = eight * a * a * cos_half_sq;
+                }
                 let p = (sum_b + diff_b) / two;
-
-                let w0 = omega;
-                let cos_2w0 = (two * w0).cos();
-                let sin_2w0 = (two * w0).sin();
-
-                let a_re = a0 + a1 * cs + a2 * cos_2w0;
-                let a_im = -a1 * sn - a2 * sin_2w0;
-                let den_w0_sq = a_re * a_re + a_im * a_im;
-                let target = g * den_w0_sq;
-
-                let c1 = two * b1 * p * cs;
-                let known = p * p / two + b1 * b1 + c1 + p * p / two * cos_2w0;
-                let d_coeff = half - half * cos_2w0;
-
-                // See the low-shelf Orfanidis fallback above.
-                let eps: T = lit(1e-15);
-                let d_sq = if d_coeff.abs() > eps {
-                    (target - known) / d_coeff
+                let d = two * a * beta * sn;
+                if self.db_gain == zero {
+                    b0 = a0;
+                    b1 = a1;
+                    b2 = a2;
                 } else {
-                    zero
-                };
-                let d_val = if d_sq >= zero { d_sq.sqrt() } else { zero };
-                let d_signed = if g >= one { d_val } else { -d_val };
-
-                b0 = (p + d_signed) / two;
-                b2 = (p - d_signed) / two;
+                    b0 = (p + d) / two;
+                    b1 = (sum_b - diff_b) / two;
+                    b2 = (p - d) / two;
+                }
             }
             BiquadFilterType::PeakMatched => {
-                let gain_lin: T = lit::<T>(10.0).powf(self.db_gain / lit(20.0));
-                let gain_sq = gain_lin * gain_lin;
-                let w0 = omega;
-                let bw = w0 / self.q;
-                let sigma = bw / two;
+                // A fixed boost denominator cannot realize arbitrarily deep
+                // cuts. Design a minimum-phase boost using |gain| and invert
+                // it for cuts, preserving unity DC/Nyquist and reciprocal gain.
+                let gain: T = lit::<T>(10.0).powf(self.db_gain.abs() / lit(20.0));
+                let gain_sq = gain * gain;
+                let sigma = omega / (two * self.q);
                 let r = (-sigma).exp();
-                let r_sq = r * r;
-
-                a0 = one;
-                a1 = -two * r * cs;
-                a2 = r_sq;
-
-                let sum_a = one + a1 + a2;
-                let diff_a = one - a1 + a2;
-                let sum_b = sum_a;
-                let diff_b = diff_a;
-
-                b1 = (sum_b - diff_b) / two;
-                let p = (sum_b + diff_b) / two;
-
-                let cos_2w0 = (two * w0).cos();
-                let sin_2w0 = (two * w0).sin();
-                let a_re = one + a1 * cs + a2 * cos_2w0;
-                let a_im = -a1 * sn - a2 * sin_2w0;
-                let den_w0_sq = a_re * a_re + a_im * a_im;
-                let target_num_sq = gain_sq * den_w0_sq;
-
-                let c1 = two * b1 * p * cs;
-                let known = (p * p) / two + b1 * b1 + c1 + (p * p) / two * cos_2w0;
-                let d_coeff = half - half * cos_2w0;
-
-                // Vicanek's matched peak uses the same quadratic split; when
-                // the coefficient collapses, use the symmetric numerator.
-                let eps: T = lit(1e-15);
-                let d_sq = if d_coeff.abs() > eps {
-                    (target_num_sq - known) / d_coeff
+                let one_minus_r = -(-sigma).exp_m1();
+                let one_minus_r_sq = one_minus_r * (one + r);
+                let p = one + r * r;
+                let pole_b1 = -two * r * cs;
+                // Rotate the center response by exp(j*w). Its real part is
+                // (1-r)²*cos(w), and its imaginary part is (1-r²)*sin(w).
+                // This equivalent spectral factor avoids power cancellation.
+                let real_over_sin = one_minus_r * one_minus_r * cs / sn;
+                let d = (gain_sq * one_minus_r_sq * one_minus_r_sq
+                    + (gain_sq - one) * real_over_sin * real_over_sin)
+                    .sqrt();
+                let boost_b0 = (p + d) / two;
+                let boost_b2 = (p - d) / two;
+                if self.db_gain < zero {
+                    b0 = one;
+                    b1 = pole_b1;
+                    b2 = r * r;
+                    a0 = boost_b0;
+                    a1 = pole_b1;
+                    a2 = boost_b2;
                 } else {
-                    zero
-                };
-                let d_val = if d_sq >= zero { d_sq.sqrt() } else { zero };
-                let d_signed = if gain_lin >= one { d_val } else { -d_val };
-
-                b0 = (p + d_signed) / two;
-                b2 = (p - d_signed) / two;
+                    a0 = one;
+                    a1 = pole_b1;
+                    a2 = r * r;
+                    b0 = if self.db_gain == zero { one } else { boost_b0 };
+                    b1 = a1;
+                    b2 = if self.db_gain == zero { a2 } else { boost_b2 };
+                }
             }
         }
 

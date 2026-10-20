@@ -26,6 +26,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   space without allocating in the hot path.
 
 ### Fixed
+- Native optimized shelves now select minimum phase for both gain signs and
+  solve their existing endpoint/midpoint constraints without subtractive power
+  cancellation. PeakMatched cuts invert a minimum-phase boost so deep cuts
+  reach requested center gain, with reciprocal phase and continuous zero gain.
+  Existing negative-gain audio intentionally changes; preset names are retained.
 - Correct TPT SVF low/high shelf prewarping and bandpass mix coefficients so
   gain, corner and user Q match the analog prototypes. Preserve integrator state
   during parameter updates; shelf audio intentionally changes.
