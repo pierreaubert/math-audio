@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- Align deterministic SVF shelf SOS equations with corrected math-iir-fir
+  processing, including gain-aware prewarp and bandpass weights. Preserve
+  physical parameter derivatives through the existing coefficient-difference
+  path; verify shelf loss gradients and endpoint complex-response compatibility.
+
 ### Added
 - `DiffModule::backward_params_only` (default routes through `backward`;
   `Gain` overrides to skip the discarded `grad_input`), used by `Recursion`

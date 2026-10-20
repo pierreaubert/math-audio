@@ -155,27 +155,6 @@ fn svf_coefficients<T: Scalar>(
             (b, [a0_peak, a1_peak, a2_peak])
         }
         SvfType::Lowshelf => {
-            let g_prime = g * a.sqrt();
-            let a2 = a * a;
-            let hp_p = [T::one(), -fconst::<T>(2.0), T::one()];
-            let bp_p = [g_prime, T::zero(), -g_prime];
-            let lp_p = [
-                g_prime * g_prime,
-                fconst::<T>(2.0) * g_prime * g_prime,
-                g_prime * g_prime,
-            ];
-            // H = HP' + k*a^2*BP' + a^2*LP'.
-            let b = [
-                hp_p[0] + k * a2 * bp_p[0] + a2 * lp_p[0],
-                hp_p[1] + k * a2 * bp_p[1] + a2 * lp_p[1],
-                hp_p[2] + k * a2 * bp_p[2] + a2 * lp_p[2],
-            ];
-            let a0_s = T::one() + k * g_prime + g_prime * g_prime;
-            let a1_s = -fconst::<T>(2.0) + fconst::<T>(2.0) * g_prime * g_prime;
-            let a2_s = T::one() - k * g_prime + g_prime * g_prime;
-            (b, [a0_s, a1_s, a2_s])
-        }
-        SvfType::Highshelf => {
             let g_prime = g / a.sqrt();
             let a2 = a * a;
             let hp_p = [T::one(), -fconst::<T>(2.0), T::one()];
@@ -185,8 +164,29 @@ fn svf_coefficients<T: Scalar>(
                 fconst::<T>(2.0) * g_prime * g_prime,
                 g_prime * g_prime,
             ];
-            // H = a^2*HP' + k*a*(a + 1 - a^2)*BP' + LP'.
-            let mix_bp = k * a * (a + T::one() - a2);
+            // H = HP' + k*a*BP' + a^2*LP'.
+            let b = [
+                hp_p[0] + k * a * bp_p[0] + a2 * lp_p[0],
+                hp_p[1] + k * a * bp_p[1] + a2 * lp_p[1],
+                hp_p[2] + k * a * bp_p[2] + a2 * lp_p[2],
+            ];
+            let a0_s = T::one() + k * g_prime + g_prime * g_prime;
+            let a1_s = -fconst::<T>(2.0) + fconst::<T>(2.0) * g_prime * g_prime;
+            let a2_s = T::one() - k * g_prime + g_prime * g_prime;
+            (b, [a0_s, a1_s, a2_s])
+        }
+        SvfType::Highshelf => {
+            let g_prime = g * a.sqrt();
+            let a2 = a * a;
+            let hp_p = [T::one(), -fconst::<T>(2.0), T::one()];
+            let bp_p = [g_prime, T::zero(), -g_prime];
+            let lp_p = [
+                g_prime * g_prime,
+                fconst::<T>(2.0) * g_prime * g_prime,
+                g_prime * g_prime,
+            ];
+            // H = a^2*HP' + k*a*BP' + LP'.
+            let mix_bp = k * a;
             let b = [
                 a2 * hp_p[0] + mix_bp * bp_p[0] + lp_p[0],
                 a2 * hp_p[1] + mix_bp * bp_p[1] + lp_p[1],

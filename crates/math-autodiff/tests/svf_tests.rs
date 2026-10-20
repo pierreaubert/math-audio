@@ -177,11 +177,10 @@ fn svf_gradient_finite_difference_lowpass() {
     }
 }
 
-#[test]
-fn svf_gradient_finite_difference_peak() {
+fn check_gain_filter_gradient(filter_type: SvfType) {
     let n_bins = NFFT / 2 + 1;
     let mut filter =
-        SvFilter::new(NFFT, FS, 1, 1, SvfType::Peak, ALIAS_DECAY_DB).expect("valid svf filter");
+        SvFilter::new(NFFT, FS, 1, 1, filter_type, ALIAS_DECAY_DB).expect("valid svf filter");
     set_svf_param(&mut filter, 1_000.0, 1.0 / 2.0, 6.0);
 
     let target = DiffTensor::from_array(
@@ -236,6 +235,18 @@ fn svf_gradient_finite_difference_peak() {
             finite_diff,
             relative_error
         );
+    }
+}
+
+#[test]
+fn svf_gradient_finite_difference_peak() {
+    check_gain_filter_gradient(SvfType::Peak);
+}
+
+#[test]
+fn svf_gradient_finite_difference_shelves() {
+    for kind in [SvfType::Lowshelf, SvfType::Highshelf] {
+        check_gain_filter_gradient(kind);
     }
 }
 
@@ -389,4 +400,46 @@ fn svf_gradient_remains_accurate_near_the_top_of_the_audio_band() {
             "p={p}: analytical={analytical}, numerical={numerical}"
         );
     }
+}
+
+#[test]
+fn shelf_coefficients_match_corrected_dsp_complex_responses_at_endpoints() {
+    let mut maximum = 0.0_f64;
+    let mut cases = 0;
+    for rate in [44_100.0, 192_000.0] {
+        for kind in [SvfType::Lowshelf, SvfType::Highshelf] {
+            for freq in [20.0, 20000.0] {
+                for q in [0.1, 20.0] {
+                    for gain in [-24.0, 24.0] {
+                        let mut filter =
+                            SvFilter::new(NFFT, rate, 1, 1, kind, ALIAS_DECAY_DB).unwrap();
+                        set_svf_param(&mut filter, freq, 1.0 / q, gain);
+                        let reference = RefSvfFilter::new(map_svf_type(kind), freq, rate, q, gain);
+                        let (b, a) = filter.coefficients();
+                        for probe in [
+                            0.0,
+                            freq * 0.5,
+                            freq,
+                            (freq * 1.5).min(rate * 0.45),
+                            rate * 0.499,
+                        ] {
+                            let z = Complex::from_polar(1.0, -2.0 * PI * probe / rate);
+                            let actual =
+                                (b[0] + b[1] * z + b[2] * z * z) / (a[0] + a[1] * z + a[2] * z * z);
+                            let expected = reference.response_at(probe);
+                            let error = (actual - expected).norm() / (1.0 + expected.norm());
+                            maximum = maximum.max(error);
+                            assert!(
+                                error < 2e-6,
+                                "SOS/DSP complex mismatch {error}: {rate}/{kind:?}/{freq}/{q}/{gain}/{probe}"
+                            );
+                        }
+                        cases += 1;
+                    }
+                }
+            }
+        }
+    }
+    assert_eq!(cases, 32);
+    println!("SVF differentiable wrapper endpoint cases={cases}, normalized complex max={maximum}");
 }
