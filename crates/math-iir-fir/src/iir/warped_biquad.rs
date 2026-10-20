@@ -3,28 +3,22 @@
 //! A warped biquad replaces each unit delay (z^-1) in a standard biquad with
 //! a first-order allpass section: A(z) = (z^-1 - λ)/(1 - λz^-1).
 //!
-//! When λ ≈ 0.766 at 48 kHz, the frequency axis maps to approximate the Bark
-//! scale, concentrating filter resolution in the bass/low-mid range where room
-//! modes are most problematic.
+//! The prototype corner is prewarped before allpass substitution. For bilinear
+//! filter families these frequency scales cancel, preserving the physical analog
+//! transfer. Matched-peak pole placement can still depend on lambda.
 //!
-//! # Design approach
-//!
-//! 1. Compute the "warped" prototype frequency using [`warp_frequency`].
-//! 2. Design a standard biquad at that warped frequency.
-//! 3. During sample processing, replace each z^-1 with the allpass section
-//!    to produce the warped response.
-//!
-//! # Frequency response
-//!
-//! The warped filter's response at physical frequency f equals the standard
-//! biquad's response at `warp_frequency(f, srate, lambda)`.
+//! Processing uses equivalent physical-coordinate coefficients to avoid a nearly
+//! cancelling implicit solve. Original allpass histories are retained for state
+//! conversion on parameter changes and restoration of earlier serialized filters.
 
 use crate::iir::biquad::{Biquad, BiquadFilterType};
 use crate::traits::{FilterFloat, lit};
 use ndarray::Array1;
 use num_complex::Complex;
 
+mod canonical;
 mod misc;
+use canonical::{PhysicalState, physical_coefficients};
 #[cfg(test)]
 mod tests;
 
@@ -33,47 +27,18 @@ pub use misc::*;
 use misc::allpass_step;
 use misc::compute_implicit_consts;
 
-/// Warped biquad IIR filter.
+/// Allpass-substituted biquad with a numerically conditioned physical realization.
 ///
-/// Provides perceptually-weighted frequency resolution by warping the frequency
-/// axis to approximate the Bark scale (when using [`bark_lambda`] for `lambda`).
+/// The transfer is the prototype biquad evaluated at
+/// `A(z)=(z^-1-lambda)/(1-lambda*z^-1)`. The prototype corner uses the same
+/// frequency mapping, so bilinear families preserve their physical analog
+/// response. Zero lambda gives the standard biquad transfer.
 ///
-/// With λ = 0 this degenerates to a standard biquad with identical output.
-/// With λ ≈ 0.766 (48 kHz Bark via Smith & Abel), low frequencies get
-/// finer resolution at the expense of high-frequency accuracy.
-///
-/// # Sample-by-sample processing algorithm
-///
-/// The standard biquad difference equation replaces each unit delay z^-1 with
-/// the first-order allpass A(z) = (z^-1 − λ)/(1 − λz^-1):
-///
-/// ```text
-/// y[n] = b0·x[n] + b1·(A·x)[n] + b2·(A²·x)[n] − a1·(A·y)[n] − a2·(A²·y)[n]
-/// ```
-///
-/// The input chain `(A·x)[n]`, `(A²·x)[n]` is computed causally from x[n].
-/// The output chain is **implicit**: `(A·y)[n]` depends on `y[n]`.
-///
-/// Expanding the allpass recurrence for the y-chain:
-/// ```text
-/// (A·y)[n]  = −λ·y[n] + (1−λ²)·s_y1
-/// (A²·y)[n] = −λ·(A·y)[n] + (1−λ²)·s_y2
-/// ```
-/// Substituting and solving for y[n] gives the closed-form update:
-/// ```text
-/// ff    = b0·x + b1·(A·x)[n] + b2·(A²·x)[n]
-/// numer = ff − (1−λ²)·[(a1 − a2·λ)·s_y1 + a2·s_y2]
-/// y[n]  = numer · inv_denom        where inv_denom = 1/(1 − a1·λ + a2·λ²)
-/// ```
-/// After computing y[n] the allpass states s_y1, s_y2 are advanced.
-///
-/// When λ = 0: `inv_denom = 1`, `one_minus_lam_sq = 1`, and the allpass
-/// states hold exactly `y[n-1]` and `y[n-2]`, reproducing standard DF-I.
-///
-/// # Frequency response
-///
-/// The response at physical frequency f equals the prototype biquad's
-/// response at `warp_frequency(f, srate, lambda)`.
+/// A normalized physical TDF-II realization avoids loss of precision in the
+/// implicit denominator `1-a1*lambda+a2*lambda^2`. Input and output allpass
+/// histories remain populated, and parameter updates map those histories to the
+/// new physical coordinates without resetting them. This preserves the implicit
+/// realization's stateful update convention, not a promise of click-free edits.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(bound = "")]
 pub struct WarpedBiquad<T: FilterFloat = f64> {
@@ -85,7 +50,7 @@ pub struct WarpedBiquad<T: FilterFloat = f64> {
     b2: T,
     /// Warping coefficient λ
     pub lambda: T,
-    /// Precomputed 1/(1 + a1·λ + a2·λ²)
+    /// Legacy serialized implicit denominator cache: 1/(1 - a1·λ + a2·λ²)
     inv_denom: T,
     /// Precomputed (1 − λ²)
     one_minus_lam_sq: T,
@@ -107,6 +72,9 @@ pub struct WarpedBiquad<T: FilterFloat = f64> {
     // With λ=0: s_y1 = y[n-1], s_y2 = y[n-2] (standard DF-I feedback).
     s_y1: T,
     s_y2: T,
+    // Absent in older serialized states; restore lazily from their histories.
+    #[serde(default)]
+    physical: Option<PhysicalState<T>>,
 }
 
 impl<T: FilterFloat> WarpedBiquad<T> {
@@ -141,7 +109,7 @@ impl<T: FilterFloat> WarpedBiquad<T> {
         let coeffs = proto.coefficients();
         let (inv_denom, one_minus_lam_sq) = compute_implicit_consts(coeffs.a1, coeffs.a2, lambda);
 
-        WarpedBiquad {
+        let mut filter = WarpedBiquad {
             a1: coeffs.a1,
             a2: coeffs.a2,
             b0: coeffs.b0,
@@ -159,7 +127,10 @@ impl<T: FilterFloat> WarpedBiquad<T> {
             ap_x2_s: zero,
             s_y1: zero,
             s_y2: zero,
-        }
+            physical: None,
+        };
+        filter.restore_physical();
+        filter
     }
 
     /// Update filter parameters and recompute coefficients without resetting state.
@@ -195,94 +166,52 @@ impl<T: FilterFloat> WarpedBiquad<T> {
         let (inv_denom, one_minus_lam_sq) = compute_implicit_consts(coeffs.a1, coeffs.a2, lambda);
         self.inv_denom = inv_denom;
         self.one_minus_lam_sq = one_minus_lam_sq;
+        self.restore_physical();
     }
 
-    /// Process a single audio sample through the warped biquad.
-    ///
-    /// See struct-level documentation for the derivation of the closed-form
-    /// implicit solution used here.
+    fn restore_physical(&mut self) {
+        self.physical = Some(PhysicalState::from_history(self));
+    }
+
+    /// Processes one sample while preserving the original allpass histories.
     #[inline]
     pub fn process(&mut self, x: T) -> T {
-        let lambda = self.lambda;
-
-        // Advance input allpass chain
-        let x_d1 = allpass_step(x, &mut self.ap_x1_s, lambda);
-        let x_d2 = allpass_step(x_d1, &mut self.ap_x2_s, lambda);
-
-        // Feedforward sum
-        let ff = self.b0 * x + self.b1 * x_d1 + self.b2 * x_d2;
-
-        // Closed-form solution for the implicit feedback term.
-        // Derived by substituting (A·y)[n] = −λ·y[n] + (1-λ²)·s_y1 and solving.
-        let fb_corr = self.one_minus_lam_sq
-            * ((self.a1 - self.a2 * lambda) * self.s_y1 + self.a2 * self.s_y2);
-
-        let y = (ff - fb_corr) * self.inv_denom;
-
-        // Advance output allpass states using the newly computed y[n]
-        let y_d1 = allpass_step(y, &mut self.s_y1, lambda);
-        allpass_step(y_d1, &mut self.s_y2, lambda);
-
+        if self.physical.is_none() {
+            self.restore_physical();
+        }
+        let y = self
+            .physical
+            .as_mut()
+            .expect("physical state initialized")
+            .process(x);
+        let xd1 = allpass_step(x, &mut self.ap_x1_s, self.lambda);
+        allpass_step(xd1, &mut self.ap_x2_s, self.lambda);
+        let yd1 = allpass_step(y, &mut self.s_y1, self.lambda);
+        allpass_step(yd1, &mut self.s_y2, self.lambda);
         y
     }
 
-    /// Process a block of audio samples in-place.
+    /// Processes a block with the same state convention as sample processing.
     pub fn process_block(&mut self, samples: &mut [T]) {
-        let lambda = self.lambda;
-        let b0 = self.b0;
-        let b1 = self.b1;
-        let b2 = self.b2;
-        let a1 = self.a1;
-        let a2 = self.a2;
-        let inv_denom = self.inv_denom;
-        let one_minus_lam_sq = self.one_minus_lam_sq;
-
-        let mut ap_x1_s = self.ap_x1_s;
-        let mut ap_x2_s = self.ap_x2_s;
-        let mut s_y1 = self.s_y1;
-        let mut s_y2 = self.s_y2;
-
-        for sample in samples.iter_mut() {
-            let x = *sample;
-
-            let x_d1 = allpass_step(x, &mut ap_x1_s, lambda);
-            let x_d2 = allpass_step(x_d1, &mut ap_x2_s, lambda);
-
-            let ff = b0 * x + b1 * x_d1 + b2 * x_d2;
-            let fb_corr = one_minus_lam_sq * ((a1 - a2 * lambda) * s_y1 + a2 * s_y2);
-
-            let y = (ff - fb_corr) * inv_denom;
-
-            let y_d1 = allpass_step(y, &mut s_y1, lambda);
-            allpass_step(y_d1, &mut s_y2, lambda);
-
-            *sample = y;
+        for sample in samples {
+            *sample = self.process(*sample);
         }
-
-        self.ap_x1_s = ap_x1_s;
-        self.ap_x2_s = ap_x2_s;
-        self.s_y1 = s_y1;
-        self.s_y2 = s_y2;
     }
 
-    /// Complex frequency response at a single physical frequency `f`.
-    ///
-    /// Evaluates the prototype biquad at the warped frequency corresponding to `f`.
+    /// Evaluates the physical transfer at frequency `f` in Hz.
     pub fn complex_response(&self, f: T) -> Complex<T> {
-        let f_w = if self.lambda == T::zero() {
-            f
-        } else {
-            warp_frequency(f, self.srate, self.lambda)
-        };
-
-        let omega = lit::<T>(2.0) * T::PI() * f_w / self.srate;
-        let z_inv = Complex::<T>::from_polar(T::one(), -omega);
-        let z_inv2 = z_inv * z_inv;
-
-        let num = Complex::new(self.b0, T::zero()) + z_inv * self.b1 + z_inv2 * self.b2;
-        let den = Complex::new(T::one(), T::zero()) + z_inv * self.a1 + z_inv2 * self.a2;
-
-        num / den
+        let [b0, b1, b2, a1, a2] = self
+            .physical
+            .as_ref()
+            .map_or_else(|| physical_coefficients(self), |state| state.c);
+        let omega = lit::<T>(2.0) * T::PI() * f / self.srate;
+        let z = Complex::<T>::from_polar(T::one(), -omega);
+        let denominator = Complex::new(T::one(), T::zero()) + z * a1 + z * z * a2;
+        if self.filter_type == BiquadFilterType::PeakMatched {
+            return Complex::new(T::one(), T::zero())
+                + (Complex::new(T::one(), T::zero()) - z * z) * (b0 - T::one()) / denominator;
+        }
+        (Complex::new(b0, T::zero()) + z * b1 + z * z * b2) / denominator
     }
 
     /// Magnitude response at a single physical frequency `f`.

@@ -26,6 +26,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   space without allocating in the hot path.
 
 ### Fixed
+- WarpedBiquad uses an equivalent normalized physical-coordinate realization,
+  eliminating extreme-lambda prototype/implicit-solve cancellation. Retain all
+  four allpass histories and map them on retunes and older-state restoration.
+  Matched-peak boost poles are transformed before spectral factoring; a dry-plus-
+  residual form preserves unity endpoints without large numerator cancellation.
+  Parameter/rate changes preserve the implicit history convention, without
+  promising click-free transients. Bilinear-family prewarp/allpass frequency
+  scales cancel exactly; these static physical responses do not gain resolution.
 - Native optimized shelves now select minimum phase for both gain signs and
   solve their existing endpoint/midpoint constraints without subtractive power
   cancellation. PeakMatched cuts invert a minimum-phase boost so deep cuts
