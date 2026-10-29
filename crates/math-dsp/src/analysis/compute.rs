@@ -942,8 +942,7 @@ pub fn reconstruct_impulse_response(
         return None;
     }
     if frequencies.windows(2).any(|pair| {
-        pair[1].partial_cmp(&pair[0]) != Some(std::cmp::Ordering::Greater)
-            || !pair[0].is_finite()
+        pair[1].partial_cmp(&pair[0]) != Some(std::cmp::Ordering::Greater) || !pair[0].is_finite()
     }) {
         return None;
     }
