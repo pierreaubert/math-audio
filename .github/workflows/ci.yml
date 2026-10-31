@@ -20,6 +20,11 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
+      # .cargo/config.toml links Linux x86_64 with clang + -fuse-ld=mold,
+      # which are not preinstalled on ubuntu-latest.
+      - name: Install clang and mold linker
+        run: sudo apt-get update && sudo apt-get install -y clang mold
+
       - name: Cache cargo registry
         uses: actions/cache@v5
         with:
@@ -39,17 +44,29 @@ jobs:
         run: cargo test --lib --release
 
   avx2-tests:
-    name: SIMD Tests (DSP/FIR, x86_64, ${{ matrix.features }})
+    name: SIMD Tests (DSP/FIR, x86_64, ${{ matrix.label }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        features: ["+avx2,+fma", "+avx2,-fma", "-avx2,-fma"]
+        include:
+          - label: "+avx2,+fma"
+            slug: avx2-fma
+            features: "+avx2,+fma"
+          - label: "+avx2,-fma"
+            slug: avx2-nofma
+            features: "+avx2,-fma"
+          - label: "-avx2,-fma"
+            slug: noavx2-nofma
+            features: "-avx2,-fma"
     steps:
       - uses: actions/checkout@v7
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
+
+      - name: Install clang and mold linker
+        run: sudo apt-get update && sudo apt-get install -y clang mold
 
       - name: Cache cargo registry
         uses: actions/cache@v5
@@ -58,7 +75,9 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-cargo-simd-${{ matrix.features }}-${{ hashFiles('**/Cargo.lock') }}
+          # Cache keys cannot contain commas, so use the comma-free slug
+          # instead of the raw feature list.
+          key: ${{ runner.os }}-cargo-simd-${{ matrix.slug }}-${{ hashFiles('**/Cargo.lock') }}
 
       # Compile-only gate: guarantees the AVX2 kernels build even if the
       # runner's CPU support ever changes.
@@ -87,6 +106,9 @@ jobs:
 
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@cargo-llvm-cov
+
+      - name: Install clang and mold linker
+        run: sudo apt-get update && sudo apt-get install -y clang mold
 
       - name: Cache cargo registry
         uses: actions/cache@v6
@@ -117,6 +139,9 @@ jobs:
 
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@cargo-llvm-cov
+
+      - name: Install clang and mold linker
+        run: sudo apt-get update && sudo apt-get install -y clang mold
 
       - name: Cache cargo registry
         uses: actions/cache@v5
