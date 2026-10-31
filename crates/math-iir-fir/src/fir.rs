@@ -1049,6 +1049,11 @@ impl<T: FilterFloat> Fir<T> {
                 let x = *samples_ptr.add(i);
                 *state_ptr.add(pos) = x;
                 *state_ptr.add(pos - n_taps) = x;
+                // `compute_output_symmetric` reads the window ending at
+                // `self.state_pos`, but the vector loop above only tracks
+                // the position in the local `pos`. Sync it, otherwise the
+                // tail samples are computed from the stale entry window.
+                self.state_pos = pos;
                 let y = self.compute_output_symmetric();
                 *samples_ptr.add(i) = std::mem::transmute_copy::<T, f64>(&y);
                 pos += 1;
