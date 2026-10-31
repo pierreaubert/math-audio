@@ -199,9 +199,14 @@ pub fn analyze_iso3382_bands(
     width: BandWidth,
     order: usize,
 ) -> Vec<(f64, Iso3382Metrics)> {
+    // Bound live workspaces by worker parallelism, not by band count:
+    // each context retains ~36 bytes/sample, so one context per band
+    // would make long-record memory scale with the number of bands.
+    // Batches still run in parallel and retain the requested band order.
+    let pool_size = rayon::current_num_threads().clamp(1, bands.len().max(1));
     let mut contexts: Vec<BandAnalysisContext> =
-        bands.iter().map(|_| BandAnalysisContext::new()).collect();
-    analyze_iso3382_bands_with_contexts(rir, sample_rate, bands, width, order, &mut contexts)
+        (0..pool_size).map(|_| BandAnalysisContext::new()).collect();
+    analyze_iso3382_bands_with_pool(rir, sample_rate, bands, width, order, &mut contexts)
 }
 
 /// Analyze bands using a bounded, reusable pool of large signal workspaces.

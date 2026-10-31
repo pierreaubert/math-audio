@@ -44,6 +44,56 @@ fn audit_t30_retains_accurate_supported_fits() {
 }
 
 #[test]
+fn audit_t30_rejects_double_slope_tail_and_late_reflection() {
+    // Fast decay that flattens into an energetically significant slow
+    // tail: the Schroeder curve bends inside the -5..-35 dB window, so a
+    // single-slope T30 is not supported.
+    let sample_rate = 48000.0;
+    let mut input = exponential(sample_rate, 2.0, 0.5, 1.0, 0.0);
+    let knee = (0.167 * sample_rate) as usize;
+    let knee_level = (-3.0 * std::f64::consts::LN_10 * knee as f64 / (sample_rate * 0.5)).exp();
+    for (offset, sample) in input[knee..].iter_mut().enumerate() {
+        let slow = knee_level
+            * (-3.0 * std::f64::consts::LN_10 * offset as f64 / (sample_rate * 4.0)).exp();
+        *sample = slow as f32;
+    }
+    let curve = DecayCurve::from_rir(&input, sample_rate, 0, Some(input.len()));
+    assert!(
+        curve.fit_db_range(-5.0, -35.0).is_none(),
+        "double-slope decay must not yield a single-slope T30"
+    );
+
+    // A strong late reflection cluster inside the fitting window breaks
+    // the single-slope model even with ample record length.
+    let mut reflected = exponential(sample_rate, 2.0, 1.0, 1.0, 0.0);
+    let burst_start = (0.45 * sample_rate) as usize;
+    for (offset, sample) in reflected[burst_start..].iter_mut().enumerate() {
+        *sample += (0.5
+            * (-3.0 * std::f64::consts::LN_10 * offset as f64 / (sample_rate * 0.3)).exp())
+            as f32;
+    }
+    let curve = DecayCurve::from_rir(&reflected, sample_rate, 0, Some(reflected.len()));
+    assert!(
+        curve.fit_db_range(-5.0, -35.0).is_none(),
+        "late reflection must not yield a single-slope T30"
+    );
+}
+
+#[test]
+fn audit_t30_rejects_short_noisy_records() {
+    for duration in [0.4, 0.6] {
+        for noise in [1e-3, 1e-2] {
+            let input = exponential(48000.0, duration, 1.0, 1.0, noise);
+            let curve = DecayCurve::from_rir(&input, 48000.0, 0, None);
+            assert!(
+                curve.fit_db_range(-5.0, -35.0).is_none(),
+                "short noisy record accepted: duration={duration}, noise={noise}"
+            );
+        }
+    }
+}
+
+#[test]
 fn audit_t30_rejects_high_noise_despite_long_record() {
     let input = exponential(48000.0, 2.0, 1.0, 1.0, 0.03);
     let curve = DecayCurve::from_rir(&input, 48000.0, 0, None);

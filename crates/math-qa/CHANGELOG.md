@@ -13,6 +13,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   44.1, 48, 88.2, 96 kHz) with rate-scaled bands and tones; comparison
   tests loop over every rate entry. C2 stays single-entry: pure
   sample-domain arithmetic with no rate input.
+## [0.5.5] - 2026-10-31
+
+### Fixed
+- `verify_result_records` rejects a record whose `max_rel_error`
+  exceeds its recorded tolerance; the self-reported `pass` flag alone
+  no longer certifies a comparison.
+
 ## [0.5.4] - 2026-10-18
 
 ### Fixed

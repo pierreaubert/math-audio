@@ -56,6 +56,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   bench); aarch64 NEON 8-output symmetric-FIR block path and unrolled DF1
   scalar path (+12% aggregate throughput, bit-identical checksums).
 
+## [0.5.28] - 2026-10-31
+
+### Changed
+- `FilterFloat` is now sealed to `f32` and `f64`. Downstream crates can
+  no longer implement it for custom numeric types, which keeps
+  primitive-specific SIMD dispatch reachable only with the exact type
+  it was written for. Existing `f32`/`f64` users are unaffected.
+
 ## [0.5.27] - 2026-10-18
 
 ### Fixed

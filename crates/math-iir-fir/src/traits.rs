@@ -6,10 +6,22 @@
 use std::fmt::{Debug, Display};
 use std::iter::Sum;
 
+mod sealed {
+    /// Sealing supertrait: only `f32` and `f64` can implement
+    /// [`super::FilterFloat`], so SIMD dispatch keyed on the concrete
+    /// primitive can never be reached by a downstream numeric type.
+    pub trait Sealed {}
+    impl Sealed for f32 {}
+    impl Sealed for f64 {}
+}
+
 /// Trait bound for the numeric type used throughout the filter crate.
 ///
-/// Implemented for `f32` and `f64`. All filter structs are generic over
-/// `T: FilterFloat` with a default of `f64` for backward compatibility.
+/// Implemented only for `f32` and `f64`. The trait is sealed: downstream
+/// crates cannot implement it, which keeps every primitive-specific
+/// (SIMD) code path reachable only with the exact type it was written
+/// for. All filter structs are generic over `T: FilterFloat` with a
+/// default of `f64` for backward compatibility.
 ///
 /// # Example
 ///
@@ -25,7 +37,8 @@ use std::iter::Sum;
 /// );
 /// ```
 pub trait FilterFloat:
-    num_traits::Float
+    sealed::Sealed
+    + num_traits::Float
     + num_traits::FloatConst
     + num_traits::NumAssign
     + num_traits::FromPrimitive

@@ -32,6 +32,25 @@ Work present in the tree but not yet committed or released:
   Yeh FMV tone-stack component models (IDs 6–8) with the
   `component_report` characterization example.
 
+## [0.5.5] - 2026-10-31
+
+Follow-up fixes from the review of the 2026-10-18 audit implementation:
+
+- `math-qa`: the comparison record gate now rejects records whose
+  `max_rel_error` exceeds their recorded tolerance instead of trusting
+  the self-reported pass flag.
+- `math-rir`: decay fits reject r² < 0.95 and use the slower upper-half
+  decay rate for the omitted-tail headroom estimate; default band
+  analysis bounds live workspaces by worker parallelism rather than
+  band count, and the retained-workspace figure is asserted in tests.
+- `math-iir-fir`: `FilterFloat` is sealed to `f32`/`f64`, so downstream
+  numeric types can no longer reach primitive-specific SIMD dispatch.
+- `math-dsp`: median selection defines NaN ordering via `total_cmp`;
+  subnormal clarity and true-peak regressions now assert against
+  independent oracles with a tightened 0.25 dB true-peak bound.
+- `math-analog`: small-callback wall-median timing is asserted by
+  default (p95/worst remain opt-in for isolated runners).
+
 ## [0.5.4] - 2026-10-18
 
 - Implemented the code audit's DSP correctness fixes: sound FIR SIMD type/feature

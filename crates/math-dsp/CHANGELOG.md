@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.36] - 2026-10-31
+
+### Fixed
+- Median selection in tonal/transient separation defines non-finite
+  ordering via `total_cmp` (NaN last) instead of the legacy partial
+  sort's unspecified NaN placement.
+- Audit regressions strengthened: subnormal clarity asserts against an
+  independent stored-sample oracle, and the true-peak sine oracle bound
+  tightened from 0.6 dB to 0.25 dB.
+
 ## [0.5.35] - 2026-10-18
 
 ### Fixed

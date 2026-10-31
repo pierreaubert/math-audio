@@ -132,6 +132,7 @@ impl DecayCurve {
     ///
     /// Returns `(slope_db_per_s, intercept_db, r_squared)`. `None` if either
     /// threshold is never reached, fewer than two samples lie in the band,
+    /// the window fit has r² < 0.95 (the ISO 3382-1 acceptance threshold),
     /// or the truncated tail lacks 10 dB of energy headroom below the fit.
     /// A high fit r² alone does not establish sufficient decay dynamic range.
     pub fn fit_db_range(&self, upper_db: f64, lower_db: f64) -> Option<(f64, f64, f64)> {
@@ -156,6 +157,16 @@ impl DecayCurve {
         if fit.0 >= 0.0 {
             return None;
         }
+        // A single-slope reverberation time requires the fitted window to
+        // actually follow one slope. 0.95 is the ISO 3382-1 acceptance
+        // threshold already used by `Iso3382Metrics::fit_is_valid`; a late
+        // reflection or double-slope tail inside the window lowers r² and
+        // must fail here rather than return a biased slope with the
+        // quality verdict left to each caller.
+        const MIN_FIT_R2: f64 = 0.95;
+        if !fit.2.is_finite() || fit.2 < MIN_FIT_R2 {
+            return None;
+        }
 
         // Estimate the omitted energy using the terminal mean-square power
         // and the provisional decay's energy time constant. The Schroeder
@@ -164,7 +175,18 @@ impl DecayCurve {
         let tail_len = ((0.005 * self.sample_rate).ceil() as usize).clamp(1, self.samples.len());
         let tail_energy_fraction =
             10.0_f64.powf(self.samples[self.samples.len() - tail_len] / 10.0);
-        let energy_decay_rate = -fit.0 * std::f64::consts::LN_10 / 10.0;
+        // Truncation steepens the full-window slope, which would understate
+        // the omitted tail. Use the slower of the full-window and
+        // upper-half decay rates so the headroom estimate stays
+        // conservative when the terminal plunge contaminates the fit.
+        let mut energy_decay_rate = -fit.0 * std::f64::consts::LN_10 / 10.0;
+        let half = ys.len() / 2;
+        if half >= 2
+            && let Some(early) = linear_fit_indexed(&ys[..half], i_upper, dt)
+            && early.0 < 0.0
+        {
+            energy_decay_rate = energy_decay_rate.min(-early.0 * std::f64::consts::LN_10 / 10.0);
+        }
         let omitted_fraction =
             tail_energy_fraction * self.sample_rate / (tail_len as f64 * energy_decay_rate);
         // At least 10 dB headroom limits the estimated unobserved tail to

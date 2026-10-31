@@ -188,6 +188,8 @@ fn fast_median(data: &mut [f32]) -> f32 {
 
     // Linear-time selection avoids sorting the unused upper/lower halves.
     // Preserve the historical upper median for even edge windows (n > 2).
+    // `total_cmp` gives non-finite inputs a defined order (NaN last)
+    // instead of the legacy partial sort's unspecified NaN placement.
     let mid = n / 2;
     *data.select_nth_unstable_by(mid, f32::total_cmp).1
 }
@@ -218,6 +220,16 @@ mod audit_median_tests {
                 assert_eq!(fast_median(&mut data), expected);
             }
         }
+    }
+
+    #[test]
+    fn selection_orders_nan_last_by_total_order() {
+        // `total_cmp` defines the non-finite contract: NaN sorts last, so
+        // a single NaN in an odd window cannot become the median, and a
+        // NaN pair in a two-window still propagates through the mean.
+        assert_eq!(fast_median(&mut [f32::NAN, 1.0, 2.0]), 2.0);
+        assert_eq!(fast_median(&mut [1.0, f32::NAN, 2.0, 3.0]), 3.0);
+        assert!(fast_median(&mut [f32::NAN, 1.0]).is_nan());
     }
 }
 

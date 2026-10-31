@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.6] - 2026-10-31
+
+### Fixed
+- Driven small-callback performance test asserts the wall-clock median
+  against the 25% callback budget by default; p95 and worst-sample
+  wall deadlines remain opt-in via `MATH_AUDIO_ENFORCE_REALTIME=1`
+  for isolated runners.
+
 ## [0.5.5] - 2026-10-18
 
 ### Fixed

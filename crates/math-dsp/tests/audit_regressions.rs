@@ -75,7 +75,7 @@ fn audit_true_peak_matches_known_bandlimited_sines_across_frequency_and_phase() 
             }
             let error_db = 20.0 * peak.log10();
             assert!(
-                error_db.abs() < 0.6,
+                error_db.abs() < 0.25,
                 "frequency={frequency}, phase={phase}: {error_db} dB"
             );
         }
@@ -108,10 +108,24 @@ fn clarity_arrival_threshold_survives_subnormal_amplitudes() {
     let mut input = vec![0.0; 48000];
     input[0] = 1e-44;
     input[4800] = 5e-45;
-    let expected = compute_clarity_broadband(&input, 48000.0);
+    // Independent oracle from the stored (subnormal-quantized) samples:
+    // the first impulse is early for both windows, the 100 ms impulse is
+    // late for both, so C50 = C80 = 10*log10(e_first / e_second).
+    let early = f64::from(input[0]) * f64::from(input[0]);
+    let late = f64::from(input[4800]) * f64::from(input[4800]);
+    let oracle = 10.0 * (early / late).log10();
+    let (c50, c80) = compute_clarity_broadband(&input, 48000.0);
+    assert!(
+        (f64::from(c50) - oracle).abs() < 1e-5,
+        "c50={c50}, oracle={oracle}"
+    );
+    assert!(
+        (f64::from(c80) - oracle).abs() < 1e-5,
+        "c80={c80}, oracle={oracle}"
+    );
     let mut delayed = vec![0.0; 4800];
     delayed.extend(input);
-    assert_eq!(compute_clarity_broadband(&delayed, 48000.0), expected);
+    assert_eq!(compute_clarity_broadband(&delayed, 48000.0), (c50, c80));
 }
 
 #[test]

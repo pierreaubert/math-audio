@@ -44,6 +44,20 @@ fn comparison_record_gate_rejects_missing_duplicate_unknown_and_failed_cases() {
 }
 
 #[test]
+fn comparison_record_gate_rejects_error_above_tolerance() {
+    let manifest = "[[case]]\nid = 'one'\n";
+    // Self-reported pass with an error far above its own tolerance must not
+    // be certified by the record gate.
+    let exceeding = "QA_RESULT: {\"case\":\"one\",\"pass\":true,\"max_rel_error\":999.0,\"tolerance\":0.01,\"provenance\":\"checked-in-golden\"}\n";
+    assert!(math_qa::verify_result_records(exceeding, manifest).is_err());
+    let at_tolerance = "QA_RESULT: {\"case\":\"one\",\"pass\":true,\"max_rel_error\":0.01,\"tolerance\":0.01,\"provenance\":\"live-engine\"}\n";
+    assert_eq!(
+        math_qa::verify_result_records(at_tolerance, manifest).unwrap(),
+        1
+    );
+}
+
+#[test]
 fn comparison_record_gate_returns_errors_for_malformed_manifests() {
     for manifest in [
         "",

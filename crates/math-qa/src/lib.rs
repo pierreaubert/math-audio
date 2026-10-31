@@ -236,13 +236,23 @@ pub fn verify_result_records(log: &str, manifest: &str) -> Result<usize, String>
         if record["pass"].as_bool() != Some(true) {
             return Err(format!("failed comparison: {id}"));
         }
-        for key in ["max_rel_error", "tolerance"] {
+        let mut numeric = [0.0_f64; 2];
+        for (slot, key) in numeric.iter_mut().zip(["max_rel_error", "tolerance"]) {
             let value = record[key]
                 .as_f64()
                 .ok_or_else(|| format!("{id}: invalid {key}"))?;
             if !value.is_finite() || value < 0.0 {
                 return Err(format!("{id}: invalid {key}"));
             }
+            *slot = value;
+        }
+        // A self-reported pass is not evidence: the recorded error must
+        // actually meet the recorded tolerance.
+        if numeric[0] > numeric[1] {
+            return Err(format!(
+                "{id}: max_rel_error {} exceeds tolerance {}",
+                numeric[0], numeric[1]
+            ));
         }
         if !matches!(
             record["provenance"].as_str(),
