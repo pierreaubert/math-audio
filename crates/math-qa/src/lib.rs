@@ -483,17 +483,12 @@ mod tests {
     #[test]
     #[should_panic(expected = "not JSON")]
     fn runner_panics_on_non_json_output() {
-        let dir = std::env::temp_dir().join("math-qa-runner-garbage");
-        std::fs::create_dir_all(&dir).expect("temp dir");
-        let path = dir.join("garbage-engine.sh");
-        std::fs::write(&path, "#!/bin/sh\necho 'no json here'\n").expect("fixture");
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
-                .expect("chmod fixture");
-        }
-        let _ = run_wolfram_script_with(path.as_os_str(), "any.wls");
+        // `/bin/echo` ignores the `-file <script>` arguments and prints
+        // them back, which is non-JSON stdout with a success status:
+        // exactly the parse-failure branch under test. A freshly written
+        // script fixture is not used because write-then-exec races on
+        // overlay filesystems (transient ETXTBSY on CI runners).
+        let _ = run_wolfram_script_with(std::ffi::OsStr::new("/bin/echo"), "any.wls");
     }
 
     #[cfg(unix)]
