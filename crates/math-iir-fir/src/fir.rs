@@ -981,10 +981,13 @@ impl<T: FilterFloat> Fir<T> {
             while i + 3 < len && pos + 3 < 2 * n_taps {
                 let x = _mm256_loadu_pd(samples_ptr.add(i));
 
-                // Duplicate the newly arrived samples so the upper half stays
-                // a contiguous window of the last `n_taps` samples.
+                // Store the newly arrived samples in the upper half. The
+                // lower-half duplicates are only written after the outputs
+                // below are computed: slots `pos - n_taps + 1 ..= pos -
+                // n_taps + 3` are the oldest window entries of the first
+                // three lanes, so duplicating up front would clobber them
+                // with future samples.
                 _mm256_storeu_pd(state_ptr.add(pos), x);
-                _mm256_storeu_pd(state_ptr.add(pos - n_taps), x);
 
                 let mut acc0 = _mm256_setzero_pd();
                 let mut acc1 = _mm256_setzero_pd();
@@ -1035,6 +1038,11 @@ impl<T: FilterFloat> Fir<T> {
                 }
 
                 _mm256_storeu_pd(samples_ptr.add(i), acc);
+
+                // Now that every lane has read its window, write the
+                // lower-half duplicates so the upper half stays a
+                // contiguous window of the last `n_taps` samples.
+                _mm256_storeu_pd(state_ptr.add(pos - n_taps), x);
 
                 pos += 4;
                 if pos >= 2 * n_taps {
