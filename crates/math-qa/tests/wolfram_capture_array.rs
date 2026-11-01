@@ -62,8 +62,9 @@ fn wolfram_capture_array() {
         return;
     };
     assert_eq!(ref_json["case"], CASE_ID);
-    let mut max_err = 0.0f64;
-    let mut max_tol = 0.0f64;
+    // Combine different units as fractions of their unchanged oracle tolerances.
+    // A ratio of one is the acceptance boundary for every comparison.
+    let mut max_error_ratio = 0.0f64;
 
     // C5: engine solved the same exact-delay LS problem independently.
     let c5: Vec<serde_json::Value> =
@@ -76,7 +77,6 @@ fn wolfram_capture_array() {
         let el: f64 = serde_json::from_value(entry["elevation_deg"].clone()).unwrap();
         let tol: f64 = serde_json::from_value(entry["angle_tolerance_deg"].clone()).unwrap();
         let res_tol: f64 = serde_json::from_value(entry["residual_tolerance"].clone()).unwrap();
-        max_tol = max_tol.max(tol);
         let pairs = exact_pairs(&array, sr, &dir_of(az, el));
         let est = estimate_doa_ls(&array, &pairs).expect("ls solves");
         let exp_az: f64 = serde_json::from_value(entry["est_azimuth_deg"].clone()).unwrap();
@@ -93,9 +93,10 @@ fn wolfram_capture_array() {
                 tol,
                 &format!("{what} at {sr} Hz az={az} el={el}"),
             );
-            max_err = max_err.max(err / tol);
+            max_error_ratio = max_error_ratio.max(err / tol);
         }
         assert_close_abs(est.rms_residual_samples, exp_res, res_tol, "C5 residual");
+        max_error_ratio = max_error_ratio.max((est.rms_residual_samples - exp_res).abs() / res_tol);
     }
 
     // C6: scale calibration against the engine value, per rate. The
@@ -121,9 +122,10 @@ fn wolfram_capture_array() {
         let tol: f64 = serde_json::from_value(block["scale_tolerance"].clone()).unwrap();
         let err = math_qa::rel_error(scale, exp_scale);
         assert_close(scale, exp_scale, tol, &format!("C6 scale at {sr} Hz"));
-        max_err = max_err.max(err);
+        max_error_ratio = max_error_ratio.max(err / tol);
         let exp_rms: f64 = serde_json::from_value(block["scale_rms_samples"].clone()).unwrap();
         assert_close_abs(rms, exp_rms, 1e-9, "C6 scale rms");
+        max_error_ratio = max_error_ratio.max((rms - exp_rms).abs() / 1e-9);
         let max_res: f64 =
             serde_json::from_value(block["max_residual_vs_true_samples"].clone()).unwrap();
         let exact = exact_pairs(&array, sr, &dir);
@@ -151,7 +153,6 @@ fn wolfram_capture_array() {
         let frac: f64 = serde_json::from_value(entry["offset_samples"].clone()).unwrap();
         let expected: f64 = serde_json::from_value(entry["value"].clone()).unwrap();
         let tol: f64 = serde_json::from_value(entry["tolerance_abs"].clone()).unwrap();
-        max_tol = max_tol.max(tol);
         let skew = ClockSkew {
             offset_samples: frac,
             skew_ppm: 0.0,
@@ -167,14 +168,14 @@ fn wolfram_capture_array() {
             tol,
             &format!("C3 value at {sr} Hz {m}+{frac}"),
         );
-        max_err = max_err.max(err / tol);
+        max_error_ratio = max_error_ratio.max(err / tol);
     }
 
     emit_result(&QaResult {
         case: CASE_ID.to_string(),
         pass: true,
-        max_rel_error: max_err,
-        tolerance: max_tol,
+        max_rel_error: max_error_ratio,
+        tolerance: 1.0,
         provenance: provenance(),
     });
 }
