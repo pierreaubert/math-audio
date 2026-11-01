@@ -23,7 +23,19 @@ jobs:
       # .cargo/config.toml links Linux x86_64 with clang + -fuse-ld=mold,
       # which are not preinstalled on ubuntu-latest.
       - name: Install clang and mold linker
-        run: sudo apt-get update && sudo apt-get install -y clang mold
+        timeout-minutes: 10
+        # apt mirrors on shared runners intermittently hang; bound each
+        # attempt and retry instead of stalling the job for hours.
+        run: |
+          for attempt in 1 2 3; do
+            if sudo apt-get -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update \
+              && sudo apt-get install -y clang mold; then
+              exit 0
+            fi
+            echo "apt attempt $attempt failed; retrying"
+            sleep 15
+          done
+          exit 1
 
       - name: Cache cargo registry
         uses: actions/cache@v5
@@ -66,7 +78,19 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - name: Install clang and mold linker
-        run: sudo apt-get update && sudo apt-get install -y clang mold
+        timeout-minutes: 10
+        # apt mirrors on shared runners intermittently hang; bound each
+        # attempt and retry instead of stalling the job for hours.
+        run: |
+          for attempt in 1 2 3; do
+            if sudo apt-get -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update \
+              && sudo apt-get install -y clang mold; then
+              exit 0
+            fi
+            echo "apt attempt $attempt failed; retrying"
+            sleep 15
+          done
+          exit 1
 
       - name: Cache cargo registry
         uses: actions/cache@v5
@@ -108,7 +132,19 @@ jobs:
         uses: taiki-e/install-action@cargo-llvm-cov
 
       - name: Install clang and mold linker
-        run: sudo apt-get update && sudo apt-get install -y clang mold
+        timeout-minutes: 10
+        # apt mirrors on shared runners intermittently hang; bound each
+        # attempt and retry instead of stalling the job for hours.
+        run: |
+          for attempt in 1 2 3; do
+            if sudo apt-get -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update \
+              && sudo apt-get install -y clang mold; then
+              exit 0
+            fi
+            echo "apt attempt $attempt failed; retrying"
+            sleep 15
+          done
+          exit 1
 
       - name: Cache cargo registry
         uses: actions/cache@v6
@@ -141,7 +177,19 @@ jobs:
         uses: taiki-e/install-action@cargo-llvm-cov
 
       - name: Install clang and mold linker
-        run: sudo apt-get update && sudo apt-get install -y clang mold
+        timeout-minutes: 10
+        # apt mirrors on shared runners intermittently hang; bound each
+        # attempt and retry instead of stalling the job for hours.
+        run: |
+          for attempt in 1 2 3; do
+            if sudo apt-get -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update \
+              && sudo apt-get install -y clang mold; then
+              exit 0
+            fi
+            echo "apt attempt $attempt failed; retrying"
+            sleep 15
+          done
+          exit 1
 
       - name: Cache cargo registry
         uses: actions/cache@v5
