@@ -262,11 +262,11 @@ _qa crate threshold:
 	{{cargo}} test -p {{crate}} --doc
 	{{cargo}} bench -p {{crate}} --no-run
 	# Skip sysroot/registry rows: toolchain noise, never the measured code.
-	# NOTE: llvm-cov still prints "N functions have mismatched data" on
-	# multi-binary merges (unit + integration + doc builds of one crate).
-	# Upstream artifact, no suppression flag exists; the totals it reports
-	# are stable across clean rebuilds, so the gate below stays trustworthy.
-	{{cargo}} llvm-cov -p {{crate}} --summary-only --release --fail-under-lines {{threshold}} --ignore-filename-regex 'rustlib/src/rust|registry/src'
+	# Remove other workspace test objects before collecting this crate's report.
+	# Coverage alone uses opt-level zero to avoid optimized mapping mismatches.
+	# The tests and benchmarks above keep their normal release optimization.
+	{{cargo}} llvm-cov clean --workspace
+	CARGO_PROFILE_RELEASE_OPT_LEVEL=0 {{cargo}} llvm-cov -p {{crate}} --summary-only --release --fail-under-lines {{threshold}} --ignore-filename-regex 'rustlib/src/rust|registry/src'
 
 qa-convex-hull: (_qa "math-convex-hull" qa_cov_convex_hull)
 
@@ -326,7 +326,8 @@ qa: qa-analog qa-autodiff qa-convex-hull qa-delaunay qa-dsp qa-iir-fir qa-optimi
 	# --lib-only basis and is arithmetically unreachable once the largely
 	# untested bin targets count (cf. the dsp/optimisation ratchets above).
 	# Keep in sync with the coverage-gate job in .github/workflows/ci.yml.
-	{{cargo}} llvm-cov --summary-only --release --fail-under-lines 81 --ignore-filename-regex 'rustlib/src/rust|registry/src'
+	{{cargo}} llvm-cov clean --workspace
+	CARGO_PROFILE_RELEASE_OPT_LEVEL=0 {{cargo}} llvm-cov --summary-only --release --fail-under-lines 81 --ignore-filename-regex 'rustlib/src/rust|registry/src'
 
 # math-qa has no benches, so it gets a dedicated recipe instead of _qa.
 qa-mathqa:
@@ -336,7 +337,8 @@ qa-mathqa:
 	{{cargo}} test -p math-qa --lib --release
 	just qa-mathqa-records
 	{{cargo}} test -p math-qa --doc
-	{{cargo}} llvm-cov -p math-qa --summary-only --release --fail-under-lines {{qa_cov_math_qa}} --ignore-filename-regex 'rustlib/src/rust|registry/src'
+	{{cargo}} llvm-cov clean --workspace
+	CARGO_PROFILE_RELEASE_OPT_LEVEL=0 {{cargo}} llvm-cov -p math-qa --summary-only --release --fail-under-lines {{qa_cov_math_qa}} --ignore-filename-regex 'rustlib/src/rust|registry/src'
 
 # Capture comparison records and require every manifest case to execute.
 qa-mathqa-records:

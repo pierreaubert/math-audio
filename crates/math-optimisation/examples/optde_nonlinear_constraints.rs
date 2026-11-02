@@ -5,7 +5,7 @@ use ndarray::Array1;
 use std::str::FromStr;
 use std::sync::Arc;
 
-fn main() {
+fn main() -> std::process::ExitCode {
     // Himmelblau as objective, but with nonlinear constraints to demonstrate helper
     let himmelblau =
         |x: &Array1<f64>| (x[0] * x[0] + x[1] - 11.0).powi(2) + (x[0] + x[1] * x[1] - 7.0).powi(2);
@@ -43,4 +43,10 @@ fn main() {
         "success={} message=\"{}\"\nbest f={:.6e}\nbest x={:?}",
         rep.success, rep.message, rep.fun, rep.x
     );
+    // This example is part of QA, so an unsuccessful result must fail the command.
+    if rep.success && rep.fun.is_finite() && rep.x.iter().all(|value| value.is_finite()) {
+        std::process::ExitCode::SUCCESS
+    } else {
+        std::process::ExitCode::FAILURE
+    }
 }
