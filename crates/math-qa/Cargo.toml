@@ -19,6 +19,7 @@ math-iir-fir = { workspace = true }
 math-rir = { workspace = true }
 math-test-functions = { workspace = true }
 num-complex = { workspace = true }
+sha2 = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 toml = { workspace = true }

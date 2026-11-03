@@ -66,6 +66,7 @@ fn wolfram_third_octave_spl() {
         unit: "dB".to_string(),
         error: (second.early_db - second_db).abs(),
         tolerance: TOL_SECOND_DB,
+        allowance_sha256: math_qa::allowance_digest(&ref_json).expect("numeric oracle allowances"),
         provenance: provenance(),
     });
 }

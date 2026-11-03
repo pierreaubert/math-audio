@@ -178,6 +178,7 @@ fn wolfram_capture_array() {
         unit: "ratio".to_string(),
         error: max_error_ratio,
         tolerance: 1.0,
+        allowance_sha256: math_qa::allowance_digest(&ref_json).expect("numeric oracle allowances"),
         provenance: provenance(),
     });
 }

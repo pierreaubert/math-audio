@@ -27,8 +27,8 @@ fn audit_missing_golden_is_a_failure() {
 
 #[test]
 fn comparison_record_gate_rejects_missing_duplicate_unknown_and_failed_cases() {
-    let manifest = "[[case]]\nid = 'one'\nmetric = 'peak_error'\nunit = 'dB'\nlimit = 0.01\n";
-    let valid = "QA_RESULT: {\"case\":\"one\",\"pass\":true,\"metric\":\"peak_error\",\"unit\":\"dB\",\"error\":0.0,\"tolerance\":0.01,\"provenance\":\"checked-in-golden\"}\n";
+    let manifest = "[[case]]\nid = 'one'\nmetric = 'peak_error'\nunit = 'dB'\nlimit = 0.01\nallowance_sha256 = 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855'\n";
+    let valid = "QA_RESULT: {\"case\":\"one\",\"pass\":true,\"metric\":\"peak_error\",\"unit\":\"dB\",\"error\":0.0,\"tolerance\":0.01,\"allowance_sha256\":\"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\",\"provenance\":\"checked-in-golden\"}\n";
     assert_eq!(math_qa::verify_result_records(valid, manifest).unwrap(), 1);
     assert!(math_qa::verify_result_records(valid, &manifest.replace("0.01", "0.02")).is_err());
     for invalid in [
@@ -51,12 +51,12 @@ fn comparison_record_gate_rejects_missing_duplicate_unknown_and_failed_cases() {
 
 #[test]
 fn comparison_record_gate_rejects_error_above_tolerance() {
-    let manifest = "[[case]]\nid = 'one'\nmetric = 'peak_error'\nunit = 'dB'\nlimit = 0.01\n";
+    let manifest = "[[case]]\nid = 'one'\nmetric = 'peak_error'\nunit = 'dB'\nlimit = 0.01\nallowance_sha256 = 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855'\n";
     // Self-reported pass with an error far above its own tolerance must not
     // be certified by the record gate.
-    let exceeding = "QA_RESULT: {\"case\":\"one\",\"pass\":true,\"metric\":\"peak_error\",\"unit\":\"dB\",\"error\":999.0,\"tolerance\":0.01,\"provenance\":\"checked-in-golden\"}\n";
+    let exceeding = "QA_RESULT: {\"case\":\"one\",\"pass\":true,\"metric\":\"peak_error\",\"unit\":\"dB\",\"error\":999.0,\"tolerance\":0.01,\"allowance_sha256\":\"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\",\"provenance\":\"checked-in-golden\"}\n";
     assert!(math_qa::verify_result_records(exceeding, manifest).is_err());
-    let at_tolerance = "QA_RESULT: {\"case\":\"one\",\"pass\":true,\"metric\":\"peak_error\",\"unit\":\"dB\",\"error\":0.01,\"tolerance\":0.01,\"provenance\":\"live-engine\"}\n";
+    let at_tolerance = "QA_RESULT: {\"case\":\"one\",\"pass\":true,\"metric\":\"peak_error\",\"unit\":\"dB\",\"error\":0.01,\"tolerance\":0.01,\"allowance_sha256\":\"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\",\"provenance\":\"live-engine\"}\n";
     assert_eq!(
         math_qa::verify_result_records(at_tolerance, manifest).unwrap(),
         1
@@ -75,4 +75,28 @@ fn comparison_record_gate_returns_errors_for_malformed_manifests() {
     ] {
         assert!(math_qa::verify_result_records("", manifest).is_err());
     }
+}
+
+#[test]
+fn reference_allowance_changes_are_rejected() {
+    let reference = serde_json::json!({"entries": [{"tolerance": 0.01}, {"tolerance": 0.02}]});
+    let digest = math_qa::allowance_digest(&reference).unwrap();
+    let manifest = format!(
+        "[[case]]\nid = 'one'\nmetric = 'error'\nunit = 'ratio'\nlimit = 1.0\nallowance_sha256 = '{digest}'\n"
+    );
+    let record = |value: &serde_json::Value| {
+        format!(
+            "QA_RESULT: {}",
+            serde_json::json!({
+                "case": "one", "pass": true, "metric": "error", "unit": "ratio",
+                "error": 0.5, "tolerance": 1.0, "allowance_sha256": math_qa::allowance_digest(value).unwrap(),
+                "provenance": "checked-in-golden"
+            })
+        )
+    };
+    assert!(math_qa::verify_result_records(&record(&reference), &manifest).is_ok());
+    let changed = serde_json::json!({"entries": [{"tolerance": 0.02}, {"tolerance": 0.02}]});
+    assert!(math_qa::verify_result_records(&record(&changed), &manifest).is_err());
+    let missing = serde_json::json!({"entries": [{}, {"tolerance": 0.02}]});
+    assert!(math_qa::verify_result_records(&record(&missing), &manifest).is_err());
 }

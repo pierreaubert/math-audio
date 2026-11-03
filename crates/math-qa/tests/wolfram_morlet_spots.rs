@@ -76,6 +76,7 @@ fn wolfram_morlet_spots() {
         unit: "dB".to_string(),
         error: worst,
         tolerance: TOL_DB,
+        allowance_sha256: math_qa::allowance_digest(&ref_json).expect("numeric oracle allowances"),
         provenance: provenance(),
     });
 }

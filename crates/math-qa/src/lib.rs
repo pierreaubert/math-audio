@@ -18,6 +18,7 @@ use std::path::PathBuf;
 use std::process::Command;
 
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 
 /// Relative error `|a − b| / |b|` with deterministic zero handling: 0 when
 /// both are zero (or both non-finite-equal), ∞ when only the reference is
@@ -171,6 +172,49 @@ pub fn run_wolfram_script_with(
     }))
 }
 
+/// Hash the paths and values of every numeric tolerance in a reference.
+///
+/// # Errors
+/// Returns an error when an oracle tolerance is not a finite number.
+pub fn allowance_digest(reference: &serde_json::Value) -> Result<String, String> {
+    fn visit(value: &serde_json::Value, path: &str, digest: &mut Sha256) -> Result<(), String> {
+        match value {
+            serde_json::Value::Object(map) => {
+                let mut entries: Vec<_> = map.iter().collect();
+                entries.sort_by_key(|(key, _)| *key);
+                for (key, value) in entries {
+                    let path = format!("{path}/{key}");
+                    if key.contains("tolerance") {
+                        let number = value
+                            .as_f64()
+                            .filter(|n| n.is_finite() && *n >= 0.0)
+                            .ok_or_else(|| format!("invalid allowance: {path}"))?;
+                        digest.update(path.as_bytes());
+                        digest.update([0]);
+                        digest.update(number.to_le_bytes());
+                    } else {
+                        visit(value, &path, digest)?;
+                    }
+                }
+            }
+            serde_json::Value::Array(values) => {
+                for (index, value) in values.iter().enumerate() {
+                    visit(value, &format!("{path}/{index}"), digest)?;
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+    let mut digest = Sha256::new();
+    visit(reference, "", &mut digest)?;
+    Ok(digest
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect())
+}
+
 /// Structured pass record printed by every comparison test.
 #[derive(Debug, Clone, Serialize)]
 pub struct QaResult {
@@ -186,6 +230,8 @@ pub struct QaResult {
     pub error: f64,
     /// Case tolerance from the manifest.
     pub tolerance: f64,
+    /// Digest of the reference's per-entry allowances.
+    pub allowance_sha256: String,
     /// `live-engine` or `checked-in-golden`.
     pub provenance: String,
 }
@@ -229,10 +275,18 @@ pub fn verify_result_records(log: &str, manifest: &str) -> Result<usize, String>
             .and_then(toml::Value::as_float)
             .filter(|v| v.is_finite() && *v >= 0.0)
             .ok_or("manifest case has invalid limit")?;
+        let allowance = case
+            .get("allowance_sha256")
+            .and_then(toml::Value::as_str)
+            .filter(|s| s.len() == 64 && s.bytes().all(|c| c.is_ascii_hexdigit()))
+            .ok_or("manifest case has invalid allowance digest")?;
         if metric.is_empty() || unit.is_empty() {
             return Err("manifest case has empty metric or unit".into());
         }
-        if expected.insert(id, (metric, unit, limit)).is_some() {
+        if expected
+            .insert(id, (metric, unit, limit, allowance))
+            .is_some()
+        {
             return Err(format!("duplicate manifest case: {id}"));
         }
     }
@@ -247,11 +301,14 @@ pub fn verify_result_records(log: &str, manifest: &str) -> Result<usize, String>
         let record: serde_json::Value =
             serde_json::from_str(payload).map_err(|e| format!("QA_RESULT: {e}"))?;
         let id = record["case"].as_str().ok_or("comparison has no case id")?;
-        let (metric, unit, limit) = expected
+        let (metric, unit, limit, allowance) = expected
             .get(id)
             .ok_or_else(|| format!("unknown comparison: {id}"))?;
         if record["metric"].as_str() != Some(*metric) || record["unit"].as_str() != Some(*unit) {
             return Err(format!("{id}: wrong or missing metric/unit"));
+        }
+        if record["allowance_sha256"].as_str() != Some(*allowance) {
+            return Err(format!("{id}: reference allowances differ from manifest"));
         }
         if !seen.insert(id.to_owned()) {
             return Err(format!("duplicate comparison: {id}"));

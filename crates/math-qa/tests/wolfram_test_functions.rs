@@ -68,6 +68,7 @@ fn wolfram_test_functions() {
         unit: "ratio".to_string(),
         error: max_err,
         tolerance: TOL_REL,
+        allowance_sha256: math_qa::allowance_digest(&ref_json).expect("numeric oracle allowances"),
         provenance: provenance(),
     });
 }

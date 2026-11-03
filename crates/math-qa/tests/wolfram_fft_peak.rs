@@ -54,6 +54,7 @@ fn wolfram_fft_peak() {
         unit: "ratio".to_string(),
         error: (peak - expected_peak).abs() / expected_peak,
         tolerance: TOL_PEAK,
+        allowance_sha256: math_qa::allowance_digest(&ref_json).expect("numeric oracle allowances"),
         provenance: provenance(),
     });
 }

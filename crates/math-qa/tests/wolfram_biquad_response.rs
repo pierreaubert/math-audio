@@ -46,6 +46,7 @@ fn wolfram_biquad_response() {
         unit: "ratio".to_string(),
         error: max_err,
         tolerance: TOL,
+        allowance_sha256: math_qa::allowance_digest(&ref_json).expect("numeric oracle allowances"),
         provenance: provenance(),
     });
 }
