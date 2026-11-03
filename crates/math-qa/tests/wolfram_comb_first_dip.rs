@@ -22,12 +22,10 @@ fn wolfram_comb_first_dip() {
     let sr = 48000.0;
     let cfg = ReflectionTableConfig::default();
     let mut max_err = 0.0f64;
-    let mut max_tol = 0.0f64;
     for entry in &entries {
         let delay_s: f64 = serde_json::from_value(entry["delay_s"].clone()).unwrap();
         // Per-entry tolerance from the oracle (ring overlap at 2 ms).
         let tol: f64 = serde_json::from_value(entry["tolerance"].clone()).unwrap();
-        max_tol = max_tol.max(tol);
         let delay_samples = (delay_s * sr).round() as usize;
         let n = 480 + delay_samples + (20.0 * sr / 1000.0) as usize;
         let mut rir = vec![0.0f32; n];
@@ -47,14 +45,16 @@ fn wolfram_comb_first_dip() {
             let expected: f64 = serde_json::from_value(entry[key].clone()).unwrap();
             let err = math_qa::rel_error(actual, expected);
             assert_close(actual, expected, tol, &format!("{key} at dt={delay_s}s"));
-            max_err = max_err.max(err);
+            max_err = max_err.max(err / tol);
         }
     }
     emit_result(&QaResult {
         case: CASE_ID.to_string(),
         pass: true,
-        max_rel_error: max_err,
-        tolerance: max_tol,
+        metric: "max_error_over_entry_tolerance".to_string(),
+        unit: "ratio".to_string(),
+        error: max_err,
+        tolerance: 1.0,
         provenance: provenance(),
     });
 }

@@ -42,15 +42,13 @@ fn wolfram_schroeder_t60() {
     let t60 = -60.0 / slope;
     assert_close(t60, expected_t60, TOL_T60, "T30");
 
-    let mut max_err = (t60 - expected_t60).abs() / expected_t60;
+    let max_err = (t60 - expected_t60).abs() / expected_t60;
     for (t, expected) in probe_times.iter().zip(probe_db.iter()) {
         // Curve values are already in dB (and cross zero), so the
         // comparison is absolute, not relative.
         let idx = (*t * sr).round() as usize;
         let actual = curve.samples[idx.min(curve.samples.len() - 1)];
-        let err = (actual - *expected).abs();
         assert_close_abs(actual, *expected, TOL_CURVE_DB, &format!("decay at t={t}s"));
-        max_err = max_err.max(err);
     }
     // Cross-check through the public ISO entry point as well.
     let metrics = math_rir::analyze_iso3382(&rir, sr);
@@ -58,7 +56,9 @@ fn wolfram_schroeder_t60() {
     emit_result(&QaResult {
         case: CASE_ID.to_string(),
         pass: true,
-        max_rel_error: max_err,
+        metric: "t30_relative_error".to_string(),
+        unit: "ratio".to_string(),
+        error: max_err,
         tolerance: TOL_T60,
         provenance: provenance(),
     });

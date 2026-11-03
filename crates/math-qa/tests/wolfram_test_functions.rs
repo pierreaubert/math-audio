@@ -64,7 +64,9 @@ fn wolfram_test_functions() {
     emit_result(&QaResult {
         case: CASE_ID.to_string(),
         pass: true,
-        max_rel_error: max_err,
+        metric: "nonzero_relative_error".to_string(),
+        unit: "ratio".to_string(),
+        error: max_err,
         tolerance: TOL_REL,
         provenance: provenance(),
     });

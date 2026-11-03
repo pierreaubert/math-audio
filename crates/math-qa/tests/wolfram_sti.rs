@@ -70,12 +70,10 @@ fn wolfram_sti() {
     let entries: Vec<serde_json::Value> =
         serde_json::from_value(ref_json["entries"].clone()).unwrap();
     let mut max_err = 0.0f64;
-    let mut max_tol = 0.0f64;
     for entry in &entries {
         let name: String = serde_json::from_value(entry["name"].clone()).unwrap();
         let tol_mtf: f64 = serde_json::from_value(entry["tolerance_mtf"].clone()).unwrap();
         let tol_sti: f64 = serde_json::from_value(entry["tolerance_sti"].clone()).unwrap();
-        max_tol = max_tol.max(tol_mtf).max(tol_sti);
         let expected_mtf: Vec<Vec<f64>> = serde_json::from_value(entry["mtf"].clone()).unwrap();
         let expected_mti: Vec<f64> = serde_json::from_value(entry["mti"].clone()).unwrap();
         let expected_sti: f64 = serde_json::from_value(entry["sti"].clone()).unwrap();
@@ -97,24 +95,26 @@ fn wolfram_sti() {
             for (actual, expected) in row.iter().zip(expected_row.iter()) {
                 let err = (actual - expected).abs();
                 assert_close_abs(*actual, *expected, tol_mtf, &format!("{name} MTF"));
-                entry_err = entry_err.max(err);
+                entry_err = entry_err.max(err / tol_mtf);
             }
         }
         for (actual, expected) in result.mti.iter().zip(expected_mti.iter()) {
             let err = (actual - expected).abs();
             assert_close_abs(*actual, *expected, tol_sti, &format!("{name} MTI"));
-            entry_err = entry_err.max(err);
+            entry_err = entry_err.max(err / tol_sti);
         }
         let err = (result.sti - expected_sti).abs();
         assert_close_abs(result.sti, expected_sti, tol_sti, &format!("{name} STI"));
-        entry_err = entry_err.max(err);
+        entry_err = entry_err.max(err / tol_sti);
         max_err = max_err.max(entry_err);
     }
     emit_result(&QaResult {
         case: CASE_ID.to_string(),
         pass: true,
-        max_rel_error: max_err,
-        tolerance: max_tol,
+        metric: "max_error_over_entry_tolerance".to_string(),
+        unit: "ratio".to_string(),
+        error: max_err,
+        tolerance: 1.0,
         provenance: provenance(),
     });
 }

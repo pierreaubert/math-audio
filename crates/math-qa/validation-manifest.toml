@@ -10,6 +10,9 @@ owner = "math-iir-fir"
 script = "biquad_response.wls"
 golden = "biquad_response.json"
 test = "wolfram_biquad_response"
+metric = "complex_response_relative_error"
+unit = "ratio"
+limit = 1e-9
 tolerance = "complex relative error <= 1e-9"
 tier = "smoke"
 
@@ -19,6 +22,9 @@ owner = "math-dsp"
 script = "fft_peak.wls"
 golden = "fft_peak.json"
 test = "wolfram_fft_peak"
+metric = "peak_relative_error"
+unit = "ratio"
+limit = 1e-6
 tolerance = "peak relative error <= 1e-6, off-peak bins <= 0.05 absolute"
 tier = "smoke"
 
@@ -28,6 +34,9 @@ owner = "math-rir"
 script = "schroeder_t60.wls"
 golden = "schroeder_t60.json"
 test = "wolfram_schroeder_t60"
+metric = "t30_relative_error"
+unit = "ratio"
+limit = 1e-4
 tolerance = "T30 relative error <= 1e-4, curve points <= 1e-6 dB absolute"
 tier = "smoke"
 
@@ -37,6 +46,9 @@ owner = "math-rir"
 script = "comb_first_dip.wls"
 golden = "comb_first_dip.json"
 test = "wolfram_comb_first_dip"
+metric = "max_error_over_entry_tolerance"
+unit = "ratio"
+limit = 1.0
 tolerance = "per-entry oracle tolerance: 5e-3 at 2 ms, 1e-5 above (bandpass-ring overlap)"
 tier = "smoke"
 
@@ -46,6 +58,9 @@ owner = "math-dsp"
 script = "third_octave_spl.wls"
 golden = "third_octave_spl.json"
 test = "wolfram_third_octave_spl"
+metric = "second_band_absolute_error"
+unit = "dB"
+limit = 0.3
 tolerance = "peak band exact, 2 kHz band within 0.3 dB, neighbors <= -25 dB"
 tier = "smoke"
 
@@ -55,6 +70,9 @@ owner = "math-dsp"
 script = "waterfall_spots.wls"
 golden = "waterfall_spots.json"
 test = "wolfram_waterfall_spots"
+metric = "spot_absolute_error"
+unit = "dB"
+limit = 1e-3
 tolerance = "spot dB differences within 1e-3 dB"
 tier = "deep"
 
@@ -64,6 +82,9 @@ owner = "math-dsp"
 script = "morlet_spots.wls"
 golden = "morlet_spots.json"
 test = "wolfram_morlet_spots"
+metric = "spot_absolute_error"
+unit = "dB"
+limit = 1e-3
 tolerance = "spot dB differences within 1e-3 dB"
 tier = "deep"
 
@@ -73,6 +94,9 @@ owner = "math-iir-fir"
 script = "svf_response.wls"
 golden = "svf_response.json"
 test = "wolfram_svf_response"
+metric = "complex_response_relative_error"
+unit = "ratio"
+limit = 1e-6
 tolerance = "complex relative error <= 1e-6"
 tier = "smoke"
 
@@ -82,6 +106,9 @@ owner = "math-test-functions"
 script = "test_functions.wls"
 golden = "test_functions.json"
 test = "wolfram_test_functions"
+metric = "nonzero_relative_error"
+unit = "ratio"
+limit = 1e-12
 tolerance = "relative error <= 1e-12 (1e-9 absolute at zeros)"
 tier = "smoke"
 
@@ -91,6 +118,9 @@ owner = "math-iir-fir"
 script = "kautz_correction.wls"
 golden = "kautz_correction.json"
 test = "wolfram_kautz_correction"
+metric = "max_error_over_entry_tolerance"
+unit = "ratio"
+limit = 1.0
 tolerance = "complex relative error <= 1e-9 (impulse DTFT <= 1e-6)"
 tier = "smoke"
 
@@ -100,6 +130,9 @@ owner = "math-rir"
 script = "sti.wls"
 golden = "sti.json"
 test = "wolfram_sti"
+metric = "max_error_over_entry_tolerance"
+unit = "ratio"
+limit = 1.0
 tolerance = "MTF absolute <= 8e-2 impulse, 2.5e-2/1e-2/5e-3 at RT60 0.5/1/2 s; MTI/STI absolute <= 5e-3/2.5e-3/2e-3 (octave-filter transients)"
 tier = "smoke"
 
@@ -109,6 +142,9 @@ owner = "math-dsp"
 script = "capture_tdoa.wls"
 golden = "capture_tdoa.json"
 test = "wolfram_capture_tdoa"
+metric = "max_error_over_entry_tolerance"
+unit = "ratio"
+limit = 1.0
 tolerance = "per-entry TDOA, skew, and uncertainty tolerances across the recorded sample-rate families"
 tier = "smoke"
 
@@ -118,5 +154,8 @@ owner = "math-dsp"
 script = "capture_array.wls"
 golden = "capture_array.json"
 test = "wolfram_capture_array"
+metric = "max_error_over_entry_tolerance"
+unit = "ratio"
+limit = 1.0
 tolerance = "per-entry DOA, geometry, and direct-sinc resampling tolerances across the recorded sample-rate families"
 tier = "smoke"

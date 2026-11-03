@@ -21,7 +21,6 @@ fn wolfram_kautz_correction() {
     };
     assert_eq!(ref_json["case"], CASE_ID);
     let mut max_err = 0.0f64;
-    let mut max_tol = 0.0f64;
 
     let blocks: Vec<serde_json::Value> =
         serde_json::from_value(ref_json["blocks"].clone()).unwrap();
@@ -38,7 +37,6 @@ fn wolfram_kautz_correction() {
         for point in &points {
             let freq: f64 = serde_json::from_value(point["freq_hz"].clone()).unwrap();
             let tol: f64 = serde_json::from_value(point["tolerance"].clone()).unwrap();
-            max_tol = max_tol.max(tol);
             let re: f64 = serde_json::from_value(point["re"].clone()).unwrap();
             let im: f64 = serde_json::from_value(point["im"].clone()).unwrap();
             let expected = Complex64::new(re, im);
@@ -49,7 +47,7 @@ fn wolfram_kautz_correction() {
                 err <= tol,
                 "H({freq} Hz) at {sr} Hz: rust={got64:?} expected={expected:?} rel_err={err:.3e}"
             );
-            max_err = max_err.max(err);
+            max_err = max_err.max(err / tol);
         }
     }
 
@@ -87,14 +85,16 @@ fn wolfram_kautz_correction() {
             err <= tol * 1000.0,
             "impulse DTFT at {freq} Hz: rel_err={err:.3e}"
         );
-        max_err = max_err.max(err / 1000.0);
+        max_err = max_err.max(err / (tol * 1000.0));
     }
 
     emit_result(&QaResult {
         case: CASE_ID.to_string(),
         pass: true,
-        max_rel_error: max_err,
-        tolerance: max_tol,
+        metric: "max_error_over_entry_tolerance".to_string(),
+        unit: "ratio".to_string(),
+        error: max_err,
+        tolerance: 1.0,
         provenance: provenance(),
     });
 }

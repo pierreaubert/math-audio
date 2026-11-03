@@ -178,8 +178,12 @@ pub struct QaResult {
     pub case: String,
     /// True when the comparison passed.
     pub pass: bool,
-    /// Worst relative error observed.
-    pub max_rel_error: f64,
+    /// Name of the recorded comparison metric.
+    pub metric: String,
+    /// Unit of the recorded error and tolerance.
+    pub unit: String,
+    /// Worst error observed for the named metric.
+    pub error: f64,
     /// Case tolerance from the manifest.
     pub tolerance: f64,
     /// `live-engine` or `checked-in-golden`.
@@ -200,19 +204,35 @@ pub fn emit_result(result: &QaResult) {
 /// Rejects malformed records, missing/duplicate/unknown cases, unsuccessful
 /// comparisons, invalid numeric diagnostics, and unknown reference provenance.
 pub fn verify_result_records(log: &str, manifest: &str) -> Result<usize, String> {
-    use std::collections::BTreeSet;
+    use std::collections::{BTreeMap, BTreeSet};
     let manifest: toml::Value = toml::from_str(manifest).map_err(|e| format!("manifest: {e}"))?;
     let cases = manifest
         .get("case")
         .and_then(toml::Value::as_array)
         .ok_or("manifest has no cases")?;
-    let mut expected = BTreeSet::new();
+    let mut expected = BTreeMap::new();
     for case in cases {
         let id = case
             .get("id")
             .and_then(toml::Value::as_str)
             .ok_or("manifest case has no id")?;
-        if !expected.insert(id) {
+        let metric = case
+            .get("metric")
+            .and_then(toml::Value::as_str)
+            .ok_or("manifest case has no metric")?;
+        let unit = case
+            .get("unit")
+            .and_then(toml::Value::as_str)
+            .ok_or("manifest case has no unit")?;
+        let limit = case
+            .get("limit")
+            .and_then(toml::Value::as_float)
+            .filter(|v| v.is_finite() && *v >= 0.0)
+            .ok_or("manifest case has invalid limit")?;
+        if metric.is_empty() || unit.is_empty() {
+            return Err("manifest case has empty metric or unit".into());
+        }
+        if expected.insert(id, (metric, unit, limit)).is_some() {
             return Err(format!("duplicate manifest case: {id}"));
         }
     }
@@ -227,8 +247,11 @@ pub fn verify_result_records(log: &str, manifest: &str) -> Result<usize, String>
         let record: serde_json::Value =
             serde_json::from_str(payload).map_err(|e| format!("QA_RESULT: {e}"))?;
         let id = record["case"].as_str().ok_or("comparison has no case id")?;
-        if !expected.contains(id) {
-            return Err(format!("unknown comparison: {id}"));
+        let (metric, unit, limit) = expected
+            .get(id)
+            .ok_or_else(|| format!("unknown comparison: {id}"))?;
+        if record["metric"].as_str() != Some(*metric) || record["unit"].as_str() != Some(*unit) {
+            return Err(format!("{id}: wrong or missing metric/unit"));
         }
         if !seen.insert(id.to_owned()) {
             return Err(format!("duplicate comparison: {id}"));
@@ -237,7 +260,7 @@ pub fn verify_result_records(log: &str, manifest: &str) -> Result<usize, String>
             return Err(format!("failed comparison: {id}"));
         }
         let mut numeric = [0.0_f64; 2];
-        for (slot, key) in numeric.iter_mut().zip(["max_rel_error", "tolerance"]) {
+        for (slot, key) in numeric.iter_mut().zip(["error", "tolerance"]) {
             let value = record[key]
                 .as_f64()
                 .ok_or_else(|| format!("{id}: invalid {key}"))?;
@@ -246,11 +269,14 @@ pub fn verify_result_records(log: &str, manifest: &str) -> Result<usize, String>
             }
             *slot = value;
         }
+        if numeric[1] != *limit {
+            return Err(format!("{id}: tolerance differs from manifest"));
+        }
         // A self-reported pass is not evidence: the recorded error must
         // actually meet the recorded tolerance.
         if numeric[0] > numeric[1] {
             return Err(format!(
-                "{id}: max_rel_error {} exceeds tolerance {}",
+                "{id}: error {} exceeds tolerance {}",
                 numeric[0], numeric[1]
             ));
         }
@@ -261,7 +287,7 @@ pub fn verify_result_records(log: &str, manifest: &str) -> Result<usize, String>
             return Err(format!("{id}: invalid provenance"));
         }
     }
-    let missing: Vec<_> = expected.iter().filter(|id| !seen.contains(**id)).collect();
+    let missing: Vec<_> = expected.keys().filter(|id| !seen.contains(**id)).collect();
     if !missing.is_empty() {
         return Err(format!("missing comparisons: {missing:?}"));
     }

@@ -62,7 +62,9 @@ fn wolfram_third_octave_spl() {
     emit_result(&QaResult {
         case: CASE_ID.to_string(),
         pass: true,
-        max_rel_error: (second.early_db - second_db).abs() / second_db.abs(),
+        metric: "second_band_absolute_error".to_string(),
+        unit: "dB".to_string(),
+        error: (second.early_db - second_db).abs(),
         tolerance: TOL_SECOND_DB,
         provenance: provenance(),
     });

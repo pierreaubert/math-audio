@@ -174,7 +174,9 @@ fn wolfram_capture_array() {
     emit_result(&QaResult {
         case: CASE_ID.to_string(),
         pass: true,
-        max_rel_error: max_error_ratio,
+        metric: "max_error_over_entry_tolerance".to_string(),
+        unit: "ratio".to_string(),
+        error: max_error_ratio,
         tolerance: 1.0,
         provenance: provenance(),
     });

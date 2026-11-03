@@ -50,7 +50,9 @@ fn wolfram_fft_peak() {
     emit_result(&QaResult {
         case: CASE_ID.to_string(),
         pass: true,
-        max_rel_error: (peak - expected_peak).abs() / expected_peak,
+        metric: "peak_relative_error".to_string(),
+        unit: "ratio".to_string(),
+        error: (peak - expected_peak).abs() / expected_peak,
         tolerance: TOL_PEAK,
         provenance: provenance(),
     });
