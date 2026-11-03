@@ -116,6 +116,10 @@ jobs:
         env:
           RUSTFLAGS: -C target-feature=${{ matrix.features }}
 
+      - name: Historical FIR negative controls
+        if: matrix.slug == 'avx2-fma'
+        run: python3 qa/fir-negative-controls/run.py
+
   qa:
     name: Workspace QA
     runs-on: ubuntu-latest

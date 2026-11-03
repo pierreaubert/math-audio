@@ -13,7 +13,14 @@ static GLOBAL: &stats_alloc::StatsAlloc<std::alloc::System> = &INSTRUMENTED_SYST
 fn fir_contract<T: FilterFloat>() {
     for symmetric in [true, false] {
         for taps in [31, 128, 512] {
-            let mut coefficients = vec![T::from_f64(1.0 / taps as f64).unwrap(); taps];
+            let weights: Vec<f64> = (0..taps)
+                .map(|i| (i.min(taps - 1 - i) + 1) as f64)
+                .collect();
+            let sum: f64 = weights.iter().sum();
+            let mut coefficients: Vec<T> = weights
+                .iter()
+                .map(|weight| T::from_f64(weight / sum).unwrap())
+                .collect();
             if !symmetric {
                 coefficients[0] *= T::from_f64(0.9).unwrap();
             }

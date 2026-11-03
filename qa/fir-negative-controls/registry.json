@@ -1,0 +1,4 @@
+[
+  {"fix": "e57bf1e11c4a3dad209c981a429fb266578a2f80", "patch": "stale-tail.patch", "defect": "AVX2 scalar tail uses stale state position"},
+  {"fix": "38e72e0b2021773f6d078687bc3848b7df0f4fc7", "patch": "early-duplication.patch", "defect": "AVX2 vector loop overwrites its own history"}
+]
