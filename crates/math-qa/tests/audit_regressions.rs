@@ -100,3 +100,46 @@ fn reference_allowance_changes_are_rejected() {
     let missing = serde_json::json!({"entries": [{}, {"tolerance": 0.02}]});
     assert!(math_qa::verify_result_records(&record(&missing), &manifest).is_err());
 }
+
+#[test]
+fn normalized_records_require_raw_components_and_recompute_the_ratio() {
+    let digest = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+    let manifest = format!(
+        "[[case]]\nid = 'one'\nmetric = 'max_error_over_entry_tolerance'\nunit = 'ratio'\nlimit = 1.0\nallowance_sha256 = '{digest}'\nallowances = {{ angle = 0.1, rms = 0.01 }}\n"
+    );
+    let record = |error: f64, components: serde_json::Value| {
+        format!(
+            "QA_RESULT: {}",
+            serde_json::json!({
+                "case": "one", "pass": true, "metric": "max_error_over_entry_tolerance", "unit": "ratio", "error": error,
+                "tolerance": 1.0, "allowance_sha256": digest, "provenance": "checked-in-golden", "components": components
+            })
+        )
+    };
+    let raw = serde_json::json!({"angle": 0.05, "rms": 0.001});
+    let valid = record(0.5, raw.clone());
+    assert!(math_qa::verify_result_records(&valid, &manifest).is_ok());
+    assert!(math_qa::verify_result_records(&record(0.05, raw.clone()), &manifest).is_err());
+    assert!(
+        math_qa::verify_result_records(&valid, &manifest.replace("angle = 0.1", "angle = 1.0"))
+            .is_err()
+    );
+    assert!(
+        math_qa::verify_result_records(&record(0.5, serde_json::json!({"angle": 0.05})), &manifest)
+            .is_err()
+    );
+    assert!(
+        math_qa::verify_result_records(
+            &record(0.5, serde_json::json!({"angle": 0.05, "unknown": 0.001})),
+            &manifest
+        )
+        .is_err()
+    );
+    assert!(
+        math_qa::verify_result_records(
+            &record(0.5, serde_json::json!({"angle": -0.05, "rms": 0.001})),
+            &manifest
+        )
+        .is_err()
+    );
+}

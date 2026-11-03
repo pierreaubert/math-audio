@@ -4,7 +4,7 @@
 //! ripple = 20log10((1+g)/(1-g)), path = c dt). The Rust picker must
 //! reproduce them from bandpassed unit deltas. Tolerance 1e-6 relative.
 
-use math_qa::{QaResult, assert_close, emit_result, provenance, reference};
+use math_qa::{NormalizedErrors, assert_close, reference};
 use math_rir::report::{ReflectionTableConfig, early_reflection_table};
 
 const CASE: &str = "comb_first_dip";
@@ -21,8 +21,8 @@ fn wolfram_comb_first_dip() {
 
     let sr = 48000.0;
     let cfg = ReflectionTableConfig::default();
-    let mut max_err = 0.0f64;
-    for entry in &entries {
+    let mut errors = NormalizedErrors::new(CASE_ID);
+    for (index, entry) in entries.iter().enumerate() {
         let delay_s: f64 = serde_json::from_value(entry["delay_s"].clone()).unwrap();
         // Per-entry tolerance from the oracle (ring overlap at 2 ms).
         let tol: f64 = serde_json::from_value(entry["tolerance"].clone()).unwrap();
@@ -45,17 +45,8 @@ fn wolfram_comb_first_dip() {
             let expected: f64 = serde_json::from_value(entry[key].clone()).unwrap();
             let err = math_qa::rel_error(actual, expected);
             assert_close(actual, expected, tol, &format!("{key} at dt={delay_s}s"));
-            max_err = max_err.max(err / tol);
+            errors.record(&format!("entry{index}"), err);
         }
     }
-    emit_result(&QaResult {
-        case: CASE_ID.to_string(),
-        pass: true,
-        metric: "max_error_over_entry_tolerance".to_string(),
-        unit: "ratio".to_string(),
-        error: max_err,
-        tolerance: 1.0,
-        allowance_sha256: math_qa::allowance_digest(&ref_json).expect("numeric oracle allowances"),
-        provenance: provenance(),
-    });
+    errors.emit(CASE_ID, &ref_json);
 }

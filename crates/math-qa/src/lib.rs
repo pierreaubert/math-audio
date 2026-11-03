@@ -215,6 +215,78 @@ pub fn allowance_digest(reference: &serde_json::Value) -> Result<String, String>
         .collect())
 }
 
+/// Collect raw errors against the manifest's named allowances.
+pub struct NormalizedErrors {
+    allowances: std::collections::BTreeMap<String, f64>,
+    errors: std::collections::BTreeMap<String, f64>,
+}
+
+fn normalized_allowances(
+    case: &toml::Value,
+) -> Result<std::collections::BTreeMap<String, f64>, String> {
+    let table = case
+        .get("allowances")
+        .and_then(toml::Value::as_table)
+        .ok_or("missing normalized allowances")?;
+    if table.is_empty() {
+        return Err("empty normalized allowances".into());
+    }
+    table
+        .iter()
+        .map(|(key, value)| {
+            let value = value
+                .as_float()
+                .filter(|v| v.is_finite() && *v > 0.0)
+                .ok_or("invalid normalized allowance")?;
+            Ok((key.clone(), value))
+        })
+        .collect()
+}
+
+impl NormalizedErrors {
+    /// Create an accumulator using the checked-in manifest.
+    pub fn new(case_id: &str) -> Self {
+        let manifest: toml::Value =
+            toml::from_str(include_str!("../validation-manifest.toml")).expect("valid manifest");
+        let case = manifest["case"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|case| case["id"].as_str() == Some(case_id))
+            .expect("manifest case");
+        Self {
+            allowances: normalized_allowances(case).expect("normalized allowances"),
+            errors: Default::default(),
+        }
+    }
+
+    /// Record one raw nonnegative error under its canonical allowance ID.
+    pub fn record(&mut self, id: &str, error: f64) {
+        assert!(self.allowances.contains_key(id), "unknown allowance {id}");
+        assert!(error.is_finite() && error >= 0.0, "invalid error for {id}");
+        self.errors
+            .entry(id.to_owned())
+            .and_modify(|v| *v = v.max(error))
+            .or_insert(error);
+    }
+
+    /// Emit a summary containing raw maxima and their derived ratio.
+    pub fn emit(self, case: &str, reference: &serde_json::Value) {
+        assert_eq!(
+            self.errors.len(),
+            self.allowances.len(),
+            "missing normalized components"
+        );
+        let error = self
+            .errors
+            .iter()
+            .map(|(id, raw)| raw / self.allowances[id])
+            .fold(0.0_f64, f64::max);
+        let result = serde_json::json!({"case": case, "pass": true, "metric": "max_error_over_entry_tolerance", "unit": "ratio", "error": error, "tolerance": 1.0, "allowance_sha256": allowance_digest(reference).expect("numeric oracle allowances"), "provenance": provenance(), "components": self.errors});
+        println!("QA_RESULT: {result}");
+    }
+}
+
 /// Structured pass record printed by every comparison test.
 #[derive(Debug, Clone, Serialize)]
 pub struct QaResult {
@@ -284,7 +356,20 @@ pub fn verify_result_records(log: &str, manifest: &str) -> Result<usize, String>
             return Err("manifest case has empty metric or unit".into());
         }
         if expected
-            .insert(id, (metric, unit, limit, allowance))
+            .insert(
+                id,
+                (
+                    metric,
+                    unit,
+                    limit,
+                    allowance,
+                    if metric == "max_error_over_entry_tolerance" {
+                        Some(normalized_allowances(case)?)
+                    } else {
+                        None
+                    },
+                ),
+            )
             .is_some()
         {
             return Err(format!("duplicate manifest case: {id}"));
@@ -301,7 +386,7 @@ pub fn verify_result_records(log: &str, manifest: &str) -> Result<usize, String>
         let record: serde_json::Value =
             serde_json::from_str(payload).map_err(|e| format!("QA_RESULT: {e}"))?;
         let id = record["case"].as_str().ok_or("comparison has no case id")?;
-        let (metric, unit, limit, allowance) = expected
+        let (metric, unit, limit, allowance, components) = expected
             .get(id)
             .ok_or_else(|| format!("unknown comparison: {id}"))?;
         if record["metric"].as_str() != Some(*metric) || record["unit"].as_str() != Some(*unit) {
@@ -325,6 +410,26 @@ pub fn verify_result_records(log: &str, manifest: &str) -> Result<usize, String>
                 return Err(format!("{id}: invalid {key}"));
             }
             *slot = value;
+        }
+        if let Some(allowances) = components {
+            let raw = record["components"]
+                .as_object()
+                .ok_or_else(|| format!("{id}: missing components"))?;
+            if raw.len() != allowances.len() {
+                return Err(format!("{id}: wrong component set"));
+            }
+            let mut ratio = 0.0_f64;
+            for (key, allowance) in allowances {
+                let value = raw
+                    .get(key)
+                    .and_then(serde_json::Value::as_f64)
+                    .filter(|v| v.is_finite() && *v >= 0.0)
+                    .ok_or_else(|| format!("{id}: invalid component {key}"))?;
+                ratio = ratio.max(value / allowance);
+            }
+            if ratio != numeric[0] {
+                return Err(format!("{id}: normalized error does not match components"));
+            }
         }
         if numeric[1] != *limit {
             return Err(format!("{id}: tolerance differs from manifest"));

@@ -8,7 +8,7 @@
 //! the closed-form evaluator as its own oracle).
 
 use math_audio_iir_fir::KautzCorrection;
-use math_qa::{QaResult, complex_rel_error, emit_result, provenance, reference};
+use math_qa::{NormalizedErrors, complex_rel_error, reference};
 use num_complex::Complex64;
 
 const CASE: &str = "kautz_correction";
@@ -20,7 +20,7 @@ fn wolfram_kautz_correction() {
         return;
     };
     assert_eq!(ref_json["case"], CASE_ID);
-    let mut max_err = 0.0f64;
+    let mut errors = NormalizedErrors::new(CASE_ID);
 
     let blocks: Vec<serde_json::Value> =
         serde_json::from_value(ref_json["blocks"].clone()).unwrap();
@@ -47,7 +47,7 @@ fn wolfram_kautz_correction() {
                 err <= tol,
                 "H({freq} Hz) at {sr} Hz: rust={got64:?} expected={expected:?} rel_err={err:.3e}"
             );
-            max_err = max_err.max(err / tol);
+            errors.record("response", err);
         }
     }
 
@@ -85,17 +85,8 @@ fn wolfram_kautz_correction() {
             err <= tol * 1000.0,
             "impulse DTFT at {freq} Hz: rel_err={err:.3e}"
         );
-        max_err = max_err.max(err / (tol * 1000.0));
+        errors.record("impulse", err);
     }
 
-    emit_result(&QaResult {
-        case: CASE_ID.to_string(),
-        pass: true,
-        metric: "max_error_over_entry_tolerance".to_string(),
-        unit: "ratio".to_string(),
-        error: max_err,
-        tolerance: 1.0,
-        allowance_sha256: math_qa::allowance_digest(&ref_json).expect("numeric oracle allowances"),
-        provenance: provenance(),
-    });
+    errors.emit(CASE_ID, &ref_json);
 }

@@ -12,7 +12,7 @@ use math_audio_dsp::capture_array::{
 };
 use math_audio_dsp::capture_resample::resample_to_common_clock;
 use math_audio_dsp::capture_tdoa::ClockSkew;
-use math_qa::{QaResult, assert_close, assert_close_abs, emit_result, provenance, reference};
+use math_qa::{NormalizedErrors, assert_close, assert_close_abs, reference};
 
 const CASE: &str = "capture_array";
 const CASE_ID: &str = "math-qa.capture-array.v1";
@@ -64,7 +64,7 @@ fn wolfram_capture_array() {
     assert_eq!(ref_json["case"], CASE_ID);
     // Combine different units as fractions of their unchanged oracle tolerances.
     // A ratio of one is the acceptance boundary for every comparison.
-    let mut max_error_ratio = 0.0f64;
+    let mut errors = NormalizedErrors::new(CASE_ID);
 
     // C5: engine solved the same exact-delay LS problem independently.
     let c5: Vec<serde_json::Value> =
@@ -93,10 +93,10 @@ fn wolfram_capture_array() {
                 tol,
                 &format!("{what} at {sr} Hz az={az} el={el}"),
             );
-            max_error_ratio = max_error_ratio.max(err / tol);
+            errors.record("angle", err);
         }
         assert_close_abs(est.rms_residual_samples, exp_res, res_tol, "C5 residual");
-        max_error_ratio = max_error_ratio.max((est.rms_residual_samples - exp_res).abs() / res_tol);
+        errors.record("residual", (est.rms_residual_samples - exp_res).abs());
     }
 
     // C6: scale calibration against the engine value, per rate. The
@@ -122,10 +122,10 @@ fn wolfram_capture_array() {
         let tol: f64 = serde_json::from_value(block["scale_tolerance"].clone()).unwrap();
         let err = math_qa::rel_error(scale, exp_scale);
         assert_close(scale, exp_scale, tol, &format!("C6 scale at {sr} Hz"));
-        max_error_ratio = max_error_ratio.max(err / tol);
+        errors.record("scale", err);
         let exp_rms: f64 = serde_json::from_value(block["scale_rms_samples"].clone()).unwrap();
         assert_close_abs(rms, exp_rms, 1e-9, "C6 scale rms");
-        max_error_ratio = max_error_ratio.max((rms - exp_rms).abs() / 1e-9);
+        errors.record("rms", (rms - exp_rms).abs());
         let max_res: f64 =
             serde_json::from_value(block["max_residual_vs_true_samples"].clone()).unwrap();
         let exact = exact_pairs(&array, sr, &dir);
@@ -168,17 +168,8 @@ fn wolfram_capture_array() {
             tol,
             &format!("C3 value at {sr} Hz {m}+{frac}"),
         );
-        max_error_ratio = max_error_ratio.max(err / tol);
+        errors.record("sample", err);
     }
 
-    emit_result(&QaResult {
-        case: CASE_ID.to_string(),
-        pass: true,
-        metric: "max_error_over_entry_tolerance".to_string(),
-        unit: "ratio".to_string(),
-        error: max_error_ratio,
-        tolerance: 1.0,
-        allowance_sha256: math_qa::allowance_digest(&ref_json).expect("numeric oracle allowances"),
-        provenance: provenance(),
-    });
+    errors.emit(CASE_ID, &ref_json);
 }

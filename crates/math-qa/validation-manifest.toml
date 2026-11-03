@@ -5,6 +5,9 @@
 # and a `tests/` comparison target below.
 # allowance_sha256 pins the ordered paths and f64 values of oracle tolerance
 # fields, as computed by allowance_digest; review changes to those values.
+# Normalized cases also pin named numerical allowances for raw component
+# maxima, including the fixed RMS and scaled impulse tolerances. Review both
+# the digest and the allowance map when updating an oracle.
 
 [[case]]
 id = "math-qa.biquad-response.v1"
@@ -54,6 +57,7 @@ allowance_sha256 = "251db5fc39fbae4deec9925d81a6cc18484fe4716da91edd11fb12375ba7
 test = "wolfram_comb_first_dip"
 metric = "max_error_over_entry_tolerance"
 unit = "ratio"
+allowances = { entry0 = 0.005, entry1 = 1e-05, entry2 = 1e-05 }
 limit = 1.0
 tolerance = "per-entry oracle tolerance: 5e-3 at 2 ms, 1e-5 above (bandpass-ring overlap)"
 tier = "smoke"
@@ -132,6 +136,7 @@ allowance_sha256 = "cad371f098d1910ba88c981edb93bfcf48b91dd81ec666ec9a62934fc55e
 test = "wolfram_kautz_correction"
 metric = "max_error_over_entry_tolerance"
 unit = "ratio"
+allowances = { response = 1e-09, impulse = 1e-06 }
 limit = 1.0
 tolerance = "complex relative error <= 1e-9 (impulse DTFT <= 1e-6)"
 tier = "smoke"
@@ -145,6 +150,7 @@ allowance_sha256 = "156ef320d635f937ec86c4e46754a9195b6f64460affff1384f12c139aae
 test = "wolfram_sti"
 metric = "max_error_over_entry_tolerance"
 unit = "ratio"
+allowances = { mtf0 = 0.08, mtf1 = 0.025, mtf2 = 0.01, mtf3 = 0.005, sti0 = 0.005, sti1 = 0.005, sti2 = 0.0025, sti3 = 0.002 }
 limit = 1.0
 tolerance = "MTF absolute <= 8e-2 impulse, 2.5e-2/1e-2/5e-3 at RT60 0.5/1/2 s; MTI/STI absolute <= 5e-3/2.5e-3/2e-3 (octave-filter transients)"
 tier = "smoke"
@@ -158,6 +164,7 @@ allowance_sha256 = "02dcfe6af5e28421b1e5b3b92887b7657d59c21c317e0121514654af654d
 test = "wolfram_capture_tdoa"
 metric = "max_error_over_entry_tolerance"
 unit = "ratio"
+allowances = { offset = 0.03, confidence = 1.0, skew = 1e-09, uncertainty = 1e-09 }
 limit = 1.0
 tolerance = "per-entry TDOA, skew, and uncertainty tolerances across the recorded sample-rate families"
 tier = "smoke"
@@ -171,6 +178,7 @@ allowance_sha256 = "024aae76f0db63382eac3c16ebd69f6867545ba5b17e196bb5816ec25f64
 test = "wolfram_capture_array"
 metric = "max_error_over_entry_tolerance"
 unit = "ratio"
+allowances = { angle = 0.05, residual = 1e-09, scale = 1e-09, rms = 1e-09, sample = 0.003 }
 limit = 1.0
 tolerance = "per-entry DOA, geometry, and direct-sinc resampling tolerances across the recorded sample-rate families"
 tier = "smoke"

@@ -8,7 +8,7 @@
 //! octave-filter transients and carrier ripple. Per-entry absolute
 //! tolerances come from the oracle; all quantities live in [0, 1].
 
-use math_qa::{QaResult, assert_close_abs, emit_result, provenance, reference};
+use math_qa::{NormalizedErrors, assert_close_abs, reference};
 use math_rir::sti::{
     STI_ALPHA, STI_BETA, STI_MODULATION_FREQUENCIES_HZ, STI_OCTAVE_CENTERS_HZ, analyze_sti,
 };
@@ -69,8 +69,8 @@ fn wolfram_sti() {
     let sr: f64 = serde_json::from_value(ref_json["sample_rate_hz"].clone()).unwrap();
     let entries: Vec<serde_json::Value> =
         serde_json::from_value(ref_json["entries"].clone()).unwrap();
-    let mut max_err = 0.0f64;
-    for entry in &entries {
+    let mut errors = NormalizedErrors::new(CASE_ID);
+    for (index, entry) in entries.iter().enumerate() {
         let name: String = serde_json::from_value(entry["name"].clone()).unwrap();
         let tol_mtf: f64 = serde_json::from_value(entry["tolerance_mtf"].clone()).unwrap();
         let tol_sti: f64 = serde_json::from_value(entry["tolerance_sti"].clone()).unwrap();
@@ -90,32 +90,21 @@ fn wolfram_sti() {
         let result =
             analyze_sti(&ir, sr).unwrap_or_else(|e| panic!("{name}: analyze_sti failed: {e:?}"));
 
-        let mut entry_err = 0.0f64;
         for (row, expected_row) in result.modulation_transfer.iter().zip(expected_mtf.iter()) {
             for (actual, expected) in row.iter().zip(expected_row.iter()) {
                 let err = (actual - expected).abs();
                 assert_close_abs(*actual, *expected, tol_mtf, &format!("{name} MTF"));
-                entry_err = entry_err.max(err / tol_mtf);
+                errors.record(&format!("mtf{index}"), err);
             }
         }
         for (actual, expected) in result.mti.iter().zip(expected_mti.iter()) {
             let err = (actual - expected).abs();
             assert_close_abs(*actual, *expected, tol_sti, &format!("{name} MTI"));
-            entry_err = entry_err.max(err / tol_sti);
+            errors.record(&format!("sti{index}"), err);
         }
         let err = (result.sti - expected_sti).abs();
         assert_close_abs(result.sti, expected_sti, tol_sti, &format!("{name} STI"));
-        entry_err = entry_err.max(err / tol_sti);
-        max_err = max_err.max(entry_err);
+        errors.record(&format!("sti{index}"), err);
     }
-    emit_result(&QaResult {
-        case: CASE_ID.to_string(),
-        pass: true,
-        metric: "max_error_over_entry_tolerance".to_string(),
-        unit: "ratio".to_string(),
-        error: max_err,
-        tolerance: 1.0,
-        allowance_sha256: math_qa::allowance_digest(&ref_json).expect("numeric oracle allowances"),
-        provenance: provenance(),
-    });
+    errors.emit(CASE_ID, &ref_json);
 }
