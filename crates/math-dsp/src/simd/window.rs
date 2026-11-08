@@ -5,32 +5,15 @@
 pub fn window_mul_simd(dst: &mut [f32], src: &[f32], window: &[f32]) {
     debug_assert_eq!(dst.len(), src.len());
     debug_assert_eq!(dst.len(), window.len());
-    let len = dst.len();
 
-    #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
-    {
-        use std::arch::x86_64::*;
-
-        let simd_len = (len / 8) * 8;
-
-        for i in (0..simd_len).step_by(8) {
-            unsafe {
-                let src_ptr = src.as_ptr().add(i);
-                let win_ptr = window.as_ptr().add(i);
-                let dst_ptr = dst.as_mut_ptr().add(i);
-
-                let s = _mm256_loadu_ps(src_ptr);
-                let w = _mm256_loadu_ps(win_ptr);
-                let result = _mm256_mul_ps(s, w);
-
-                _mm256_storeu_ps(dst_ptr, result);
-            }
-        }
-
-        for i in simd_len..len {
-            dst[i] = src[i] * window[i];
-        }
+    #[cfg(target_arch = "x86_64")]
+    if super::has_avx2() {
+        // SAFETY: the runtime probe establishes AVX2 support.
+        unsafe { window_mul_avx2(dst, src, window) };
+        return;
     }
+
+    let len = dst.len();
 
     #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
     {
@@ -57,10 +40,7 @@ pub fn window_mul_simd(dst: &mut [f32], src: &[f32], window: &[f32]) {
         }
     }
 
-    #[cfg(not(any(
-        all(target_arch = "x86_64", target_feature = "avx2"),
-        all(target_arch = "aarch64", target_feature = "neon")
-    )))]
+    #[cfg(not(all(target_arch = "aarch64", target_feature = "neon")))]
     {
         for i in 0..len {
             dst[i] = src[i] * window[i];
@@ -71,25 +51,14 @@ pub fn window_mul_simd(dst: &mut [f32], src: &[f32], window: &[f32]) {
 /// SIMD-optimized in-place window multiplication.
 #[inline]
 pub fn window_mul_simd_inplace(data: &mut [f32], window: &[f32]) {
-    let len = data.len().min(window.len());
-
-    #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
-    {
-        use std::arch::x86_64::*;
-        let simd_len = (len / 8) * 8;
-        for i in (0..simd_len).step_by(8) {
-            unsafe {
-                let ptr = data.as_mut_ptr().add(i);
-                let win_ptr = window.as_ptr().add(i);
-                let d = _mm256_loadu_ps(ptr);
-                let w = _mm256_loadu_ps(win_ptr);
-                _mm256_storeu_ps(ptr, _mm256_mul_ps(d, w));
-            }
-        }
-        for i in simd_len..len {
-            data[i] *= window[i];
-        }
+    #[cfg(target_arch = "x86_64")]
+    if super::has_avx2() {
+        // SAFETY: the runtime probe establishes AVX2 support.
+        unsafe { window_mul_inplace_avx2(data, window) };
+        return;
     }
+
+    let len = data.len().min(window.len());
 
     #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
     {
@@ -109,13 +78,58 @@ pub fn window_mul_simd_inplace(data: &mut [f32], window: &[f32]) {
         }
     }
 
-    #[cfg(not(any(
-        all(target_arch = "x86_64", target_feature = "avx2"),
-        all(target_arch = "aarch64", target_feature = "neon")
-    )))]
+    #[cfg(not(all(target_arch = "aarch64", target_feature = "neon")))]
     {
         for i in 0..len {
             data[i] *= window[i];
         }
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn window_mul_avx2(dst: &mut [f32], src: &[f32], window: &[f32]) {
+    use std::arch::x86_64::*;
+
+    let len = dst.len();
+    let simd_len = (len / 8) * 8;
+
+    for i in (0..simd_len).step_by(8) {
+        unsafe {
+            let src_ptr = src.as_ptr().add(i);
+            let win_ptr = window.as_ptr().add(i);
+            let dst_ptr = dst.as_mut_ptr().add(i);
+
+            let s = _mm256_loadu_ps(src_ptr);
+            let w = _mm256_loadu_ps(win_ptr);
+            let result = _mm256_mul_ps(s, w);
+
+            _mm256_storeu_ps(dst_ptr, result);
+        }
+    }
+
+    for i in simd_len..len {
+        dst[i] = src[i] * window[i];
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn window_mul_inplace_avx2(data: &mut [f32], window: &[f32]) {
+    use std::arch::x86_64::*;
+
+    let len = data.len().min(window.len());
+    let simd_len = (len / 8) * 8;
+    for i in (0..simd_len).step_by(8) {
+        unsafe {
+            let ptr = data.as_mut_ptr().add(i);
+            let win_ptr = window.as_ptr().add(i);
+            let d = _mm256_loadu_ps(ptr);
+            let w = _mm256_loadu_ps(win_ptr);
+            _mm256_storeu_ps(ptr, _mm256_mul_ps(d, w));
+        }
+    }
+    for i in simd_len..len {
+        data[i] *= window[i];
     }
 }

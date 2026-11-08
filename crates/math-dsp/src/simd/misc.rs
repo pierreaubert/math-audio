@@ -1,7 +1,7 @@
 use rustfft::num_complex::Complex;
 
-#[cfg(all(target_arch = "aarch64", target_feature = "fcma"))]
-#[inline(always)]
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "fcma")]
 pub(super) unsafe fn fcmla_mul_acc(
     mut r: std::arch::aarch64::float32x4_t,
     a: std::arch::aarch64::float32x4_t,
@@ -20,7 +20,7 @@ pub(super) unsafe fn fcmla_mul_acc(
     r
 }
 
-#[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+#[cfg(target_arch = "x86_64")]
 pub(super) const SHUFFLE_SWAP_RE_IM: i32 = 0b10110001; // Swaps: [re, im] -> [im, re]
 
 /// SIMD-optimized linear interpolation (blend) between two buffers
@@ -32,35 +32,15 @@ pub(super) const SHUFFLE_SWAP_RE_IM: i32 = 0b10110001; // Swaps: [re, im] -> [im
 #[inline]
 pub fn blend_simd(dst: &mut [f32], prev: &[f32], alpha: f32) {
     debug_assert_eq!(dst.len(), prev.len());
-    let len = dst.len();
 
-    #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
-    {
-        use std::arch::x86_64::*;
-
-        let alpha_vec = unsafe { _mm256_set1_ps(alpha) };
-        let simd_len = (len / 8) * 8;
-
-        for i in (0..simd_len).step_by(8) {
-            unsafe {
-                let prev_ptr = prev.as_ptr().add(i);
-                let dst_ptr = dst.as_mut_ptr().add(i);
-
-                let p = _mm256_loadu_ps(prev_ptr);
-                let d = _mm256_loadu_ps(dst_ptr);
-
-                // prev + alpha * (dst - prev)
-                let diff = _mm256_sub_ps(d, p);
-                let result = _mm256_fmadd_ps(alpha_vec, diff, p);
-
-                _mm256_storeu_ps(dst_ptr, result);
-            }
-        }
-
-        for i in simd_len..len {
-            dst[i] = prev[i] + alpha * (dst[i] - prev[i]);
-        }
+    #[cfg(target_arch = "x86_64")]
+    if super::has_avx2_fma() {
+        // SAFETY: the runtime probe establishes AVX2 and FMA support.
+        unsafe { blend_avx2_fma(dst, prev, alpha) };
+        return;
     }
+
+    let len = dst.len();
 
     #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
     {
@@ -90,14 +70,41 @@ pub fn blend_simd(dst: &mut [f32], prev: &[f32], alpha: f32) {
         }
     }
 
-    #[cfg(not(any(
-        all(target_arch = "x86_64", target_feature = "avx2"),
-        all(target_arch = "aarch64", target_feature = "neon")
-    )))]
+    #[cfg(not(all(target_arch = "aarch64", target_feature = "neon")))]
     {
         for i in 0..len {
             dst[i] = prev[i] + alpha * (dst[i] - prev[i]);
         }
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+unsafe fn blend_avx2_fma(dst: &mut [f32], prev: &[f32], alpha: f32) {
+    use std::arch::x86_64::*;
+
+    let len = dst.len();
+    let alpha_vec = _mm256_set1_ps(alpha);
+    let simd_len = (len / 8) * 8;
+
+    for i in (0..simd_len).step_by(8) {
+        unsafe {
+            let prev_ptr = prev.as_ptr().add(i);
+            let dst_ptr = dst.as_mut_ptr().add(i);
+
+            let p = _mm256_loadu_ps(prev_ptr);
+            let d = _mm256_loadu_ps(dst_ptr);
+
+            // prev + alpha * (dst - prev)
+            let diff = _mm256_sub_ps(d, p);
+            let result = _mm256_fmadd_ps(alpha_vec, diff, p);
+
+            _mm256_storeu_ps(dst_ptr, result);
+        }
+    }
+
+    for i in simd_len..len {
+        dst[i] = prev[i] + alpha * (dst[i] - prev[i]);
     }
 }
 
@@ -110,60 +117,65 @@ pub fn deinterleave_stereo(input: &[f32], left: &mut [f32], right: &mut [f32]) {
     debug_assert_eq!(input.len(), left.len() * 2);
     debug_assert_eq!(left.len(), right.len());
 
-    #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
-    {
-        use std::arch::x86_64::*;
+    #[cfg(target_arch = "x86_64")]
+    if super::has_avx2() {
+        // SAFETY: the runtime probe establishes AVX2 support.
+        unsafe { deinterleave_stereo_avx2(input, left, right) };
+        return;
+    }
 
-        let len = left.len();
-        let simd_len = (len / 8) * 8;
+    // Scalar fallback (compiler will auto-vectorize for NEON)
+    for (i, chunk) in input.as_chunks::<2>().0.iter().enumerate() {
+        left[i] = chunk[0];
+        right[i] = chunk[1];
+    }
+}
 
-        for i in (0..simd_len).step_by(8) {
-            unsafe {
-                // Load 16 floats (8 stereo pairs)
-                let in_ptr = input.as_ptr().add(i * 2);
-                let v0 = _mm256_loadu_ps(in_ptr); // L0 R0 L1 R1 L2 R2 L3 R3
-                let v1 = _mm256_loadu_ps(in_ptr.add(8)); // L4 R4 L5 R5 L6 R6 L7 R7
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn deinterleave_stereo_avx2(input: &[f32], left: &mut [f32], right: &mut [f32]) {
+    use std::arch::x86_64::*;
 
-                // Shuffle to separate L and R
-                // Within 256-bit lanes, shuffle to group L/R
-                let shuf_l = _mm256_shuffle_ps(v0, v1, 0b10_00_10_00); // L0 L1 L4 L5 | L2 L3 L6 L7
-                let shuf_r = _mm256_shuffle_ps(v0, v1, 0b11_01_11_01); // R0 R1 R4 R5 | R2 R3 R6 R7
+    let len = left.len();
+    let simd_len = (len / 8) * 8;
 
-                // Permute to get correct order
-                let left_vec = _mm256_permute4x64_pd(
-                    std::mem::transmute::<__m256, __m256d>(shuf_l),
-                    0b11_01_10_00,
-                );
-                let right_vec = _mm256_permute4x64_pd(
-                    std::mem::transmute::<__m256, __m256d>(shuf_r),
-                    0b11_01_10_00,
-                );
+    for i in (0..simd_len).step_by(8) {
+        unsafe {
+            // Load 16 floats (8 stereo pairs)
+            let in_ptr = input.as_ptr().add(i * 2);
+            let v0 = _mm256_loadu_ps(in_ptr); // L0 R0 L1 R1 L2 R2 L3 R3
+            let v1 = _mm256_loadu_ps(in_ptr.add(8)); // L4 R4 L5 R5 L6 R6 L7 R7
 
-                _mm256_storeu_ps(
-                    left.as_mut_ptr().add(i),
-                    std::mem::transmute::<__m256d, __m256>(left_vec),
-                );
-                _mm256_storeu_ps(
-                    right.as_mut_ptr().add(i),
-                    std::mem::transmute::<__m256d, __m256>(right_vec),
-                );
-            }
-        }
+            // Shuffle to separate L and R
+            // Within 256-bit lanes, shuffle to group L/R
+            let shuf_l = _mm256_shuffle_ps(v0, v1, 0b10_00_10_00); // L0 L1 L4 L5 | L2 L3 L6 L7
+            let shuf_r = _mm256_shuffle_ps(v0, v1, 0b11_01_11_01); // R0 R1 R4 R5 | R2 R3 R6 R7
 
-        // Scalar remainder
-        for i in simd_len..len {
-            left[i] = input[i * 2];
-            right[i] = input[i * 2 + 1];
+            // Permute to get correct order
+            let left_vec = _mm256_permute4x64_pd(
+                std::mem::transmute::<__m256, __m256d>(shuf_l),
+                0b11_01_10_00,
+            );
+            let right_vec = _mm256_permute4x64_pd(
+                std::mem::transmute::<__m256, __m256d>(shuf_r),
+                0b11_01_10_00,
+            );
+
+            _mm256_storeu_ps(
+                left.as_mut_ptr().add(i),
+                std::mem::transmute::<__m256d, __m256>(left_vec),
+            );
+            _mm256_storeu_ps(
+                right.as_mut_ptr().add(i),
+                std::mem::transmute::<__m256d, __m256>(right_vec),
+            );
         }
     }
 
-    #[cfg(not(all(target_arch = "x86_64", target_feature = "avx2")))]
-    {
-        // Scalar fallback (compiler will auto-vectorize for NEON)
-        for (i, chunk) in input.as_chunks::<2>().0.iter().enumerate() {
-            left[i] = chunk[0];
-            right[i] = chunk[1];
-        }
+    // Scalar remainder
+    for i in simd_len..len {
+        left[i] = input[i * 2];
+        right[i] = input[i * 2 + 1];
     }
 }
 
@@ -250,10 +262,37 @@ pub fn compute_covariance_simd(
     assert!(end <= left.len());
     assert!(start <= end);
 
-    #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
-    let count = end - start;
+    #[cfg(target_arch = "x86_64")]
+    if super::has_avx2() {
+        // SAFETY: the runtime probe establishes AVX2 support. The asserts
+        // above establish the slice and range bounds used by the kernel.
+        return unsafe { compute_covariance_avx2(left, right, start, end) };
+    }
 
-    #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+    let mut cov_xx = 0.0_f32;
+    let mut cov_yy = 0.0_f32;
+    let mut cov_xy = Complex::new(0.0, 0.0);
+
+    for i in start..end {
+        let l = left[i];
+        let r = right[i];
+        cov_xx += l.norm_sqr();
+        cov_yy += r.norm_sqr();
+        cov_xy += l * r.conj();
+    }
+
+    (cov_xx, cov_yy, cov_xy)
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn compute_covariance_avx2(
+    left: &[Complex<f32>],
+    right: &[Complex<f32>],
+    start: usize,
+    end: usize,
+) -> (f32, f32, Complex<f32>) {
+    let count = end - start;
     {
         use std::arch::x86_64::*;
 
@@ -343,23 +382,6 @@ pub fn compute_covariance_simd(
 
         (cov_xx, cov_yy, cov_xy)
     }
-
-    #[cfg(not(all(target_arch = "x86_64", target_feature = "avx2")))]
-    {
-        let mut cov_xx = 0.0_f32;
-        let mut cov_yy = 0.0_f32;
-        let mut cov_xy = Complex::new(0.0, 0.0);
-
-        for i in start..end {
-            let l = left[i];
-            let r = right[i];
-            cov_xx += l.norm_sqr();
-            cov_yy += r.norm_sqr();
-            cov_xy += l * r.conj();
-        }
-
-        (cov_xx, cov_yy, cov_xy)
-    }
 }
 
 /// Inverse square root (`1 / sqrt(x)`).
@@ -381,39 +403,10 @@ pub fn find_max_abs_simd(samples: &[f32]) -> f32 {
         return 0.0;
     }
 
-    #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
-    {
-        use std::arch::x86_64::*;
-        let mut max_vec = unsafe { _mm256_setzero_ps() };
-        let abs_mask = unsafe { _mm256_set1_ps(-0.0) };
-        let simd_len = (len / 8) * 8;
-
-        for i in (0..simd_len).step_by(8) {
-            unsafe {
-                let ptr = samples.as_ptr().add(i);
-                let v = _mm256_loadu_ps(ptr);
-                let av = _mm256_andnot_ps(abs_mask, v);
-                max_vec = _mm256_max_ps(max_vec, av);
-            }
-        }
-
-        let mut max_val = 0.0_f32;
-        unsafe {
-            let arr = std::mem::transmute::<__m256, [f32; 8]>(max_vec);
-            for &v in &arr {
-                if v > max_val {
-                    max_val = v;
-                }
-            }
-        }
-
-        for sample in samples.iter().take(len).skip(simd_len) {
-            let v = sample.abs();
-            if v > max_val {
-                max_val = v;
-            }
-        }
-        max_val
+    #[cfg(target_arch = "x86_64")]
+    if super::has_avx2() {
+        // SAFETY: the runtime probe establishes AVX2 support.
+        return unsafe { find_max_abs_avx2(samples) };
     }
 
     #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
@@ -442,10 +435,7 @@ pub fn find_max_abs_simd(samples: &[f32]) -> f32 {
         max_val
     }
 
-    #[cfg(not(any(
-        all(target_arch = "x86_64", target_feature = "avx2"),
-        all(target_arch = "aarch64", target_feature = "neon")
-    )))]
+    #[cfg(not(all(target_arch = "aarch64", target_feature = "neon")))]
     {
         let mut max_val = 0.0_f32;
         for &s in samples {
@@ -456,4 +446,42 @@ pub fn find_max_abs_simd(samples: &[f32]) -> f32 {
         }
         max_val
     }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn find_max_abs_avx2(samples: &[f32]) -> f32 {
+    use std::arch::x86_64::*;
+
+    let len = samples.len();
+    let mut max_vec = _mm256_setzero_ps();
+    let abs_mask = _mm256_set1_ps(-0.0);
+    let simd_len = (len / 8) * 8;
+
+    for i in (0..simd_len).step_by(8) {
+        unsafe {
+            let ptr = samples.as_ptr().add(i);
+            let v = _mm256_loadu_ps(ptr);
+            let av = _mm256_andnot_ps(abs_mask, v);
+            max_vec = _mm256_max_ps(max_vec, av);
+        }
+    }
+
+    let mut max_val = 0.0_f32;
+    unsafe {
+        let arr = std::mem::transmute::<__m256, [f32; 8]>(max_vec);
+        for &v in &arr {
+            if v > max_val {
+                max_val = v;
+            }
+        }
+    }
+
+    for sample in samples.iter().take(len).skip(simd_len) {
+        let v = sample.abs();
+        if v > max_val {
+            max_val = v;
+        }
+    }
+    max_val
 }

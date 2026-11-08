@@ -1,29 +1,17 @@
 /// SIMD-optimized gain application for a single gain value
 #[inline]
 pub fn apply_gain_simd(buffer: &mut [f32], gain: f32) {
-    let len = buffer.len();
-
-    #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
-    {
-        use std::arch::x86_64::*;
-        let gain_vec = unsafe { _mm256_set1_ps(gain) };
-        let simd_len = (len / 8) * 8;
-        for i in (0..simd_len).step_by(8) {
-            unsafe {
-                let ptr = buffer.as_mut_ptr().add(i);
-                let v = _mm256_loadu_ps(ptr);
-                let res = _mm256_mul_ps(v, gain_vec);
-                _mm256_storeu_ps(ptr, res);
-            }
-        }
-        for sample in buffer.iter_mut().take(len).skip(simd_len) {
-            *sample *= gain;
-        }
+    #[cfg(target_arch = "x86_64")]
+    if super::has_avx2() {
+        // SAFETY: the runtime probe establishes AVX2 support.
+        unsafe { apply_gain_avx2(buffer, gain) };
+        return;
     }
 
     #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
     {
         use std::arch::aarch64::*;
+        let len = buffer.len();
         let gain_vec = unsafe { vdupq_n_f32(gain) };
         let simd_len = (len / 4) * 4;
         for i in (0..simd_len).step_by(4) {
@@ -39,14 +27,32 @@ pub fn apply_gain_simd(buffer: &mut [f32], gain: f32) {
         }
     }
 
-    #[cfg(not(any(
-        all(target_arch = "x86_64", target_feature = "avx2"),
-        all(target_arch = "aarch64", target_feature = "neon")
-    )))]
+    #[cfg(not(all(target_arch = "aarch64", target_feature = "neon")))]
     {
         for val in buffer.iter_mut() {
             *val *= gain;
         }
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn apply_gain_avx2(buffer: &mut [f32], gain: f32) {
+    use std::arch::x86_64::*;
+
+    let len = buffer.len();
+    let gain_vec = _mm256_set1_ps(gain);
+    let simd_len = (len / 8) * 8;
+    for i in (0..simd_len).step_by(8) {
+        unsafe {
+            let ptr = buffer.as_mut_ptr().add(i);
+            let v = _mm256_loadu_ps(ptr);
+            let res = _mm256_mul_ps(v, gain_vec);
+            _mm256_storeu_ps(ptr, res);
+        }
+    }
+    for sample in buffer.iter_mut().take(len).skip(simd_len) {
+        *sample *= gain;
     }
 }
 
@@ -75,30 +81,10 @@ pub fn apply_per_channel_gain_simd(buffer: &mut [f32], channels: usize, gains: &
     // We prioritize common channel counts (1, 2, 6, 8) or use scalar for now.
     // For stereo (channels == 2), we can optimize easily.
     if channels == 2 {
-        #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
-        {
-            use std::arch::x86_64::*;
-            let gains_vec = unsafe {
-                _mm256_set_ps(
-                    gains[1], gains[0], gains[1], gains[0], gains[1], gains[0], gains[1], gains[0],
-                )
-            };
-            let simd_len = (num_frames / 4) * 4;
-            for i in (0..simd_len).step_by(4) {
-                unsafe {
-                    let ptr = buffer.as_mut_ptr().add(i * 2);
-                    let v = _mm256_loadu_ps(ptr);
-                    let res = _mm256_mul_ps(v, gains_vec);
-                    _mm256_storeu_ps(ptr, res);
-                }
-            }
-            for i in simd_len..num_frames {
-                buffer[i * 2] *= gains[0];
-                buffer[i * 2 + 1] *= gains[1];
-            }
-            for i in tail_start..len {
-                buffer[i] *= gains[i - tail_start];
-            }
+        #[cfg(target_arch = "x86_64")]
+        if super::has_avx2() {
+            // SAFETY: the runtime probe establishes AVX2 support.
+            unsafe { apply_stereo_gain_avx2(buffer, gains) };
             return;
         }
 
@@ -136,6 +122,35 @@ pub fn apply_per_channel_gain_simd(buffer: &mut [f32], channels: usize, gains: &
         }
     }
     // Trailing partial frame (len % channels != 0)
+    for i in tail_start..len {
+        buffer[i] *= gains[i - tail_start];
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn apply_stereo_gain_avx2(buffer: &mut [f32], gains: &[f32]) {
+    use std::arch::x86_64::*;
+
+    let len = buffer.len();
+    let num_frames = len / 2;
+    let tail_start = num_frames * 2;
+    let gains_vec = _mm256_set_ps(
+        gains[1], gains[0], gains[1], gains[0], gains[1], gains[0], gains[1], gains[0],
+    );
+    let simd_len = (num_frames / 4) * 4;
+    for i in (0..simd_len).step_by(4) {
+        unsafe {
+            let ptr = buffer.as_mut_ptr().add(i * 2);
+            let v = _mm256_loadu_ps(ptr);
+            let res = _mm256_mul_ps(v, gains_vec);
+            _mm256_storeu_ps(ptr, res);
+        }
+    }
+    for i in simd_len..num_frames {
+        buffer[i * 2] *= gains[0];
+        buffer[i * 2 + 1] *= gains[1];
+    }
     for i in tail_start..len {
         buffer[i] *= gains[i - tail_start];
     }

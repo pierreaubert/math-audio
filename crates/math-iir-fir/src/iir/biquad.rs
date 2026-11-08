@@ -557,9 +557,12 @@ impl<T: FilterFloat> Biquad<T> {
         // AVX2 fast path: on x86_64 with AVX2/FMA, process f64 DF1 blocks four
         // samples at a time in the main loop, then a two-sample tail, then a
         // scalar tail. TDF2 and non-f64 types keep the scalar fallback below.
-        #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+        #[cfg(target_arch = "x86_64")]
         {
-            if !self.use_tdf2 && std::any::TypeId::of::<T>() == std::any::TypeId::of::<f64>() {
+            if !self.use_tdf2
+                && std::any::TypeId::of::<T>() == std::any::TypeId::of::<f64>()
+                && crate::cpu::has_avx2_fma()
+            {
                 unsafe {
                     let b = &mut *(self as *mut Biquad<T> as *mut Biquad<f64>);
                     let s = std::slice::from_raw_parts_mut(
@@ -669,7 +672,7 @@ impl<T: FilterFloat> Biquad<T> {
     /// Processes four samples per main-loop iteration using 256-bit loads and
     /// stores, then falls back to the original two-sample AVX2 body and a
     /// scalar tail for any remaining samples.
-    #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+    #[cfg(target_arch = "x86_64")]
     #[target_feature(enable = "avx2,fma")]
     unsafe fn process_block_df1_avx2(b: &mut Biquad<f64>, samples: &mut [f64]) {
         use std::arch::x86_64::*;

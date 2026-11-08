@@ -40,6 +40,7 @@
 #![warn(missing_docs)]
 
 // Module declarations
+mod cpu;
 pub mod crossover;
 pub mod denormals;
 mod error;

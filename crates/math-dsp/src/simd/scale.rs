@@ -4,36 +4,15 @@
 #[inline]
 pub fn scale_add_simd(dst: &mut [f32], src: &[f32], scale: f32) {
     debug_assert_eq!(dst.len(), src.len());
-    let len = dst.len();
 
-    #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
-    {
-        use std::arch::x86_64::*;
-
-        let scale_vec = unsafe { _mm256_set1_ps(scale) };
-        let simd_len = (len / 8) * 8;
-
-        for i in (0..simd_len).step_by(8) {
-            unsafe {
-                let src_ptr = src.as_ptr().add(i);
-                let dst_ptr = dst.as_mut_ptr().add(i);
-
-                let s = _mm256_loadu_ps(src_ptr);
-                let d = _mm256_loadu_ps(dst_ptr);
-
-                // src * scale + dst
-                let ss = _mm256_mul_ps(s, scale_vec);
-                let result = _mm256_add_ps(d, ss);
-
-                _mm256_storeu_ps(dst_ptr, result);
-            }
-        }
-
-        // Scalar remainder
-        for i in simd_len..len {
-            dst[i] += src[i] * scale;
-        }
+    #[cfg(target_arch = "x86_64")]
+    if super::has_avx2() {
+        // SAFETY: the runtime probe establishes AVX2 support.
+        unsafe { scale_add_avx2(dst, src, scale) };
+        return;
     }
+
+    let len = dst.len();
 
     #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
     {
@@ -63,10 +42,7 @@ pub fn scale_add_simd(dst: &mut [f32], src: &[f32], scale: f32) {
         }
     }
 
-    #[cfg(not(any(
-        all(target_arch = "x86_64", target_feature = "avx2"),
-        all(target_arch = "aarch64", target_feature = "neon")
-    )))]
+    #[cfg(not(all(target_arch = "aarch64", target_feature = "neon")))]
     {
         for i in 0..len {
             dst[i] += src[i] * scale;
@@ -79,32 +55,18 @@ pub fn scale_add_simd(dst: &mut [f32], src: &[f32], scale: f32) {
 /// Computes: `data[i] *= scale` for all `i`
 #[inline]
 pub fn scale_add_simd_inplace(data: &mut [f32], scale: f32) {
-    let len = data.len();
-
-    #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
-    {
-        use std::arch::x86_64::*;
-
-        let scale_vec = unsafe { _mm256_set1_ps(scale) };
-        let simd_len = (len / 8) * 8;
-
-        for i in (0..simd_len).step_by(8) {
-            unsafe {
-                let ptr = data.as_mut_ptr().add(i);
-                let d = _mm256_loadu_ps(ptr);
-                _mm256_storeu_ps(ptr, _mm256_mul_ps(d, scale_vec));
-            }
-        }
-
-        for sample in data.iter_mut().take(len).skip(simd_len) {
-            *sample *= scale;
-        }
+    #[cfg(target_arch = "x86_64")]
+    if super::has_avx2() {
+        // SAFETY: the runtime probe establishes AVX2 support.
+        unsafe { scale_inplace_avx2(data, scale) };
+        return;
     }
 
     #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
     {
         use std::arch::aarch64::*;
 
+        let len = data.len();
         let scale_vec = unsafe { vdupq_n_f32(scale) };
         let simd_len = (len / 4) * 4;
 
@@ -121,13 +83,63 @@ pub fn scale_add_simd_inplace(data: &mut [f32], scale: f32) {
         }
     }
 
-    #[cfg(not(any(
-        all(target_arch = "x86_64", target_feature = "avx2"),
-        all(target_arch = "aarch64", target_feature = "neon")
-    )))]
+    #[cfg(not(all(target_arch = "aarch64", target_feature = "neon")))]
     {
         for sample in data {
             *sample *= scale;
         }
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn scale_add_avx2(dst: &mut [f32], src: &[f32], scale: f32) {
+    use std::arch::x86_64::*;
+
+    let len = dst.len();
+    let scale_vec = _mm256_set1_ps(scale);
+    let simd_len = (len / 8) * 8;
+
+    for i in (0..simd_len).step_by(8) {
+        unsafe {
+            let src_ptr = src.as_ptr().add(i);
+            let dst_ptr = dst.as_mut_ptr().add(i);
+
+            let s = _mm256_loadu_ps(src_ptr);
+            let d = _mm256_loadu_ps(dst_ptr);
+
+            // src * scale + dst
+            let ss = _mm256_mul_ps(s, scale_vec);
+            let result = _mm256_add_ps(d, ss);
+
+            _mm256_storeu_ps(dst_ptr, result);
+        }
+    }
+
+    // Scalar remainder
+    for i in simd_len..len {
+        dst[i] += src[i] * scale;
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn scale_inplace_avx2(data: &mut [f32], scale: f32) {
+    use std::arch::x86_64::*;
+
+    let len = data.len();
+    let scale_vec = _mm256_set1_ps(scale);
+    let simd_len = (len / 8) * 8;
+
+    for i in (0..simd_len).step_by(8) {
+        unsafe {
+            let ptr = data.as_mut_ptr().add(i);
+            let d = _mm256_loadu_ps(ptr);
+            _mm256_storeu_ps(ptr, _mm256_mul_ps(d, scale_vec));
+        }
+    }
+
+    for sample in data.iter_mut().take(len).skip(simd_len) {
+        *sample *= scale;
     }
 }

@@ -485,23 +485,16 @@ impl<T: FilterFloat> Fir<T> {
             } else {
                 self.compute_output()
             }
-            #[cfg(all(
-                target_arch = "x86_64",
-                target_feature = "avx2",
-                target_feature = "fma"
-            ))]
-            if uses_f64_simd::<T>() {
+            #[cfg(target_arch = "x86_64")]
+            if uses_f64_simd::<T>() && crate::cpu::has_avx2_fma() {
+                // SAFETY: `T` is `f64` and AVX2/FMA were checked at runtime.
                 unsafe { self.compute_output_f64_avx2(self.state_pos) }
             } else {
                 self.compute_output()
             }
             #[cfg(not(any(
                 all(target_arch = "aarch64", target_feature = "neon"),
-                all(
-                    target_arch = "x86_64",
-                    target_feature = "avx2",
-                    target_feature = "fma"
-                ),
+                target_arch = "x86_64",
             )))]
             {
                 self.compute_output()
@@ -549,12 +542,9 @@ impl<T: FilterFloat> Fir<T> {
     }
 
     fn process_block_symmetric(&mut self, samples: &mut [T]) {
-        #[cfg(all(
-            target_arch = "x86_64",
-            target_feature = "avx2",
-            target_feature = "fma"
-        ))]
-        if uses_f64_simd::<T>() {
+        #[cfg(target_arch = "x86_64")]
+        if uses_f64_simd::<T>() && crate::cpu::has_avx2_fma() {
+            // SAFETY: `T` is `f64` and AVX2/FMA were checked at runtime.
             return unsafe { self.process_block_symmetric_f64_avx2(samples) };
         }
 
@@ -683,11 +673,7 @@ impl<T: FilterFloat> Fir<T> {
     /// # Safety
     /// Must only be called when `T` is `f64` (checked by the caller via
     /// `TypeId::of::<T>() == TypeId::of::<f64>()`) and when AVX2/FMA are available on the host.
-    #[cfg(all(
-        target_arch = "x86_64",
-        target_feature = "avx2",
-        target_feature = "fma"
-    ))]
+    #[cfg(target_arch = "x86_64")]
     #[target_feature(enable = "avx2,fma")]
     #[inline]
     unsafe fn compute_output_f64_avx2(&self, state_pos: usize) -> T {
@@ -761,12 +747,9 @@ impl<T: FilterFloat> Fir<T> {
         if uses_f64_simd::<T>() {
             return unsafe { self.compute_output_symmetric_f64(state_pos, start, half) };
         }
-        #[cfg(all(
-            target_arch = "x86_64",
-            target_feature = "avx2",
-            target_feature = "fma"
-        ))]
-        if uses_f64_simd::<T>() {
+        #[cfg(target_arch = "x86_64")]
+        if uses_f64_simd::<T>() && crate::cpu::has_avx2_fma() {
+            // SAFETY: `T` is `f64` and AVX2/FMA were checked at runtime.
             return unsafe { self.compute_output_symmetric_f64_avx2(state_pos, start, half) };
         }
 
@@ -862,11 +845,7 @@ impl<T: FilterFloat> Fir<T> {
     /// # Safety
     /// Must only be called when `T` is `f64` (checked by the caller via
     /// `TypeId::of::<T>() == TypeId::of::<f64>()`) and when AVX2/FMA are available on the host.
-    #[cfg(all(
-        target_arch = "x86_64",
-        target_feature = "avx2",
-        target_feature = "fma"
-    ))]
+    #[cfg(target_arch = "x86_64")]
     #[target_feature(enable = "avx2,fma")]
     #[inline]
     unsafe fn compute_output_symmetric_f64_avx2(
@@ -953,11 +932,7 @@ impl<T: FilterFloat> Fir<T> {
     /// # Safety
     /// Must only be called when `T` is `f64` (checked by the caller via
     /// `TypeId::of::<T>() == TypeId::of::<f64>()`) and when AVX2/FMA are available on the host.
-    #[cfg(all(
-        target_arch = "x86_64",
-        target_feature = "avx2",
-        target_feature = "fma"
-    ))]
+    #[cfg(target_arch = "x86_64")]
     #[target_feature(enable = "avx2,fma")]
     #[inline(never)]
     unsafe fn process_block_symmetric_f64_avx2(&mut self, samples: &mut [T]) {

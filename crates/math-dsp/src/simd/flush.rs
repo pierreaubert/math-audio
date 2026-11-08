@@ -16,31 +16,11 @@ pub fn flush_denormals_inplace(samples: &mut [f32]) {
     // Values with abs() < MIN_POSITIVE are subnormals (denormals).
     const DENORM_THRESHOLD: f32 = f32::MIN_POSITIVE;
 
-    #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
-    {
-        use std::arch::x86_64::*;
-
-        let threshold = unsafe { _mm256_set1_ps(DENORM_THRESHOLD) };
-        let zero = unsafe { _mm256_set1_ps(0.0) };
-        let len = samples.len();
-        let simd_len = (len / 8) * 8;
-
-        for i in (0..simd_len).step_by(8) {
-            unsafe {
-                let ptr = samples.as_mut_ptr().add(i);
-                let val = _mm256_loadu_ps(ptr);
-                let abs_val = _mm256_andnot_ps(_mm256_set1_ps(-0.0), val);
-                let mask = _mm256_cmp_ps(abs_val, threshold, _CMP_LT_OQ);
-                let result = _mm256_blendv_ps(val, zero, mask);
-                _mm256_storeu_ps(ptr, result);
-            }
-        }
-
-        for sample in samples.iter_mut().take(len).skip(simd_len) {
-            if sample.abs() < DENORM_THRESHOLD {
-                *sample = 0.0;
-            }
-        }
+    #[cfg(target_arch = "x86_64")]
+    if super::has_avx2() {
+        // SAFETY: the runtime probe establishes AVX2 support.
+        unsafe { flush_denormals_avx2(samples, DENORM_THRESHOLD) };
+        return;
     }
 
     #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
@@ -70,15 +50,40 @@ pub fn flush_denormals_inplace(samples: &mut [f32]) {
         }
     }
 
-    #[cfg(not(any(
-        all(target_arch = "x86_64", target_feature = "avx2"),
-        all(target_arch = "aarch64", target_feature = "neon")
-    )))]
+    #[cfg(not(all(target_arch = "aarch64", target_feature = "neon")))]
     {
         for sample in samples {
             if sample.abs() < DENORM_THRESHOLD {
                 *sample = 0.0;
             }
+        }
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn flush_denormals_avx2(samples: &mut [f32], denorm_threshold: f32) {
+    use std::arch::x86_64::*;
+
+    let threshold = _mm256_set1_ps(denorm_threshold);
+    let zero = _mm256_set1_ps(0.0);
+    let len = samples.len();
+    let simd_len = (len / 8) * 8;
+
+    for i in (0..simd_len).step_by(8) {
+        unsafe {
+            let ptr = samples.as_mut_ptr().add(i);
+            let val = _mm256_loadu_ps(ptr);
+            let abs_val = _mm256_andnot_ps(_mm256_set1_ps(-0.0), val);
+            let mask = _mm256_cmp_ps(abs_val, threshold, _CMP_LT_OQ);
+            let result = _mm256_blendv_ps(val, zero, mask);
+            _mm256_storeu_ps(ptr, result);
+        }
+    }
+
+    for sample in samples.iter_mut().take(len).skip(simd_len) {
+        if sample.abs() < denorm_threshold {
+            *sample = 0.0;
         }
     }
 }

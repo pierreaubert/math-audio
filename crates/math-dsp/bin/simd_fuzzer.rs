@@ -46,12 +46,16 @@ fn main() {
     let iterations = args.iterations;
 
     // Platform info
-    #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
-    println!("Platform: x86_64 with AVX2");
+    #[cfg(target_arch = "x86_64")]
+    if std::is_x86_feature_detected!("avx2") {
+        println!("Platform: x86_64 with AVX2");
+    } else {
+        println!("Platform: x86_64 scalar fallback (no AVX2)");
+    }
     #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
     println!("Platform: aarch64 with NEON");
     #[cfg(not(any(
-        all(target_arch = "x86_64", target_feature = "avx2"),
+        target_arch = "x86_64",
         all(target_arch = "aarch64", target_feature = "neon")
     )))]
     println!("Platform: scalar fallback (no SIMD)");

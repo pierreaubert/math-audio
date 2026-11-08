@@ -1,13 +1,14 @@
-#[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+#[cfg(target_arch = "x86_64")]
 use super::misc::SHUFFLE_SWAP_RE_IM;
-#[cfg(all(target_arch = "aarch64", target_feature = "fcma"))]
+#[cfg(target_arch = "aarch64")]
 use super::misc::fcmla_mul_acc;
 use rustfft::num_complex::Complex;
 
-#[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+#[cfg(target_arch = "x86_64")]
 /// # Safety
-/// Caller must ensure `dst`, `src` and `hrtf` have at least `start + 4` elements.
-#[inline]
+/// Caller must ensure AVX2 is available at runtime and that `dst`, `src`
+/// and `hrtf` have at least `start + 4` elements.
+#[target_feature(enable = "avx2")]
 pub unsafe fn complex_mul_add_simd_chunk(
     dst: &mut [Complex<f32>],
     src: &[Complex<f32>],
@@ -56,11 +57,9 @@ pub unsafe fn complex_mul_add_simd_chunk(
     }
 }
 
-#[cfg(all(target_arch = "aarch64", target_feature = "fcma"))]
-/// # Safety
-/// Caller must ensure `dst`, `src` and `hrtf` have at least `start + 2` elements.
-#[inline]
-pub unsafe fn complex_mul_add_simd_chunk(
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "fcma")]
+unsafe fn complex_mul_add_fcma_chunk(
     dst: &mut [Complex<f32>],
     src: &[Complex<f32>],
     hrtf: &[Complex<f32>],
@@ -81,15 +80,9 @@ pub unsafe fn complex_mul_add_simd_chunk(
     }
 }
 
-#[cfg(all(
-    target_arch = "aarch64",
-    target_feature = "neon",
-    not(target_feature = "fcma")
-))]
-/// # Safety
-/// Caller must ensure `dst`, `src` and `hrtf` have at least `start + 2` elements.
-#[inline]
-pub unsafe fn complex_mul_add_simd_chunk(
+#[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
+#[target_feature(enable = "neon")]
+unsafe fn complex_mul_add_neon_chunk(
     dst: &mut [Complex<f32>],
     src: &[Complex<f32>],
     hrtf: &[Complex<f32>],
@@ -129,8 +122,28 @@ pub unsafe fn complex_mul_add_simd_chunk(
     }
 }
 
+#[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
+/// # Safety
+/// Caller must ensure `dst`, `src` and `hrtf` have at least `start + 2` elements.
+#[inline]
+pub unsafe fn complex_mul_add_simd_chunk(
+    dst: &mut [Complex<f32>],
+    src: &[Complex<f32>],
+    hrtf: &[Complex<f32>],
+    start: usize,
+) {
+    if super::has_fcma() {
+        // SAFETY: FCMA was checked at runtime; bounds are the caller's contract.
+        unsafe { complex_mul_add_fcma_chunk(dst, src, hrtf, start) };
+    } else {
+        // SAFETY: NEON is part of the supported AArch64 baseline; bounds are
+        // the caller's contract.
+        unsafe { complex_mul_add_neon_chunk(dst, src, hrtf, start) };
+    }
+}
+
 #[cfg(not(any(
-    all(target_arch = "x86_64", target_feature = "avx2"),
+    target_arch = "x86_64",
     all(target_arch = "aarch64", target_feature = "neon")
 )))]
 #[inline]
@@ -163,12 +176,14 @@ pub fn complex_mul_add_simd(dst: &mut [Complex<f32>], src: &[Complex<f32>], hrtf
     assert_eq!(src.len(), len, "src length must match dst length");
     assert_eq!(hrtf.len(), len, "hrtf length must match dst length");
 
-    #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
-    {
+    #[cfg(target_arch = "x86_64")]
+    if super::has_avx2() {
         // Process 4 complex at a time with AVX2
         let simd_len = (len / 4) * 4;
 
         for i in (0..simd_len).step_by(4) {
+            // SAFETY: AVX2 was checked above and all lengths were asserted
+            // equal, so each chunk stays within the three slices.
             unsafe {
                 complex_mul_add_simd_chunk(dst, src, hrtf, i);
             }
@@ -178,16 +193,25 @@ pub fn complex_mul_add_simd(dst: &mut [Complex<f32>], src: &[Complex<f32>], hrtf
         for i in simd_len..len {
             dst[i] += src[i] * hrtf[i];
         }
+        return;
     }
 
     #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
     {
-        // Process 2 complex at a time with NEON
+        // Process 2 complex at a time with NEON (or FCMA when the runtime
+        // probe finds the optional complex-arithmetic extension).
+        let use_fcma = super::has_fcma();
         let simd_len = (len / 2) * 2;
 
         for i in (0..simd_len).step_by(2) {
+            // SAFETY: the selected kernel's feature was checked above and
+            // all lengths were asserted equal.
             unsafe {
-                complex_mul_add_simd_chunk(dst, src, hrtf, i);
+                if use_fcma {
+                    complex_mul_add_fcma_chunk(dst, src, hrtf, i);
+                } else {
+                    complex_mul_add_neon_chunk(dst, src, hrtf, i);
+                }
             }
         }
 
@@ -197,10 +221,7 @@ pub fn complex_mul_add_simd(dst: &mut [Complex<f32>], src: &[Complex<f32>], hrtf
         }
     }
 
-    #[cfg(not(any(
-        all(target_arch = "x86_64", target_feature = "avx2"),
-        all(target_arch = "aarch64", target_feature = "neon")
-    )))]
+    #[cfg(not(all(target_arch = "aarch64", target_feature = "neon")))]
     {
         // Scalar fallback
         for i in 0..len {
@@ -223,67 +244,21 @@ pub fn complex_mul_simd(dst: &mut [Complex<f32>], src: &[Complex<f32>], hrtf: &[
     assert_eq!(src.len(), len, "src length must match dst length");
     assert_eq!(hrtf.len(), len, "hrtf length must match dst length");
 
-    #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
-    {
-        use std::arch::x86_64::*;
-
-        let simd_len = (len / 4) * 4;
-
-        for i in (0..simd_len).step_by(4) {
-            unsafe {
-                let src_ptr = src.as_ptr().add(i) as *const f32;
-                let hrtf_ptr = hrtf.as_ptr().add(i) as *const f32;
-                let dst_ptr = dst.as_mut_ptr().add(i) as *mut f32;
-
-                let a = _mm256_loadu_ps(src_ptr);
-                let b = _mm256_loadu_ps(hrtf_ptr);
-
-                let a_re = _mm256_moveldup_ps(a);
-                let a_im = _mm256_movehdup_ps(a);
-                let ac_ad = _mm256_mul_ps(a_re, b);
-                let b_swapped = _mm256_shuffle_ps(b, b, SHUFFLE_SWAP_RE_IM);
-                let bd_bc = _mm256_mul_ps(a_im, b_swapped);
-                let result = _mm256_addsub_ps(ac_ad, bd_bc);
-
-                _mm256_storeu_ps(dst_ptr, result);
-            }
-        }
-
-        for i in simd_len..len {
-            dst[i] = src[i] * hrtf[i];
-        }
+    #[cfg(target_arch = "x86_64")]
+    if super::has_avx2() {
+        // SAFETY: the runtime probe establishes AVX2 support.
+        unsafe { complex_mul_avx2(dst, src, hrtf) };
+        return;
     }
 
-    #[cfg(all(target_arch = "aarch64", target_feature = "fcma"))]
-    {
-        use std::arch::aarch64::*;
-
-        let simd_len = (len / 2) * 2;
-
-        for i in (0..simd_len).step_by(2) {
-            unsafe {
-                let src_ptr = src.as_ptr().add(i) as *const f32;
-                let hrtf_ptr = hrtf.as_ptr().add(i) as *const f32;
-                let dst_ptr = dst.as_mut_ptr().add(i) as *mut f32;
-
-                let a = vld1q_f32(src_ptr);
-                let b = vld1q_f32(hrtf_ptr);
-                let r = vdupq_n_f32(0.0);
-                let result = fcmla_mul_acc(r, a, b);
-                vst1q_f32(dst_ptr, result);
-            }
-        }
-
-        for i in simd_len..len {
-            dst[i] = src[i] * hrtf[i];
-        }
+    #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
+    if super::has_fcma() {
+        // SAFETY: the runtime probe establishes FCMA support.
+        unsafe { complex_mul_fcma(dst, src, hrtf) };
+        return;
     }
 
-    #[cfg(all(
-        target_arch = "aarch64",
-        target_feature = "neon",
-        not(target_feature = "fcma")
-    ))]
+    #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
     {
         use std::arch::aarch64::*;
 
@@ -325,10 +300,7 @@ pub fn complex_mul_simd(dst: &mut [Complex<f32>], src: &[Complex<f32>], hrtf: &[
         }
     }
 
-    #[cfg(not(any(
-        all(target_arch = "x86_64", target_feature = "avx2"),
-        all(target_arch = "aarch64", target_feature = "neon")
-    )))]
+    #[cfg(not(all(target_arch = "aarch64", target_feature = "neon")))]
     {
         for i in 0..len {
             dst[i] = src[i] * hrtf[i];
@@ -349,65 +321,21 @@ pub fn complex_mul_inplace_simd(dst: &mut [Complex<f32>], hrtf: &[Complex<f32>])
     let len = dst.len();
     assert_eq!(hrtf.len(), len, "hrtf length must match dst length");
 
-    #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
-    {
-        use std::arch::x86_64::*;
-
-        let simd_len = (len / 4) * 4;
-
-        for i in (0..simd_len).step_by(4) {
-            unsafe {
-                let dst_ptr = dst.as_mut_ptr().add(i) as *mut f32;
-                let hrtf_ptr = hrtf.as_ptr().add(i) as *const f32;
-
-                let a = _mm256_loadu_ps(dst_ptr);
-                let b = _mm256_loadu_ps(hrtf_ptr);
-
-                let a_re = _mm256_moveldup_ps(a);
-                let a_im = _mm256_movehdup_ps(a);
-                let ac_ad = _mm256_mul_ps(a_re, b);
-                let b_swapped = _mm256_shuffle_ps(b, b, SHUFFLE_SWAP_RE_IM);
-                let bd_bc = _mm256_mul_ps(a_im, b_swapped);
-                let result = _mm256_addsub_ps(ac_ad, bd_bc);
-
-                _mm256_storeu_ps(dst_ptr, result);
-            }
-        }
-
-        for i in simd_len..len {
-            dst[i] *= hrtf[i];
-        }
+    #[cfg(target_arch = "x86_64")]
+    if super::has_avx2() {
+        // SAFETY: the runtime probe establishes AVX2 support.
+        unsafe { complex_mul_inplace_avx2(dst, hrtf) };
+        return;
     }
 
-    #[cfg(all(target_arch = "aarch64", target_feature = "fcma"))]
-    {
-        use std::arch::aarch64::*;
-
-        let simd_len = (len / 2) * 2;
-
-        for i in (0..simd_len).step_by(2) {
-            unsafe {
-                let dst_ptr = dst.as_mut_ptr().add(i) as *mut f32;
-                let hrtf_ptr = hrtf.as_ptr().add(i) as *const f32;
-
-                let a = vld1q_f32(dst_ptr);
-                let b = vld1q_f32(hrtf_ptr);
-                let r = vdupq_n_f32(0.0);
-                let result = fcmla_mul_acc(r, a, b);
-                vst1q_f32(dst_ptr, result);
-            }
-        }
-
-        for i in simd_len..len {
-            dst[i] *= hrtf[i];
-        }
+    #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
+    if super::has_fcma() {
+        // SAFETY: the runtime probe establishes FCMA support.
+        unsafe { complex_mul_inplace_fcma(dst, hrtf) };
+        return;
     }
 
-    #[cfg(all(
-        target_arch = "aarch64",
-        target_feature = "neon",
-        not(target_feature = "fcma")
-    ))]
+    #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
     {
         use std::arch::aarch64::*;
 
@@ -448,13 +376,128 @@ pub fn complex_mul_inplace_simd(dst: &mut [Complex<f32>], hrtf: &[Complex<f32>])
         }
     }
 
-    #[cfg(not(any(
-        all(target_arch = "x86_64", target_feature = "avx2"),
-        all(target_arch = "aarch64", target_feature = "neon")
-    )))]
+    #[cfg(not(all(target_arch = "aarch64", target_feature = "neon")))]
     {
         for i in 0..len {
             dst[i] *= hrtf[i];
         }
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn complex_mul_avx2(dst: &mut [Complex<f32>], src: &[Complex<f32>], hrtf: &[Complex<f32>]) {
+    use std::arch::x86_64::*;
+
+    let len = dst.len();
+    let simd_len = (len / 4) * 4;
+
+    for i in (0..simd_len).step_by(4) {
+        unsafe {
+            let src_ptr = src.as_ptr().add(i) as *const f32;
+            let hrtf_ptr = hrtf.as_ptr().add(i) as *const f32;
+            let dst_ptr = dst.as_mut_ptr().add(i) as *mut f32;
+
+            let a = _mm256_loadu_ps(src_ptr);
+            let b = _mm256_loadu_ps(hrtf_ptr);
+
+            let a_re = _mm256_moveldup_ps(a);
+            let a_im = _mm256_movehdup_ps(a);
+            let ac_ad = _mm256_mul_ps(a_re, b);
+            let b_swapped = _mm256_shuffle_ps(b, b, SHUFFLE_SWAP_RE_IM);
+            let bd_bc = _mm256_mul_ps(a_im, b_swapped);
+            let result = _mm256_addsub_ps(ac_ad, bd_bc);
+
+            _mm256_storeu_ps(dst_ptr, result);
+        }
+    }
+
+    for i in simd_len..len {
+        dst[i] = src[i] * hrtf[i];
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn complex_mul_inplace_avx2(dst: &mut [Complex<f32>], hrtf: &[Complex<f32>]) {
+    use std::arch::x86_64::*;
+
+    let len = dst.len();
+    let simd_len = (len / 4) * 4;
+
+    for i in (0..simd_len).step_by(4) {
+        unsafe {
+            let dst_ptr = dst.as_mut_ptr().add(i) as *mut f32;
+            let hrtf_ptr = hrtf.as_ptr().add(i) as *const f32;
+
+            let a = _mm256_loadu_ps(dst_ptr);
+            let b = _mm256_loadu_ps(hrtf_ptr);
+
+            let a_re = _mm256_moveldup_ps(a);
+            let a_im = _mm256_movehdup_ps(a);
+            let ac_ad = _mm256_mul_ps(a_re, b);
+            let b_swapped = _mm256_shuffle_ps(b, b, SHUFFLE_SWAP_RE_IM);
+            let bd_bc = _mm256_mul_ps(a_im, b_swapped);
+            let result = _mm256_addsub_ps(ac_ad, bd_bc);
+
+            _mm256_storeu_ps(dst_ptr, result);
+        }
+    }
+
+    for i in simd_len..len {
+        dst[i] *= hrtf[i];
+    }
+}
+
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "fcma")]
+unsafe fn complex_mul_fcma(dst: &mut [Complex<f32>], src: &[Complex<f32>], hrtf: &[Complex<f32>]) {
+    use std::arch::aarch64::*;
+
+    let len = dst.len();
+    let simd_len = (len / 2) * 2;
+
+    for i in (0..simd_len).step_by(2) {
+        unsafe {
+            let src_ptr = src.as_ptr().add(i) as *const f32;
+            let hrtf_ptr = hrtf.as_ptr().add(i) as *const f32;
+            let dst_ptr = dst.as_mut_ptr().add(i) as *mut f32;
+
+            let a = vld1q_f32(src_ptr);
+            let b = vld1q_f32(hrtf_ptr);
+            let r = vdupq_n_f32(0.0);
+            let result = fcmla_mul_acc(r, a, b);
+            vst1q_f32(dst_ptr, result);
+        }
+    }
+
+    for i in simd_len..len {
+        dst[i] = src[i] * hrtf[i];
+    }
+}
+
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "fcma")]
+unsafe fn complex_mul_inplace_fcma(dst: &mut [Complex<f32>], hrtf: &[Complex<f32>]) {
+    use std::arch::aarch64::*;
+
+    let len = dst.len();
+    let simd_len = (len / 2) * 2;
+
+    for i in (0..simd_len).step_by(2) {
+        unsafe {
+            let dst_ptr = dst.as_mut_ptr().add(i) as *mut f32;
+            let hrtf_ptr = hrtf.as_ptr().add(i) as *const f32;
+
+            let a = vld1q_f32(dst_ptr);
+            let b = vld1q_f32(hrtf_ptr);
+            let r = vdupq_n_f32(0.0);
+            let result = fcmla_mul_acc(r, a, b);
+            vst1q_f32(dst_ptr, result);
+        }
+    }
+
+    for i in simd_len..len {
+        dst[i] *= hrtf[i];
     }
 }
