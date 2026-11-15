@@ -550,7 +550,10 @@ where
                 nfev,
                 sigma,
             };
-            if matches!(callback(&intermediate), CallbackAction::Stop) {
+            if matches!(
+                callback(&intermediate),
+                CallbackAction::Stop | CallbackAction::StopAcceptBest
+            ) {
                 success = true;
                 message = String::from("stopped by callback");
                 break;

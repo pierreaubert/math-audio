@@ -1020,7 +1020,7 @@ where
                         iter,
                     };
                     match cb(&intermediate) {
-                        CallbackAction::Stop => {
+                        CallbackAction::Stop | CallbackAction::StopAcceptBest => {
                             success = true;
                             message = "Optimization stopped by callback".to_string();
                             callback_stopped = true;

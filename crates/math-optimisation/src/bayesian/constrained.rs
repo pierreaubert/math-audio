@@ -369,7 +369,10 @@ where
                 iter: nit,
                 nfev,
             };
-            if matches!(callback(&payload), CallbackAction::Stop) {
+            if matches!(
+                callback(&payload),
+                CallbackAction::Stop | CallbackAction::StopAcceptBest
+            ) {
                 success = true;
                 message = String::from("stopped by callback");
                 break;
