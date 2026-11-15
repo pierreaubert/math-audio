@@ -139,7 +139,10 @@ where
                 nfev: ys.len(),
                 posterior_std: final_std,
             };
-            if matches!(callback(&payload), CallbackAction::Stop) {
+            if matches!(
+                callback(&payload),
+                CallbackAction::Stop | CallbackAction::StopAcceptBest
+            ) {
                 success = true;
                 message = String::from("stopped by callback");
                 break;

@@ -79,6 +79,13 @@ pub struct DEIntermediate {
 pub enum CallbackAction {
     /// Continue optimization.
     Continue,
-    /// Stop optimization early.
+    /// Stop optimization early (cancellation: partial results are
+    /// not a successful outcome for callers that distinguish).
     Stop,
+    /// Stop optimization early and accept the best-so-far candidate
+    /// as the result (e.g. a wall-clock budget elapsed). Solvers
+    /// treat this exactly like [`CallbackAction::Stop`] for search
+    /// control; the distinction is for callers deciding whether a
+    /// stopped run is a usable result or a cancellation.
+    StopAcceptBest,
 }

@@ -875,3 +875,43 @@ mod edge_case_and_error_tests {
         assert!(report.fun.is_finite(), "Best fitness must be finite");
     }
 }
+
+#[cfg(test)]
+mod stop_accept_best_tests {
+    use super::*;
+    use std::sync::Arc;
+
+    #[test]
+    fn test_callback_stop_accept_best_stops_with_success() {
+        // A budget-style stop must end the search at the same
+        // generation as Stop while remaining a successful result
+        // (callers keep the best-so-far candidate).
+        let sphere = |x: &Array1<f64>| x.iter().map(|&xi| xi * xi).sum::<f64>();
+        let call_count = Arc::new(AtomicUsize::new(0));
+        let call_count_clone = call_count.clone();
+        let config = DEConfigBuilder::new()
+            .seed(42)
+            .maxiter(1000)
+            .popsize(10)
+            .tol(0.0)
+            .atol(0.0)
+            .callback(Box::new(move |inter| {
+                call_count_clone.fetch_add(1, Ordering::SeqCst);
+                if inter.iter >= 5 {
+                    CallbackAction::StopAcceptBest
+                } else {
+                    CallbackAction::Continue
+                }
+            }))
+            .build()
+            .expect("popsize must be >= 4");
+        let mut de =
+            DifferentialEvolution::new(&sphere, array![-5.0f64, -5.0], array![5.0f64, 5.0])
+                .unwrap();
+        *de.config_mut() = config;
+        let report = de.solve();
+        assert_eq!(call_count.load(Ordering::SeqCst), 5);
+        assert_eq!(report.nit, 5, "Should stop after 5 iterations");
+        assert!(report.success, "budget stop keeps a successful result");
+    }
+}
