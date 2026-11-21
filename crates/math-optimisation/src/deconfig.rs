@@ -45,6 +45,16 @@ pub struct DEConfig {
     pub integrality: Option<Vec<bool>>,
     /// Optional initial guess used to replace the best member after init.
     pub x0: Option<Array1<f64>>,
+    /// Deliberately constructed candidates seeded into the initial
+    /// population (fresh runs only). Each is clamped to bounds,
+    /// integrality-applied, deduplicated (also against `x0`), and
+    /// truncated to the population size; seeds displace generated rows
+    /// before the initial evaluation, so the fresh budget stays NP.
+    pub seed_candidates: Vec<Array1<f64>>,
+    /// Optional plateau window: accept convergence only after the
+    /// population spread stays within tolerance for this many
+    /// consecutive generations, instead of on a single generation.
+    pub plateau_generations: Option<usize>,
     /// Print objective best at each iteration.
     pub disp: bool,
     /// Optional per-iteration callback (may stop early).
@@ -82,6 +92,8 @@ impl Default for DEConfig {
             seed: None,
             integrality: None,
             x0: None,
+            seed_candidates: Vec::new(),
+            plateau_generations: None,
             disp: false,
             callback: None,
             penalty_ineq: Vec::new(),

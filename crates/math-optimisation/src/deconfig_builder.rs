@@ -115,6 +115,17 @@ impl DEConfigBuilder {
         self.cfg.x0 = Some(v);
         self
     }
+    /// Seeds deliberately constructed candidates into the initial population.
+    pub fn seed_candidates(mut self, v: Vec<Array1<f64>>) -> Self {
+        self.cfg.seed_candidates = v;
+        self
+    }
+    /// Sets the plateau window: consecutive generations within
+    /// tolerance before convergence is accepted.
+    pub fn plateau_generations(mut self, v: usize) -> Self {
+        self.cfg.plateau_generations = Some(v);
+        self
+    }
     /// Enables/disables progress display.
     pub fn disp(mut self, v: bool) -> Self {
         self.cfg.disp = v;

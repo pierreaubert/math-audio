@@ -915,3 +915,86 @@ mod stop_accept_best_tests {
         assert!(report.success, "budget stop keeps a successful result");
     }
 }
+
+#[cfg(test)]
+mod seed_and_plateau_tests {
+    use super::*;
+    use crate::DETermination;
+    use std::sync::Mutex;
+
+    #[test]
+    fn seeds_enter_first_scored_population_within_fresh_budget() {
+        let seen: Mutex<Vec<Vec<f64>>> = Mutex::new(Vec::new());
+        let sphere = |x: &Array1<f64>| {
+            seen.lock().unwrap().push(x.to_vec());
+            x.iter().map(|&xi| xi * xi).sum::<f64>()
+        };
+        let bounds = &[(-1.0, 1.0), (-1.0, 1.0)];
+        let config = DEConfigBuilder::new()
+            .seed(7)
+            .popsize(4)
+            .maxiter(2)
+            .seed_candidates(vec![
+                array![0.1, 0.2],
+                array![0.9, 0.9],
+                array![0.1, 0.2],
+                array![5.0, -5.0],
+            ])
+            .build()
+            .unwrap();
+        let report = crate::differential_evolution(&sphere, bounds, config).unwrap();
+        // Duplicate collapses, out-of-bounds seed clamps: 3 placed.
+        assert_eq!(report.initial_seed_count, 3);
+        let seen = seen.lock().unwrap();
+        let npop = 8;
+        let first: Vec<&Vec<f64>> = seen.iter().take(npop).collect();
+        assert!(
+            first.iter().any(|x| x.as_slice() == [0.1, 0.2]),
+            "{first:?}"
+        );
+        assert!(
+            first.iter().any(|x| x.as_slice() == [0.9, 0.9]),
+            "{first:?}"
+        );
+        assert!(
+            first.iter().any(|x| x.as_slice() == [1.0, -1.0]),
+            "clamped seed present: {first:?}"
+        );
+        // Seeds displace generated rows: no evaluations beyond the
+        // ordinary initial population + generations accounting.
+        assert!(report.nfev <= npop + 2 * npop, "nfev={}", report.nfev);
+    }
+
+    #[test]
+    fn plateau_window_requires_consecutive_generations() {
+        let constant = |_x: &Array1<f64>| 1.0;
+        let bounds = &[(-1.0, 1.0)];
+        let plain = DEConfigBuilder::new()
+            .seed(4)
+            .popsize(4)
+            .maxiter(10)
+            .build()
+            .unwrap();
+        let first = crate::differential_evolution(&constant, bounds, plain).unwrap();
+        assert_eq!(first.termination, DETermination::Converged);
+        assert_eq!(first.nit, 1);
+
+        let plateau = DEConfigBuilder::new()
+            .seed(4)
+            .popsize(4)
+            .maxiter(10)
+            .plateau_generations(3)
+            .build()
+            .unwrap();
+        let later = crate::differential_evolution(&constant, bounds, plateau).unwrap();
+        assert_eq!(
+            later.termination,
+            DETermination::Plateau {
+                window_generations: 3
+            }
+        );
+        assert!(later.success);
+        assert!(later.nit >= 3 && later.nit < 10, "nit={}", later.nit);
+        assert!(later.fun.is_finite());
+    }
+}

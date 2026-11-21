@@ -51,6 +51,7 @@ where
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn finish_report(
         &self,
         pop: Array2<f64>,
@@ -61,6 +62,8 @@ where
         message: String,
         nit: usize,
         nfev: usize,
+        termination: super::dereport::DETermination,
+        initial_seed_count: usize,
     ) -> DEReport {
         DEReport {
             x,
@@ -71,6 +74,8 @@ where
             nfev,
             population: pop,
             population_energies: energies,
+            termination,
+            initial_seed_count,
         }
     }
 

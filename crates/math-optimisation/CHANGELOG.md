@@ -1,3 +1,19 @@
+# 0.5.16
+
+## New features
+
+- DE accepts deliberately constructed `seed_candidates`: clamped,
+  integrality-applied, deduplicated (including against `x0`), and
+  truncated candidates displace generated rows of the initial
+  population before its single evaluation, so the fresh budget stays
+  NP. `DEReport.initial_seed_count` records how many were placed.
+- DE plateau termination: `plateau_generations` requires that many
+  consecutive generations within tolerance before convergence is
+  accepted, and `DEReport.termination` (`DETermination`) types the
+  stop reason (converged, plateau, generation limit, callback stop,
+  callback stop-accept-best, all-fixed) instead of leaving callers
+  to parse the message.
+
 # 0.5.15
 
 ## New features

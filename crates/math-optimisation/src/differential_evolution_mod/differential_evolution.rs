@@ -1,7 +1,7 @@
 use super::super::adaptive_state::AdaptiveState;
 pub(crate) use super::super::argmin::argmin;
 use super::super::deconfig::DEConfig;
-use super::super::dereport::DEReport;
+use super::super::dereport::{DEReport, DETermination};
 pub use super::super::error::{DEError, Result};
 use super::super::strategy::Strategy;
 use super::super::types::CallbackAction;
@@ -207,6 +207,8 @@ where
                 nfev: 1,
                 population: Array2::zeros((1, n)),
                 population_energies: Array1::from(vec![f]),
+                termination: DETermination::AllFixed,
+                initial_seed_count: 0,
             });
         }
 
@@ -282,6 +284,56 @@ where
             }
         };
         npop = pop.nrows();
+
+        // Seed deliberately constructed candidates into the generated
+        // population before its single initial evaluation: clamp,
+        // apply integrality, drop exact duplicates (including against
+        // x0), truncate to NP, and displace the trailing generated
+        // rows. Fresh budget stays NP; resumed runs ignore seeds.
+        let mut initial_seed_count = 0usize;
+        if resume.is_none() && !self.config.seed_candidates.is_empty() {
+            let mut placed: Vec<Array1<f64>> = Vec::new();
+            let x0_clamped = self.config.x0.as_ref().map(|x0| {
+                let mut candidate = x0.clone();
+                for i in 0..candidate.len().min(self.lower.len()) {
+                    candidate[i] = candidate[i].clamp(self.lower[i], self.upper[i]);
+                }
+                candidate
+            });
+            for seed in &self.config.seed_candidates {
+                if placed.len() >= npop {
+                    break;
+                }
+                if seed.len() != n || seed.iter().any(|value| !value.is_finite()) {
+                    continue;
+                }
+                let mut candidate = seed.clone();
+                for i in 0..n {
+                    candidate[i] = candidate[i].clamp(self.lower[i], self.upper[i]);
+                }
+                if let Some(mask) = &self.config.integrality {
+                    apply_integrality(&mut candidate, mask, &self.lower, &self.upper);
+                }
+                if x0_clamped
+                    .as_ref()
+                    .is_some_and(|x0| x0.as_slice() == candidate.as_slice())
+                    || placed
+                        .iter()
+                        .any(|kept: &Array1<f64>| kept.as_slice() == candidate.as_slice())
+                {
+                    continue;
+                }
+                placed.push(candidate);
+            }
+            initial_seed_count = placed.len();
+            for (offset, candidate) in placed.iter().enumerate() {
+                pop.row_mut(npop - placed.len() + offset)
+                    .assign(&candidate.view());
+            }
+            if self.config.disp && initial_seed_count > 0 {
+                eprintln!("  Seeded {initial_seed_count} candidate(s) into the initial population");
+            }
+        }
 
         // Evaluate energies (objective + penalties) for a fresh run only.
         if self.config.disp && resume.is_none() {
@@ -512,6 +564,8 @@ where
 
         // Main loop
         let mut terminal_state = resume.and_then(|state| state.terminal.clone());
+        let mut termination = DETermination::MaxIterations;
+        let mut plateau_streak = 0usize;
         let mut success = terminal_state.as_ref().is_some_and(|state| state.success);
         let mut message = terminal_state
             .as_ref()
@@ -1020,8 +1074,15 @@ where
                         iter,
                     };
                     match cb(&intermediate) {
-                        CallbackAction::Stop | CallbackAction::StopAcceptBest => {
+                        CallbackAction::Stop => {
                             success = true;
+                            termination = DETermination::CallbackStop;
+                            message = "Optimization stopped by callback".to_string();
+                            callback_stopped = true;
+                        }
+                        CallbackAction::StopAcceptBest => {
+                            success = true;
+                            termination = DETermination::CallbackStopAcceptBest;
                             message = "Optimization stopped by callback".to_string();
                             callback_stopped = true;
                         }
@@ -1029,11 +1090,22 @@ where
                     }
                 }
 
-                if !callback_stopped
-                    && iter >= self.config.min_convergence_iter
-                    && pop_std <= convergence_threshold
-                {
+                if pop_std <= convergence_threshold {
+                    plateau_streak += 1;
+                } else {
+                    plateau_streak = 0;
+                }
+                let plateau_window = self.config.plateau_generations;
+                let plateau_met = match plateau_window {
+                    Some(window) => plateau_streak >= window.max(1),
+                    None => plateau_streak >= 1,
+                };
+                if !callback_stopped && iter >= self.config.min_convergence_iter && plateau_met {
                     success = true;
+                    termination = match plateau_window {
+                        Some(window_generations) => DETermination::Plateau { window_generations },
+                        None => DETermination::Converged,
+                    };
                     message = format!(
                         "Converged: std(pop_f)={:.3e} <= threshold={:.3e}",
                         pop_std, convergence_threshold
@@ -1212,6 +1284,8 @@ where
             message,
             nit,
             nfev + polish_nfev,
+            termination,
+            initial_seed_count,
         ))
     }
 }
@@ -1590,6 +1664,15 @@ where
         } else {
             fingerprint.push_str(";x0=none");
         }
+        fingerprint.push_str(&format!(";seeds={}", config.seed_candidates.len()));
+        for (index, seed) in config.seed_candidates.iter().enumerate() {
+            append_fingerprint_vector(
+                &mut fingerprint,
+                &format!("seed_{index}"),
+                seed.iter().copied(),
+            );
+        }
+        fingerprint.push_str(&format!(";plateau={:?}", config.plateau_generations));
         for (index, (_, weight)) in config.penalty_ineq.iter().enumerate() {
             append_fingerprint_float(&mut fingerprint, &format!("ineq_weight_{index}"), *weight);
         }
